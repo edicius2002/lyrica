@@ -8,10 +8,22 @@ blurs the page. Every toolkit that appears to do this is making this same call.
 Two composition modes exist and they are mutually exclusive:
 
 - **Keyed** — a layered window with a transparent colour key. Binary
-  transparency, so black outlines survive, but the accent plate is always a
-  rectangle: `SetWindowRgn` is ignored on a layered window.
-- **Glass** — no colour key. Rounded corners work, but the desktop compositor
-  blends the surface *additively*, because GDI leaves the alpha byte at zero.
+  transparency, so black outlines survive, but no frosting.
+- **Glass** — no colour key. The desktop compositor blends the surface
+  *additively*, because GDI leaves the alpha byte at zero.
+
+**Rounded corners and frosting cannot both be had on this build**, and the
+reason is not the one it looks like. `SetWindowRgn` is accepted and does clip
+the window — measured, with the accent off the desktop shows through at the
+corner. But DWM draws the accent plate over the whole window *rectangle* and
+ignores the region, under acrylic and under the gradient state alike, whichever
+order the two are applied in and whether or not the frame is invalidated
+afterwards. So the corner is not jagged, it is simply not there: the plate
+squares it off again. The attribute that would fix this,
+`DWMWA_WINDOW_CORNER_PREFERENCE`, needs Windows 11 and is refused here.
+
+`research/viability/probe_corners.py` photographs the corner under each
+combination, for when this is worth re-testing on another machine.
 
 Additive blending sounds like a limitation and is closer to a gift: brightness
 becomes opacity, so a dimmed line is just a darker fill with no alpha channel
@@ -26,6 +38,7 @@ from ctypes import wintypes
 logger = logging.getLogger(__name__)
 
 ACCENT_DISABLED = 0
+ACCENT_ENABLE_TRANSPARENTGRADIENT = 2
 ACCENT_ENABLE_BLURBEHIND = 3
 ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 WCA_ACCENT_POLICY = 19
@@ -37,6 +50,20 @@ WCA_ACCENT_POLICY = 19
 # separation but not legibility. Measured: 0xCC reads ~(35,35,42) over a
 # saturated backdrop, 0xA0 visibly drifts light over bright video.
 TINT_RGBA = (12, 12, 16, 132)
+
+# What the panel wears while it is being dragged, calibrated so the switch
+# changes the blur and nothing else.
+#
+# The gradient state blends plainly — plate = (1-a)*desktop + a*tint — while
+# acrylic was measured at plate = 0.388*desktop + 18. Setting (1-a) = 0.388 and
+# a*tint = 18 puts the two on the same line: alpha 156, tint 29. Measured
+# against acrylic over five desktop brightnesses, that lands 18/43/68/96/117
+# where acrylic gives 18/42/67/95/116 — a mean error of 0.9 and a worst of 1,
+# which is measurement noise.
+#
+# The blue is carried up in the same proportion as the acrylic tint's, so the
+# faint cool cast survives the switch too.
+DRAG_TINT_RGBA = (29, 29, 33, 156)
 CORNER_RADIUS = 22
 
 
@@ -118,9 +145,14 @@ def _set_accent(hwnd: int, state: int, tint: int) -> bool:
 def round_corners(root, width: int, height: int, radius: int = CORNER_RADIUS) -> bool:
     """Clip the window to a rounded rectangle.
 
-    Only works on a non-layered window; a layered one ignores the region
-    entirely. The region is in window coordinates, so it has to be reapplied
-    whenever the window is resized.
+    The region is in window coordinates and does not track the window, so it
+    has to be reapplied on every resize.
+
+    Succeeding here is not the same as the corner appearing: an accent plate is
+    drawn over the full rectangle regardless (see the module docstring), so this
+    only shows with the accent off. Left in place because that is the mode a
+    machine without the accent policy falls back to, and because the answer may
+    differ on Windows 11.
     """
     try:
         hwnd = _hwnd_of(root)
@@ -165,23 +197,32 @@ def move_window(root, x: int, y: int) -> bool:
 
 
 def suspend_glass(root, suspended: bool) -> bool:
-    """Turn the blur off for the duration of a drag, and back on after.
+    """Drop the blur for the duration of a drag, and restore it after.
 
     The compositor recomputes the blur for every position a moving window
     passes through, and that work happens outside this process where it cannot
     be measured from here. Everything inside the process measured clean — the
     move lands in ~2.4 ms, the event loop stalls twice in eight seconds — so
-    this is the remaining candidate rather than a diagnosed cause.
+    this is where the cost is, by elimination rather than by direct sighting.
 
-    It costs 0.006 ms to switch either way, measured, which is cheap enough
-    that trying it is more honest than continuing to theorise about it.
+    **What it must not do is switch the accent off.** That was the first
+    version, and it dropped the plate entirely: measured at 0 over every
+    desktop brightness, against acrylic's 18 to 116, so the panel snapped to a
+    flat black rectangle the moment a hand touched it. The blur is the
+    expensive part; the tint costs nothing and there is no reason to lose it.
+
+    So it switches to the gradient state instead, carrying a tint calibrated
+    onto acrylic's own line. The colour is unchanged to within a level and only
+    the frosting stops — which, on a panel that is at that moment sliding
+    across the screen, is the half nobody is looking at.
     """
     try:
         hwnd = _hwnd_of(root)
     except (AttributeError, OSError, ValueError):
         return False
     if suspended:
-        return _set_accent(hwnd, ACCENT_DISABLED, 0)
+        return _set_accent(hwnd, ACCENT_ENABLE_TRANSPARENTGRADIENT,
+                           _abgr(*DRAG_TINT_RGBA))
     return _set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, _abgr(*TINT_RGBA))
 
 
