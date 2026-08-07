@@ -79,10 +79,10 @@ class LineView:
             for _token_index, word_text, _ in row:
                 for ch in word_text:
                     adv = measure(font_obj, key, ch)
-                    # Only in keyed mode, where colour replaces what is behind
-                    # it and nothing else keeps text off a bright background.
-                    # Glass composites additively and the tinted plate is the
-                    # contrast, so an outline there would be invisible anyway.
+                    # Only in keyed mode, the one mode with nothing drawn behind
+                    # the text to keep it off a bright background. Elsewhere the
+                    # cover wash is the contrast, and it is capped to stay that
+                    # way whatever the cover started at.
                     outline = [canvas.create_text(x + dx, row_y + dy, text=ch,
                                                   anchor="nw", font=font,
                                                   fill=OUTLINE_COLOUR)

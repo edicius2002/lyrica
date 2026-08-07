@@ -1,17 +1,25 @@
 """Window chrome: how the overlay sits on the desktop, per platform.
 
-Two modes, chosen by what the platform actually allows rather than by
-preference:
+Three modes, chosen by what the platform allows rather than by preference:
 
-- **GLASS** — the desktop behind is frosted, corners are rounded, and the
-  surface composites additively. Brightness is opacity, so nothing needs an
-  alpha channel and pure black is invisible.
-- **KEYED** — a transparent colour key. Square corners and no frosting, but
-  text can be any colour and needs a dark outline to stay legible over whatever
-  happens to be behind it.
+- **PANEL** — a uniformly alpha-blended window with rounded corners. The
+  desktop behind shows through sharp rather than frosted, and everything drawn
+  is translucent to the same degree, text included. Composition is ordinary
+  replacement inside the surface and a plain blend on the way out.
+- **FROSTED** — the desktop behind is blurred by the compositor and the surface
+  composites *additively*, so brightness doubles as opacity and pure black is
+  invisible. Corners are square and cannot be otherwise: DWM draws the accent
+  plate over the whole window rectangle and ignores the clip region.
+- **KEYED** — a transparent colour key. Square corners, no translucency, and
+  text needs a dark outline to survive whatever is behind it.
 
-The renderer reads the mode and picks a palette; nothing else in the app knows
-the difference.
+Frosting and rounded corners are mutually exclusive on Windows 10, measured
+both ways (`research/viability/probe_corners.py`). PANEL is what this app
+chooses; FROSTED is kept working behind `PREFERRED` so the choice can be undone
+without re-deriving anything.
+
+The renderer reads the mode's composition law and derives a palette from it;
+nothing else in the app knows the difference.
 """
 import logging
 import sys
@@ -19,42 +27,59 @@ import tkinter as tk
 from dataclasses import dataclass
 from enum import Enum
 
+from lyrica import glass
+
 logger = logging.getLogger(__name__)
 
 # The colour key: any pixel drawn in it becomes a hole through the window. An
 # unusual near-black so no real content lands on it by accident.
 KEY_COLOUR = "#010203"
 
-# In glass mode black is not a colour, it is the absence of light — the plate
-# shows through untouched.
-GLASS_BACKGROUND = "#000000"
+# Both translucent modes paint on black. Under frosting that is the absence of
+# light and the plate shows through; under a blended panel it is the darkest
+# the panel can be, which is what makes it read as smoked glass.
+DARK_BACKGROUND = "#000000"
 
 
 class ChromeMode(Enum):
-    GLASS = "glass"
+    PANEL = "panel"
+    FROSTED = "frosted"
     KEYED = "keyed"
+
+
+# Which look to attempt first. Set this to FROSTED to trade the rounded corners
+# back for the blur.
+PREFERRED = ChromeMode.PANEL
+
+# Rounded enough to read as deliberate at a glance, not so round the top line
+# has to be inset to clear it.
+CORNER_RADIUS = 14
+
+# Composition for the colour-keyed fallback: whatever is drawn arrives exactly,
+# over a background this mode knows nothing about.
+KEYED_COMPOSITION = glass.Composition("keyed", 1.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
 class Chrome:
     mode: ChromeMode
     background: str
+    composition: glass.Composition
     scale: float = 1.0
 
     @property
-    def additive(self) -> bool:
-        """True when the surface adds light rather than replacing it."""
-        return self.mode is ChromeMode.GLASS
+    def washed(self) -> bool:
+        """True where a cover wash is drawn behind the text.
+
+        Which is also the question "can a line fade by dissolving into what is
+        behind it" — over a colour key there is nothing behind it to dissolve
+        into but the desktop, and aiming a glyph at that makes a silhouette.
+        """
+        return self.mode is not ChromeMode.KEYED
 
     def px(self, value: float) -> int:
         """A logical measurement in real device pixels."""
         return round(value * self.scale)
-
-
-def _keyed(root: tk.Tk, scale: float = 1.0) -> Chrome:
-    root.configure(bg=KEY_COLOUR)
-    root.attributes("-transparentcolor", KEY_COLOUR)
-    return Chrome(ChromeMode.KEYED, KEY_COLOUR, scale)
 
 
 def prepare() -> float:
@@ -71,36 +96,68 @@ def prepare() -> float:
     return win.set_dpi_awareness()
 
 
+def _keyed(root: tk.Tk, scale: float) -> Chrome:
+    root.configure(bg=KEY_COLOUR)
+    root.attributes("-transparentcolor", KEY_COLOUR)
+    return Chrome(ChromeMode.KEYED, KEY_COLOUR, KEYED_COMPOSITION, scale)
+
+
+def _panel(root: tk.Tk, scale: float) -> Chrome | None:
+    """A uniformly translucent window. Rounded corners follow, where they can.
+
+    Nothing undocumented here — `-alpha` is Tk's own attribute and works on both
+    platforms — which is why this is tried before the accent policy rather than
+    after it.
+    """
+    root.configure(bg=DARK_BACKGROUND)
+    try:
+        root.attributes("-alpha", glass.PANEL_ALPHA)
+    except tk.TclError:
+        logger.info("the display does not support window alpha")
+        return None
+    return Chrome(ChromeMode.PANEL, DARK_BACKGROUND, glass.PANEL, scale)
+
+
+def _frosted(root: tk.Tk, scale: float) -> Chrome | None:
+    if sys.platform != "win32":
+        return None
+    from lyrica.chrome import windows as win
+
+    root.configure(bg=DARK_BACKGROUND)
+    root.update_idletasks()
+    root.update()
+    if win.apply_glass(root):
+        return Chrome(ChromeMode.FROSTED, DARK_BACKGROUND, glass.ACRYLIC, scale)
+    return None
+
+
 def setup(root: tk.Tk, scale: float = 1.0) -> Chrome:
     """Prepare the window and report which mode was achieved.
 
-    Glass is attempted first and the keyed mode is the fallback, so a machine
-    whose compositor refuses the accent policy still gets a working overlay
-    rather than an invisible one.
+    Ordered so a machine that refuses the preferred look still gets a working
+    overlay rather than an invisible one. The keyed mode is last because it is
+    the only one that gives up translucency entirely.
     """
-    if sys.platform != "win32":
-        # macOS has its own vocabulary for this (a visual-effect view) that Tk
-        # does not expose, so the keyed path is what there is for now. It is
-        # honest rather than pretending: `-transparentcolor` is Windows-only,
-        # so on a Mac this yields a plain opaque window.
-        return _keyed(root, scale)
-
-    from lyrica.chrome import windows as win
-
-    root.configure(bg=GLASS_BACKGROUND)
-    root.update_idletasks()
-    root.update()
-
-    if win.apply_glass(root):
-        return Chrome(ChromeMode.GLASS, GLASS_BACKGROUND, scale)
+    order = ([_panel, _frosted] if PREFERRED is ChromeMode.PANEL
+             else [_frosted, _panel])
+    for attempt in order:
+        chrome = attempt(root, scale)
+        if chrome is not None:
+            logger.info("chrome: %s", chrome.mode.value)
+            return chrome
 
     logger.info("falling back to colour-key transparency")
     return _keyed(root, scale)
 
 
 def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
-    """Drop the blur while the window is being moved, restore it after."""
-    if chrome.mode is not ChromeMode.GLASS or sys.platform != "win32":
+    """Drop the expensive part of the window effect while it is being moved.
+
+    Only frosting has one. The compositor recomputes a blur for every position
+    a moving window passes through; a uniform alpha costs the same wherever the
+    window is, so a blended panel has nothing to give up and this does nothing.
+    """
+    if chrome.mode is not ChromeMode.FROSTED or sys.platform != "win32":
         return
     from lyrica.chrome import windows as win
     win.suspend_glass(root, suspended)
@@ -115,34 +172,24 @@ def move(root: tk.Tk, x: int, y: int) -> None:
     root.geometry(f"+{int(x)}+{int(y)}")
 
 
-# Rounded corners are off, and the earlier reason given here was wrong. It said
-# the clip region's binary coverage made the curve a stair-step. Photographing
-# the corner showed something simpler: with the frosting on, the corner is not
-# rounded at all. DWM draws the accent plate over the whole window rectangle and
-# ignores the region, so the curve never reaches the screen to be jagged. See
-# `chrome.windows` for the measurement and what was ruled out.
-#
-# Setting a radius here is therefore only meaningful in the modes that have no
-# accent plate.
-CORNER_RADIUS = 0
-
-
 def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:
     """Clip the window to rounded corners. **Call after the geometry is set.**
 
-    The region is in device pixels and does not track the window, so applying
-    it before the final size clips the window to whatever it was at the time —
+    The region is in device pixels and does not track the window, so applying it
+    before the final size clips the window to whatever it was at the time —
     which shows up as content mysteriously cut off at the right and bottom, not
     as a missing corner. It has to be reapplied on every resize for the same
     reason.
+
+    Frosted mode gets nothing from this and says so: the region is accepted,
+    and then the accent plate is drawn over the whole rectangle anyway.
     """
-    if (chrome.mode is not ChromeMode.GLASS or sys.platform != "win32"
+    if (chrome.mode is not ChromeMode.PANEL or sys.platform != "win32"
             or CORNER_RADIUS <= 0):
-        # A layered window ignores the region entirely, so in keyed mode this
-        # would silently do nothing.
         return False
     from lyrica.chrome import windows as win
     return win.round_corners(root, width, height, chrome.px(CORNER_RADIUS))
 
 
-__all__ = ["GLASS_BACKGROUND", "KEY_COLOUR", "Chrome", "ChromeMode", "setup"]
+__all__ = ["CORNER_RADIUS", "DARK_BACKGROUND", "KEY_COLOUR", "Chrome",
+           "ChromeMode", "setup"]

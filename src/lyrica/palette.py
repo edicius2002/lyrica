@@ -1,9 +1,11 @@
 """Colours for each composition mode, derived from the cover where there is one.
 
-In glass mode the surface adds light, so a level behaves like an opacity:
-drawing at 0x8a rather than 0xff reads as roughly half strength, with no alpha
-channel anywhere. In keyed mode colours replace what is behind them, so the
-values are real colours and legibility comes from an outline instead.
+The window's composition law is an input, not an assumption. Both translucent
+modes are the same shape — `screen = gain * surface + pedestal(desktop)` — and
+the solver below runs against whichever one the chrome achieved, so the same
+derivation serves a frosted plate and a blended panel. What changes between
+them is how hard the clamp bites, and that changes only how much the ladder
+gets compressed.
 
 **The mistake to avoid first**, because it is the obvious design and it does not
 work: you cannot hold both the largest channel and the luminance. Fully
@@ -19,18 +21,21 @@ light it puts out and how much colour it carries — and the level is solved for
     target chroma    = CHROMA[role] x the song's strength
     largest channel <= 138, except for the sung word
 
-138 is the measured clamp ceiling (see `glass`). At or below it a colour reaches
-the screen with its chroma intact on every desktop; above it the chroma lost is
-`level - 138`, linearly. The sung word is the only role allowed past it, because
-it is the one role whose job is light rather than colour.
+The ceiling is the composition's own (see `glass`): at or below it a colour
+reaches the screen with its chroma intact on every desktop, and above it the
+chroma lost is linear in the excess. Under acrylic that lands on 138; under a
+blended panel the pedestal tops out at 46 and there is effectively no ceiling
+at all. The sung word is the only role allowed past it either way, because it
+is the one role whose job is light rather than colour.
 
-The third constraint is the one a greyscale palette silently fails. Over a
-bright desktop the plate adds ~117 to everything, so the sung word at 255 and
-the unsung line at 138 both clamp to 255 and the sweep disappears — measured
-dE 3.4, against 34.5 over a dark desktop. Chroma is what survives the clamp, so
-a coloured song keeps its sweep for free; a neutral one has nothing to keep it
-with and must buy the separation back in level. That is the only place this
-design spends brightness, and it spends it only where it must.
+The third constraint is the one a greyscale palette silently fails, and it is
+what the composition law is here for. Over a bright desktop the acrylic plate
+adds ~117 to everything, so the sung word at 255 and the unsung line at 138
+both clamp to 255 and the sweep disappears — measured dE 3.4, against 34.5 over
+a dark desktop. Chroma is what survives a clamp, so a coloured song keeps its
+sweep for free; a neutral one has nothing to keep it with and must buy the
+separation back in level. A panel that does not clamp pays none of this, which
+is why the rule is solved rather than assumed.
 """
 
 import logging
@@ -38,13 +43,13 @@ from dataclasses import dataclass, field, replace
 
 from lyrica.chrome import Chrome, ChromeMode
 from lyrica.glass import (
-    HEADROOM,
+    PANEL,
+    Composition,
+    contrast,
     delta_e,
     hex_of,
     luminance,
-    plate,
     rgb_of,
-    screen,
     tint,
 )
 from lyrica.songcolour import NEUTRAL, SongColour
@@ -72,13 +77,32 @@ CHROMA = {"sung": 8, "unsung": 46, "side": 58, "far": 34,
 # A role may not fall below this fraction of its anchor luminance to buy colour.
 FLOOR = 0.55
 
-CHROMA_CEILING = HEADROOM        # 138
+# How bright the unsung line is allowed to get. A *design* limit, not a physical
+# one — it is what keeps a step between the line being sung and the line about
+# to be. The composition's own headroom is a separate cap and the two were the
+# same number under acrylic, which is exactly why they need separating: a
+# blended panel barely clamps, so its headroom is 255 and this would otherwise
+# let the unsung line rise until the ladder flattened.
+UNSUNG_CEILING = ANCHOR["unsung"]        # 138
 SUNG_CEILING = 255
 
 # The sweep has to survive the worst desktop there is.
 WORST_DESKTOP = (245, 245, 245)
 SWEEP_DE = 13.0                  # between the sung word and the unsung tail
 MIN_UNSUNG = 92                  # below this the line reads as dim, not as unsung
+
+# What the unsung line must clear against the wash it sits on, as it lands
+# rather than as it is drawn — the desktop puts a pedestal under both and that
+# costs contrast. WCAG's floor for large text is 3.0; the margin is here because
+# both the text colour and the wash are derived, so sitting on the floor means
+# the next cover falls through it. Measured over 41 real covers: without this
+# rule three of them landed under 3:1, worst 2.76.
+#
+# Enforced by giving up chroma, which is the same ordering the rest of the
+# design uses — a role that cannot be both legible and colourful comes out
+# paler, never darker. Grey at the ladder ceiling always clears the floor, so
+# the search always terminates.
+MIN_CONTRAST = 3.2
 
 # How much of the unsung state's compression the rest of the ladder shares. Not
 # all of it: the sweep rule is about one pair of colours, and passing the whole
@@ -153,7 +177,8 @@ def strength_of(song: SongColour) -> float:
     return _clamp((0.30 + 0.70 * song.sat) * conf ** 0.5, 0.0, 1.0)
 
 
-def _sweep_limited(sung: tuple, level_of, sweep_de: float) -> tuple:
+def _sweep_limited(sung: tuple, level_of, sweep_de: float,
+                   law: Composition) -> tuple:
     """The brightest colour that still reads as different from `sung`.
 
     Solved downward from the ceiling rather than up from a luminance target,
@@ -161,26 +186,44 @@ def _sweep_limited(sung: tuple, level_of, sweep_de: float) -> tuple:
     until the sweep rule pulls it back further than it gained. Measured on one
     track, aiming for 86 % of the grey's luminance landed dimmer than aiming
     for 70 %.
+
+    Under a composition that does not clamp this costs nothing and the ceiling
+    is simply taken — which is the point of solving it rather than assuming it.
     """
-    p = plate(WORST_DESKTOP)
-    hi = float(CHROMA_CEILING)
-    if delta_e(screen(p, sung), screen(p, level_of(hi))) >= sweep_de:
+    def seen(surface):
+        return law.compose(WORST_DESKTOP, surface)
+
+    hi = float(UNSUNG_CEILING)
+    if delta_e(seen(sung), seen(level_of(hi))) >= sweep_de:
         return level_of(hi)
     lo = float(MIN_UNSUNG)
     for _ in range(20):
         mid = (lo + hi) / 2
-        if delta_e(screen(p, sung), screen(p, level_of(mid))) >= sweep_de:
+        if delta_e(seen(sung), seen(level_of(mid))) >= sweep_de:
             lo = mid
         else:
             hi = mid
     return level_of(lo)
 
 
-def _derive_neutral(sweep_de: float) -> dict:
+def worst_contrast(colour: tuple, backdrop: tuple, law: Composition) -> float:
+    """Contrast as it lands, over the least favourable desktop there is.
+
+    The pedestal from the desktop sits under the text and its backdrop alike,
+    so it cancels out of the difference but not out of the ratio: it lifts both
+    toward white, and a ratio of two large numbers is smaller. Which desktop is
+    worst depends on the composition, so all of them are tried.
+    """
+    return min(contrast(law.compose((d,) * 3, colour),
+                        law.compose((d,) * 3, backdrop))
+               for d in range(0, 256, 15))
+
+
+def _derive_neutral(sweep_de: float, law: Composition) -> dict:
     """The greyscale ladder, compressed by the same sweep rule as the rest."""
     sung = _grey(255)
-    unsung = _sweep_limited(sung, _grey, sweep_de)
-    comp = luminance(unsung) / (luminance(_grey(CHROMA_CEILING))
+    unsung = _sweep_limited(sung, _grey, sweep_de, law)
+    comp = luminance(unsung) / (luminance(_grey(UNSUNG_CEILING))
                                 * RETAIN["unsung"])
     out = {"sung": sung, "unsung": unsung}
     for role in ROLES:
@@ -195,14 +238,18 @@ def _derive_neutral(sweep_de: float) -> dict:
             else:
                 lo = mid
         out[role] = _grey(hi)
-    p = plate(WORST_DESKTOP)
     return out | {"_meta": (0.0, 0.0, comp,
-                            delta_e(screen(p, sung), screen(p, unsung)))}
+                            delta_e(law.compose(WORST_DESKTOP, sung),
+                                    law.compose(WORST_DESKTOP, unsung)))}
 
 
-def _derive_coloured(hue: float, strength: float, sweep_de: float) -> dict:
+def _derive_coloured(hue: float, strength: float, sweep_de: float,
+                     law: Composition, backdrop: tuple) -> dict:
     sung = solve(hue, luminance((255,) * 3) * RETAIN["sung"],
                  CHROMA["sung"] * strength, SUNG_CEILING)
+    # Chroma survives up to here; past it the clamp eats it linearly. Under a
+    # composition that barely clamps this is simply the ladder's own cap.
+    ceiling = min(law.headroom, float(UNSUNG_CEILING))
 
     # The unsung state is not derived from a luminance target; it takes as much
     # as the two hard constraints leave. Brightness only helps it, and only the
@@ -211,13 +258,30 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float) -> dict:
     got_c = CHROMA["unsung"] * strength
     floor_l = luminance((ANCHOR["unsung"],) * 3) * FLOOR
     unsung = None
-    for _ in range(12):
+    fallback, fallback_score = None, -1.0
+    while True:
         def level_of(lv, c=got_c):
             return tint(lv, hue, min(1.0, c / lv))
-        unsung = _sweep_limited(sung, level_of, sweep_de)
-        if luminance(unsung) >= floor_l or got_c < 4:
+        unsung = _sweep_limited(sung, level_of, sweep_de, law)
+        # Two ways to be too dark for this much colour: too dim against the
+        # ladder it belongs to, or too close to the wash it sits on. Both are
+        # answered by paling out, and the first candidate that clears them is
+        # the most colourful one that does.
+        seen = worst_contrast(unsung, backdrop, law)
+        if luminance(unsung) >= floor_l and seen >= MIN_CONTRAST:
             break
-        got_c *= 0.85       # too dark to be this colourful: give up chroma first
+        # Kept because paling out is not monotone in contrast under every
+        # composition. Measured under acrylic: giving up chroma also forces the
+        # sweep rule to drop the level, and past a point it costs more than it
+        # buys — contrast peaks at 2.50:1 around chroma 30 and falls to 2.26:1
+        # at grey. Taking the last candidate rather than the best would ship
+        # the worst one exactly where the constraint cannot be met at all.
+        if seen > fallback_score:
+            fallback, fallback_score = unsung, seen
+        if got_c < 4:
+            unsung = fallback
+            break
+        got_c *= 0.85
 
     # Everything else follows the unsung state in luminance, so the ladder keeps
     # the shape the greyscale palette gave it whatever the sweep cost.
@@ -231,10 +295,10 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float) -> dict:
         want = luminance((ANCHOR[role],) * 3) * RETAIN[role] * shared
         floor = luminance((ANCHOR[role],) * 3) * FLOOR * shared
         out[role] = solve(hue, max(want, floor), CHROMA[role] * strength,
-                          CHROMA_CEILING)
-    p = plate(WORST_DESKTOP)
+                          ceiling)
     return out | {"_meta": (hue, strength, comp,
-                            delta_e(screen(p, sung), screen(p, unsung)))}
+                            delta_e(law.compose(WORST_DESKTOP, sung),
+                                    law.compose(WORST_DESKTOP, unsung)))}
 
 
 # ------------------------------------------------------------------ palette
@@ -251,7 +315,9 @@ class Palette:
     outline: int
     ramp: list[str]
     glow: bool
-    additive: bool
+    # True where a cover wash is drawn behind the text, so a line can fade by
+    # dissolving into it.
+    washed: bool
     # What a fading line dissolves into. The backdrop image covers the whole
     # window, so this is the artwork wash behind the lyrics, not black.
     backdrop: tuple = (0, 0, 0)
@@ -285,12 +351,12 @@ class Palette:
         trying to hide. What actually vanishes is a glyph the colour of what is
         behind it.
 
-        Replacing composition has no equivalent — dimming a colour there just
-        makes a darker colour, which over a bright background is more visible
-        rather than less — so keyed mode keeps its flat step.
+        A mode with nothing drawn behind the text has no equivalent: dimming a
+        colour there just makes a darker colour, which over a bright background
+        is more visible rather than less. So keyed mode keeps its flat step.
         """
         base = self.by_distance(distance)
-        if not self.additive:
+        if not self.washed:
             return base
         # Quantised and memoised: this is asked per line per frame, and the eye
         # cannot see a step of 1/32 of a fade anyway.
@@ -306,15 +372,19 @@ class Palette:
         return hit
 
 
-def _assemble(colours: dict, *, backdrop: tuple, additive: bool) -> Palette:
+def _assemble(colours: dict, *, backdrop: tuple, law: Composition) -> Palette:
     hue, strength, comp, de = colours["_meta"]
     roles = {r: hex_of(colours[r]) for r in ROLES}
     return Palette(
         **roles,
-        outline=0,      # black is invisible here; the tinted plate is the contrast
+        # No outline: the text sits on the cover wash, which is capped dark
+        # enough to be the contrast by itself.
+        outline=0,
         ramp=_blend_ramp(roles["unsung"], roles["sung"]),
-        glow=True,      # offset copies genuinely add light rather than faking it
-        additive=additive,
+        # Only where the surface adds light. Elsewhere an offset copy replaces
+        # what it lands on and smears instead of glowing.
+        glow=law.additive,
+        washed=True,
         backdrop=backdrop,
         hue=hue,
         strength=strength,
@@ -323,7 +393,8 @@ def _assemble(colours: dict, *, backdrop: tuple, additive: bool) -> Palette:
     )
 
 
-GLASS = _assemble(_derive_neutral(SWEEP_DE), backdrop=(0, 0, 0), additive=True)
+DEFAULT = _assemble(_derive_neutral(SWEEP_DE, PANEL),
+                    backdrop=(0, 0, 0), law=PANEL)
 
 KEYED = Palette(
     sung="#ffffff",
@@ -336,7 +407,7 @@ KEYED = Palette(
     outline=2,          # the only thing keeping text legible over a bright video
     ramp=_blend_ramp("#9aa3b2", "#ffffff"),
     glow=False,         # an offset copy would just smear, with nothing to add to
-    additive=False,
+    washed=False,
 )
 
 GLOW_LEVELS = [f"#{g:02x}{g:02x}{g:02x}" for g in range(RAMP_STEPS)]
@@ -344,7 +415,9 @@ GLOW_LEVELS = [f"#{g:02x}{g:02x}{g:02x}" for g in range(RAMP_STEPS)]
 
 def for_chrome(chrome: Chrome) -> Palette:
     """The palette to start with, before any cover has been seen."""
-    return GLASS if chrome.mode is ChromeMode.GLASS else KEYED
+    if chrome.mode is ChromeMode.KEYED:
+        return KEYED
+    return for_song(chrome, None)
 
 
 def for_song(chrome: Chrome, song: SongColour | None,
@@ -354,15 +427,17 @@ def for_song(chrome: Chrome, song: SongColour | None,
     Keyed mode ignores the cover: its colours have to stay legible over whatever
     video is behind the window, which the artwork says nothing about.
     """
-    if chrome.mode is not ChromeMode.GLASS:
+    if chrome.mode is ChromeMode.KEYED:
         return KEYED
+    law = chrome.composition
     song = song or NEUTRAL
     strength = strength_of(song)
+    backdrop = tuple(backdrop)
     if strength <= 0:
-        colours = _derive_neutral(SWEEP_DE)
+        colours = _derive_neutral(SWEEP_DE, law)
     else:
-        colours = _derive_coloured(song.hue, strength, SWEEP_DE)
-    return _assemble(colours, backdrop=tuple(backdrop), additive=True)
+        colours = _derive_coloured(song.hue, strength, SWEEP_DE, law, backdrop)
+    return _assemble(colours, backdrop=backdrop, law=law)
 
 
 def rebacked(pal: Palette, backdrop: tuple) -> Palette:
