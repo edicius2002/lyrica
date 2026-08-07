@@ -1,0 +1,21 @@
+# Repos externos de referencia (clones de terceros, no son parte del proyecto)
+repos/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Runtime / datos locales
+mvp/cache/
+*.log
+
+# Editor / SO
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
