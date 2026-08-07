@@ -378,12 +378,13 @@ not be made inside a data-layer phase.
       have had to survive PyInstaller.
 - [x] Optional start with Windows — a per-user registry entry, offered only by
       the packaged build because a source checkout cannot name a stable command.
-- [ ] Persist window position, sync offset and provider order — **the one item
-      still open.** Size is remembered
-      ([#66](https://github.com/edicius2002/lyrica/pull/66),
-      [#67](https://github.com/edicius2002/lyrica/pull/67)); position and offset
-      are not, which is inconsistent, and the provider order is still fixed in
-      code.
+- [x] Persist window position and sync offset — kept in a single settings file
+      beside the cache. The *middle* of the window is stored rather than its
+      corner, because the panel collapses to the card for songs with no lyrics
+      and a corner is only true for the width it was taken at: measured
+      reopening 400 px right of where it had been put.
+- [ ] Configurable provider order — still fixed in code. A preference rather
+      than a fix: the current order is measured rather than assumed.
 
 ### 9 — Look and reaction
 
