@@ -16,7 +16,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
 
-from lyrica import artwork, motion
+from lyrica import artwork, config, motion
 from lyrica import chrome as chrome_mod
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
@@ -197,16 +197,16 @@ class Overlay:
         title_font = tkfont.Font(font=self.f_title)
         artist_font = tkfont.Font(font=self.f_artist)
         text_width = max(title_font.measure(title), artist_font.measure(artists))
-        has_cover = self._thumb_photo is not None
-        cover = (self._thumb_size + gap) if has_cover else 0
+        # The cover's space is reserved whether or not it has arrived, so the
+        # card does not shuffle sideways the moment it does.
+        cover = self._thumb_size + gap
         block = cover + text_width
 
         left = max(self.chrome.px(12), (self.width - block) // 2)
         top = self._card_y
 
-        if has_cover:
-            self.canvas.coords(self._thumb_item, left, top,
-                               left + self._thumb_size, top + self._thumb_size)
+        self.canvas.coords(self._thumb_item, left, top,
+                           left + self._thumb_size, top + self._thumb_size)
         text_x = left + cover
         # Both text rows share the cover's vertical centre, so the pair reads as
         # one block rather than as two lines that happen to sit near a square.
@@ -316,25 +316,16 @@ class Overlay:
             )
 
         def work():
-            # The player's own thumbnail first: it is already in memory, so
-            # something appears immediately rather than after a round trip.
-            local = self.reader.read_artwork()
-            if local and gen == self.fetch_gen:
-                self._pending_art = build(local)
-            # Then a proper one. Players publish covers as small as 64 pixels,
-            # which is visibly soft at any size worth drawing. Apple's catalogue
-            # first, then the open archive for what a commercial store does not
-            # carry — obscure pressings and independent releases.
-            # Apple first: official artwork, clean and consistent. Then Discogs
-            # if a token was provided, and the open archive last — both cover
-            # the long tail a commercial catalogue skips, at the cost of
-            # collector scans of uneven quality.
+            # One cover, shown once. Fetching the good one first and only
+            # falling back to the player's own means nothing is ever replaced on
+            # screen. Showing the local thumbnail immediately was faster, but
+            # the swap to the sharp one was visible — and a cover that changes
+            # under you reads worse than one that arrives a moment late.
             wanted = max(300, self._thumb_size * 4)
-            better = (artwork.fetch_cover(artist, title, album, size=wanted)
-                      or artwork.fetch_cover_discogs(artist, title, album)
-                      or artwork.fetch_cover_openly(artist, title))
-            if better and gen == self.fetch_gen:
-                self._pending_art = build(better)
+            data = (artwork.best_cover(artist, title, album, size=wanted)
+                    or self.reader.read_artwork())
+            if data and gen == self.fetch_gen:
+                self._pending_art = build(data)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -599,6 +590,9 @@ def setup_logging() -> Path:
 
 def main():
     setup_logging()
+    # Before anything reads a token: the .env is the fallback for values that
+    # must not be committed, and an exported variable still wins over it.
+    config.load()
     Overlay().run()
 
 

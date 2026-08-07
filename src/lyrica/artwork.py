@@ -25,10 +25,6 @@ HEADERS = {"User-Agent": "lyrica/0.1.0 (personal overlay)"}
 # The open fallback. Also keyless, but slower and patchier — good exactly where
 # a commercial catalogue is not.
 DISCOGS_URL = "https://api.discogs.com/database/search"
-MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/recording"
-COVER_ART_URL = "https://coverartarchive.org/release"
-# MusicBrainz asks callers to identify themselves rather than arrive anonymous.
-MB_HEADERS = {"User-Agent": "lyrica/0.1.0 (personal lyrics overlay; github.com/edicius2002/lyrica)"}
 
 # Downscaled brutally before blurring. A 30-pixel-wide image blurred and scaled
 # back up is both far faster and softer than blurring at full size, and detail
@@ -166,45 +162,14 @@ def fetch_cover_discogs(artist: str, title: str, album: str = "") -> bytes | Non
     return None
 
 
-def fetch_cover_openly(artist: str, title: str, size: int = 500) -> bytes | None:
-    """A cover from MusicBrainz and the Cover Art Archive.
+def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
+    """The best cover any configured source has, or None.
 
-    The open fallback for what Apple's catalogue does not carry — obscure
-    pressings, independent releases, anything outside a commercial store. Also
-    keyless, but slower and patchier, which is why it runs second.
-
-    MusicBrainz asks callers to identify themselves and to stay under a request
-    a second. Both are honoured: this runs once per track, after another source
-    has already failed, so the rate is a non-issue by construction.
+    Apple first: official artwork, square, consistent. Discogs second and only
+    with a token, for the pressings a commercial catalogue skips.
     """
-    query = " AND ".join(
-        part for part in (f'artist:"{artist}"' if artist else "",
-                          f'recording:"{title}"' if title else "") if part)
-    if not query:
-        return None
-    try:
-        r = requests.get(MUSICBRAINZ_URL,
-                         params={"query": query, "fmt": "json", "limit": 3},
-                         headers=MB_HEADERS, timeout=10)
-        r.raise_for_status()
-        recordings = r.json().get("recordings") or []
-    except (requests.RequestException, ValueError):
-        logger.debug("musicbrainz lookup failed for %r", query, exc_info=True)
-        return None
-
-    for recording in recordings:
-        for release in recording.get("releases") or []:
-            mbid = release.get("id")
-            if not mbid:
-                continue
-            try:
-                art = requests.get(f"{COVER_ART_URL}/{mbid}/front-{size}",
-                                   headers=MB_HEADERS, timeout=10)
-                if art.status_code == 200 and art.content:
-                    return art.content
-            except requests.RequestException:
-                continue
-    return None
+    return (fetch_cover(artist, title, album, size=size)
+            or fetch_cover_discogs(artist, title, album))
 
 
 def available() -> bool:
