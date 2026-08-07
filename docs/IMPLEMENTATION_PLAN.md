@@ -1,13 +1,15 @@
 # Implementation Plan and Decision Log
 
-> **Status:** Browsers measured and handled. The overlay resolves tracks from Spotify, YouTube,
-> YouTube Music and SoundCloud.
+> **Status:** Foundation, browsers and hygiene all done. The overlay resolves tracks from Spotify,
+> YouTube, YouTube Music and SoundCloud, and every pull request is linted and tested.
 > **Last updated:** 2026-08-06
-> **Review status:** Phase 5 merged across [#4](https://github.com/edicius2002/lyrica/pull/4),
-> [#6](https://github.com/edicius2002/lyrica/pull/6) and [#8](https://github.com/edicius2002/lyrica/pull/8).
-> **Phase closure:** Steps 0–3 and 5 complete. One check deferred: the overlay outline has not
-> been eyeballed over a genuinely bright background.
-> **Next delivery:** Step 4, hygiene and CI. One issue per slice, written before its work.
+> **Review status:** Phase 4 merged across [#11](https://github.com/edicius2002/lyrica/pull/11),
+> [#12](https://github.com/edicius2002/lyrica/pull/12) and [#13](https://github.com/edicius2002/lyrica/pull/13).
+> **Phase closure:** Steps 0–5 complete. One check deferred: the overlay outline has not been
+> eyeballed over a genuinely bright background.
+> **Next delivery:** Step 6, providers — starting with ranking them by precision
+> ([#10](https://github.com/edicius2002/lyrica/issues/10)). One issue per slice, written before
+> its work.
 
 ---
 
@@ -271,15 +273,19 @@ reported playback position.
 
 ### 4 — Hygiene and CI
 
-**Status:** Not started.
+**Status:** Complete. Delivered in [#11](https://github.com/edicius2002/lyrica/pull/11),
+[#12](https://github.com/edicius2002/lyrica/pull/12) and
+[#13](https://github.com/edicius2002/lyrica/pull/13).
 
-- [ ] `LICENSE` file matching the `pyproject.toml` declaration (decision 5.5)
-- [ ] Pin the `ruff` ruleset explicitly and fix or justify each finding
-- [ ] Replace blind `except Exception` blocks with logged, narrowed handling
-- [ ] Rename `research/viability/test_*.py` to `probe_*.py` — they are probes, not tests, and the
-      name invites accidental collection
-- [ ] GitHub Actions on a Windows runner: lint plus tests
-- [ ] Issue and pull request templates
+- [x] `LICENSE` file matching the `pyproject.toml` declaration (decision 5.5)
+- [x] Pin the `ruff` ruleset explicitly and fix or justify each finding (decision 5.6)
+- [x] Replace blind `except Exception` blocks with logged, narrowed handling (decision 3.10)
+- [x] Logging to a rotating file, since the overlay has no console (decision 5.7)
+- [x] Rename `research/viability/test_*.py` to `probe_*.py`
+- [x] GitHub Actions on a Windows runner: lint plus tests (decision 5.8)
+- [x] Issue and pull request templates
+
+`ruff check .` is clean and the CI run on its own pull request passed in 54 seconds.
 
 ### 5 — Browser validation
 
@@ -307,12 +313,22 @@ read instead. Low priority, since the interpolation being measured is the same c
 
 ### 6 — Providers
 
-**Status:** Not started.
+**Status:** Next. Ranking by precision comes first
+([#10](https://github.com/edicius2002/lyrica/issues/10)), because adding a second provider before
+it would make the cascade worse rather than better.
 
+`fetch_lyrics()` returns the first provider that answers **at all**, which treats every answer as
+equally good. They are not: word-synced beats line-synced beats plain text. So a plain hit from
+an early provider currently beats a synced hit from a later one, and the overlay falls back to
+paging text by percentage — which looks synchronised while being a guess. This is already
+reachable: 2 of the first 7 real plays landed on plain lyrics.
+
+- [ ] Rank result tiers explicitly, stop at the first *synced* answer rather than the first answer
+- [ ] Keep asking while the best in hand is plain, and return the best once everyone has answered
 - [ ] NetEase as a second synced provider behind the same interface
-- [ ] Configurable provider order
+- [ ] Configurable provider order, defaulting to precision
 - [ ] Per-provider diagnostics: which source answered, and how long it took
-- [ ] Cache entries record their source so a better provider can supersede a weaker hit
+- [ ] Cache entries record their tier so a better provider can supersede a weaker hit
 
 ### 7 — Word-by-word
 
@@ -370,6 +386,7 @@ read instead. Low priority, since the interpolation being measured is the same c
 | 3.7 | Browser metadata is normalized before lookup, not inside the provider.           | Noise like "(Official Video)" is a property of how the track was announced, not of who is being asked for lyrics. Every provider would otherwise reimplement the same cleaning.  |
 | 3.8 | A generation counter guards fetches.                                             | Skipping tracks quickly leaves several requests in flight. Without it, a slow response for a previous track can overwrite the lyrics for the current one.                        |
 | 3.9 | tkinter for the overlay; Qt deferred.                                            | tkinter ships with Python and already gives a transparent, always-on-top, click-through-adjacent window. Qt buys better text rendering, which only matters once legibility does. |
+| 3.10 | The reader thread keeps a broad `except`, but logs the traceback.               | It is the overlay's only source of truth. If it dies the window silently freezes on a stale line with nothing to indicate anything is wrong, which is worse than any exception it might swallow. Logging turns the breadth into a visibility cost rather than a diagnosis one. Per-session reads narrow to `OSError`, which is how WinRT reports a session that vanished mid-read. |
 
 ### 4. Sources
 
@@ -393,6 +410,9 @@ Measurements behind these decisions are recorded in [`research/VIABILITY.md`](..
 | 5.3 | Probe scripts are versioned alongside the report they produced.                   | A measurement whose method is not reproducible is an anecdote. The probes are how any of these numbers can be challenged later.                                                   |
 | 5.4 | CI runs on a Windows runner.                                                      | The package imports `winsdk` at module scope, so a Linux runner cannot even import it.                                                                                            |
 | 5.5 | GPL-3.0-or-later.                                                                 | A deliberate choice, not an inherited obligation: no third-party code was copied, so any licence was available. GPL matches the ecosystem this tool grew out of.                  |
+| 5.6 | The lint ruleset is selected explicitly, never inherited.                          | Setting only `line-length` left the enforced rules to whatever the installed ruff defaulted to, so an upgrade could change what the build accepts without a commit. Exemptions are per-file and carry their reason. |
+| 5.7 | Logging goes to a rotating file under `%LOCALAPPDATA%`.                            | The overlay has no console — from the Start menu, or a packaged executable, stderr goes nowhere. Logging into the void is worse than not logging, because the code then reads as though failures are being recorded. |
+| 5.8 | CI stays to one install and two commands, and cancels superseded runs.             | Windows minutes bill at double rate on private repositories, and Windows is not optional (decision 5.4). Keeping the job small is what makes running it on every push affordable. |
 
 ### 6. Browsers
 
@@ -420,6 +440,8 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | S.7 | A companion extension "if drift proves interpolation insufficient" → dropped outright, since it did not (decision 6.1). | 2026-08-06 |
 | S.8 | Title split only when `artist` is empty → ranked readings, since Chrome never leaves it empty (decision 6.2). | 2026-08-06 |
 | S.9 | Overlay rendered with tkinter `Label`s → a `Canvas`, which is the only way to outline text (decision 6.6). | 2026-08-06 |
+| S.10 | Lint rules inherited from ruff's defaults → selected explicitly (decision 5.6).         | 2026-08-06 |
+| S.11 | Failures swallowed silently → logged to a file the user can actually read (decisions 3.10, 5.7). | 2026-08-06 |
 
 ---
 
@@ -435,3 +457,6 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | 2026-08-06 | Browsers measured (#4). Interpolation holds to 0.001 s of spread, so the companion extension is dropped.         |
 | 2026-08-06 | Browser metadata handled (#6). YouTube and SoundCloud now resolve on the exact endpoint instead of missing.      |
 | 2026-08-06 | Overlay text outlined (#8). Step 5 complete; only the bright-background eyeball is deferred.                     |
+| 2026-08-06 | Licence added and probes renamed (#11). The declared licence now has a file behind it.                           |
+| 2026-08-06 | Lint pinned and failures logged (#12). The reader thread keeps its broad catch, but no longer hides why.         |
+| 2026-08-06 | CI on every pull request (#13), verified by its own run. Step 4 complete; next delivery is step 6, providers.    |
