@@ -43,9 +43,13 @@ FADE_ZONE = 42
 # fade band, high enough that the line below clears the bottom one.
 ANCHOR = 0.55
 
-FONT_TITLE = ("Segoe UI Semibold", -16)
-FONT_ARTIST = ("Segoe UI", -13)
-THUMB_SIZE = 46
+FONT_TITLE = ("Segoe UI Semibold", -20)
+FONT_ARTIST = ("Segoe UI", -16)
+THUMB_SIZE = 62
+
+# Kept beside the app rather than only inside the platform module, since the
+# sheen has to know where the curve begins in order to stay away from it.
+CORNER_RADIUS = 22
 # One size for every lyric line. A role change that also changed size would
 # force a relayout, which is a rebuild wearing a different name — and lines
 # reading as louder or quieter rather than bigger or smaller is what the
@@ -181,14 +185,9 @@ class Overlay:
         self.root.bind("<minus>", lambda e: self._nudge(-0.25))
 
     def _build_frame(self):
-        """The parts that never move: the sheen and the header."""
+        """The parts that never move: the top highlight and the card."""
         if self.chrome.additive:
-            # Additive, so three fading lines read as light catching an edge.
-            # In keyed mode there is no plate for it to catch on.
-            inset = self.chrome.px(22)
-            for i, level in enumerate((0x2C, 0x1C, 0x0C)):
-                self.canvas.create_line(inset, 1 + i, self.width - inset, 1 + i,
-                                        fill=f"#{level:02x}{level:02x}{level + 4:02x}")
+            self._draw_sheen()
         # The card: cover, title beside it, artists under the title. Laid out
         # left to right but centred as a group, so it stays put while its own
         # contents change width from song to song.
@@ -205,6 +204,37 @@ class Overlay:
         # outermost line arrives at the top still faintly visible and overlaps
         # it, and the card is the one thing on screen that never moves.
         self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
+
+    def _draw_sheen(self) -> None:
+        """A highlight along the top edge that dissolves before the corners.
+
+        Drawn in segments that fade out at both ends. A single line stopping
+        dead against the curve was the visible seam — a bright edge ending
+        abruptly reads as two different corners rather than one soft one, which
+        is exactly what it looked like.
+
+        It also stays well clear of the curve. The clip region has no
+        antialiasing on this version of Windows, so the corner is a stair-step;
+        putting a bright line beside it only draws the eye to that.
+        """
+        radius = self.chrome.px(CORNER_RADIUS)
+        margin = radius + self.chrome.px(10)
+        span = self.width - margin * 2
+        if span <= 0:
+            return
+        steps = 48
+        fade = 10       # segments over which each end fades away
+        for row, peak in enumerate((0x2E, 0x1D, 0x0D)):
+            for i in range(steps):
+                x0 = margin + span * i / steps
+                x1 = margin + span * (i + 1) / steps + 1
+                edge = min(i, steps - 1 - i)
+                level = round(peak * min(1.0, edge / fade))
+                if level <= 1:
+                    continue
+                self.canvas.create_line(
+                    x0, 1 + row, x1, 1 + row,
+                    fill=f"#{level:02x}{level:02x}{min(255, level + 4):02x}")
 
     def _lay_out_card(self, title: str, artists: str) -> None:
         """Place the card's parts and centre the group."""
