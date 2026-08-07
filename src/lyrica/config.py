@@ -91,6 +91,17 @@ def opacity() -> float:
     return max(OPACITY_MIN, min(OPACITY_MAX, value))
 
 
+def beam_enabled() -> bool:
+    """Whether the border reacts to what is playing.
+
+    On by default and switched off with `LYRICA_BEAM=off`. It keeps the render
+    loop awake at 30 Hz for as long as the overlay is visible, which is the one
+    running cost the overlay has that nothing else asks for.
+    """
+    raw = os.environ.get("LYRICA_BEAM", "").strip().lower()
+    return raw not in ("0", "off", "no", "false")
+
+
 def size_path() -> Path:
     """Where a size chosen with the keyboard is remembered."""
     return cache_root() / "size"
