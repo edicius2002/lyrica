@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
 """Viabilidad amll-ttml-db (letras palabra-por-palabra TTML, gratis en GitHub).
 
  1. Estructura del repo (carpetas por plataforma: ncm/spotify/qq/am).
  2. Lookup directo por ID de Spotify vía raw.githubusercontent / jsDelivr.
  3. Cobertura aproximada para canciones occidentales vs asiáticas.
 """
-import sys, requests
+import sys
+
+import requests
 
 sys.stdout.reconfigure(encoding="utf-8")
 

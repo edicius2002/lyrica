@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Provider cascade with a shared on-disk cache.
 
 `fetch_lyrics()` walks the provider list in order and returns the first hit.
@@ -9,7 +8,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 from lyrica.lyrics import Lyrics
 from lyrica.providers.base import LyricsProvider
@@ -25,10 +23,13 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
     key = f"{artist.lower()}|{title.lower()}|{int(duration)}"
-    return CACHE_DIR / (hashlib.sha1(key.encode()).hexdigest() + ".json")
+    # Naming a file, not protecting anything: the digest just turns arbitrary
+    # track text into a safe filename.
+    digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()
+    return CACHE_DIR / (digest + ".json")
 
 
-def _cache_read(path: Path) -> Optional[Lyrics]:
+def _cache_read(path: Path) -> Lyrics | None:
     d = json.loads(path.read_text(encoding="utf-8"))
     if d.get("miss"):
         return None
@@ -37,7 +38,7 @@ def _cache_read(path: Path) -> Optional[Lyrics]:
     return lyr
 
 
-def _cache_write(path: Path, result: Optional[Lyrics]) -> None:
+def _cache_write(path: Path, result: Lyrics | None) -> None:
     if result is None:
         path.write_text(json.dumps({"miss": True}), encoding="utf-8")
     else:
@@ -48,7 +49,7 @@ def _cache_write(path: Path, result: Optional[Lyrics]) -> None:
 
 
 def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
-                 album: str = "") -> Optional[Lyrics]:
+                 album: str = "") -> Lyrics | None:
     """Cascade through providers for one artist/title pair.
 
     None when no source has the track. The answer, hit or miss, is cached: a
@@ -78,7 +79,7 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
 
 
 def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.0,
-                         album: str = "") -> Optional[Lyrics]:
+                         album: str = "") -> Lyrics | None:
     """Try each artist/title reading in turn and keep the first that resolves.
 
     Browsers disagree about what their metadata fields mean, so a payload can

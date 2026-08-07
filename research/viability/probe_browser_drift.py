@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Probe: score the overlay's interpolation against the page's own clock.
 
 `probe_browser_session.py` showed that Chrome states its position once and never
@@ -25,7 +24,7 @@ import asyncio
 import json
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -47,7 +46,7 @@ async def anchor_for(app_substring: str) -> dict | None:
         pb = s.get_playback_info()
         updated = tl.last_updated_time
         if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
+            updated = updated.replace(tzinfo=UTC)
         return {
             "app": app,
             "title": media.title or "",
@@ -86,7 +85,7 @@ async def main(path: str, app_substring: str):
     errors = []
     print(f"{'page pos':>10} {'predicted':>10} {'error':>9}")
     for s in samples:
-        at = datetime.fromtimestamp(s["wall"] / 1000, tz=timezone.utc)
+        at = datetime.fromtimestamp(s["wall"] / 1000, tz=UTC)
         p = predict(anchor, at)
         err = p - s["pos"]
         errors.append(err)

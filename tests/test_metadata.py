@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Metadata normalization, tested against payloads captured from live sessions.
 
 Every `Snapshot` below was recorded by `research/viability/probe_browser_session.py`

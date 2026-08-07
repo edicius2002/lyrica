@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Lyrica — always-on-top synced lyrics overlay for Windows.
 
 Reads whatever is playing (Spotify app, Chrome with YouTube / YT Music /
@@ -9,9 +8,12 @@ Run:      python -m lyrica   (or the `lyrica` console script)
 Keys:     Esc = quit | right click = quit | drag with mouse = move
           +/- = nudge sync offset by ±0.25 s
 """
+import logging
+import logging.handlers
+import os
 import threading
 import tkinter as tk
-from typing import Optional
+from pathlib import Path
 
 from lyrica.lyrics import Lyrics
 from lyrica.overlay_text import draw_outlined
@@ -40,7 +42,7 @@ ROW_GAP = 6
 class Overlay:
     def __init__(self):
         self.reader = SmtcReader(interval=0.5)
-        self.lyrics: Optional[Lyrics] = None
+        self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
         self.status_msg = "Waiting for music…"
@@ -166,7 +168,31 @@ class Overlay:
         self.reader.stop()
 
 
+def setup_logging() -> Path:
+    """Send logs to a rotating file and return its path.
+
+    The overlay has no console: started from the Start menu or a packaged
+    executable, anything written to stderr goes nowhere. Without a file, the
+    handled exceptions would be logged into the void, which is worse than not
+    logging them because the code reads as though failures are being recorded.
+    """
+    log_dir = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "lyrica.log"
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=512_000, backupCount=2, encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    ))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    return path
+
+
 def main():
+    setup_logging()
     Overlay().run()
 
 

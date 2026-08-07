@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Windows global media session (SMTC) reader.
 
 Runs on a background thread with its own asyncio loop and publishes
@@ -6,11 +5,11 @@ immutable state snapshots in `SmtcReader.snapshot`. Position is
 interpolated by callers via `Snapshot.live_position()`.
 """
 import asyncio
+import logging
 import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from winsdk.windows.media.control import (
     GlobalSystemMediaTransportControlsSessionManager as SessionManager,
@@ -21,17 +20,19 @@ BROWSER_HINTS = ("chrome", "msedge", "firefox", "opera", "brave", "vivaldi")
 
 NOISE = re.compile(
     r"[\(\[][^\)\]]*(official|oficial|video|audio|lyric|letra|visualizer|remaster|hd|4k|mv|m/v)[^\)\]]*[\)\]]",
-    re.I,
+    re.IGNORECASE,
 )
 
 # Bare words re-uploaders append to a title. Only stripped from the end, so a
 # song actually called "Audio" or "Complete" survives anywhere else in the name.
 JUNK_TAIL = re.compile(
     r"(?:\s|^)(full|complete|completa|hq|hd|4k|audio|lyrics?|letra|sub\s*español)\s*$",
-    re.I,
+    re.IGNORECASE,
 )
 
 SEPARATORS = (" - ", " – ", " — ", " | ")
+
+logger = logging.getLogger(__name__)
 
 
 def clean_title(title: str) -> str:
@@ -83,7 +84,7 @@ class Snapshot:
     album: str = ""
     duration: float = 0.0          # seconds; 0 if unknown
     position: float = 0.0          # seconds at the moment `updated_at`
-    updated_at: Optional[datetime] = None  # when that position was reported (UTC)
+    updated_at: datetime | None = None  # when that position was reported (UTC)
     playing: bool = False
     ok: bool = False               # a valid session exists
 
@@ -145,7 +146,7 @@ class Snapshot:
             return 0.0
         pos = self.position
         if self.playing:
-            pos += (datetime.now(timezone.utc) - self.updated_at).total_seconds()
+            pos += (datetime.now(UTC) - self.updated_at).total_seconds()
         if self.duration > 0:
             pos = min(pos, self.duration)
         return max(pos, 0.0)
@@ -174,6 +175,11 @@ class SmtcReader:
             try:
                 self.snapshot = await self._read()
             except Exception:
+                # Deliberately broad: this thread is the overlay's only source
+                # of truth, and if it dies the window freezes on a stale line
+                # with no indication anything is wrong. The traceback is logged,
+                # so breadth costs diagnosis nothing.
+                logger.exception("media session read failed; reporting no session")
                 self.snapshot = Snapshot()
             await asyncio.sleep(self.interval)
 
@@ -187,7 +193,11 @@ class SmtcReader:
         def score(s):
             try:
                 st = s.get_playback_info().playback_status.name
-            except Exception:
+            except OSError:
+                # A session can disappear between being listed and being read;
+                # WinRT surfaces that as an OSError. Rank it last and move on.
+                logger.debug("session %s did not report playback status",
+                             s.source_app_user_model_id)
                 st = ""
             return 2 if st == "PLAYING" else (1 if st == "PAUSED" else 0)
 
@@ -198,7 +208,7 @@ class SmtcReader:
         status = pb.playback_status.name if pb and pb.playback_status else ""
         updated = tl.last_updated_time
         if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
+            updated = updated.replace(tzinfo=UTC)
 
         return Snapshot(
             app=best.source_app_user_model_id or "",

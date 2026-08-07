@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Probe: what the current normalization does to real captured payloads.
 
 Every case below was captured from a live media session by

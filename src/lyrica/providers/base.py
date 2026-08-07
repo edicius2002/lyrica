@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 """Provider interface for lyrics sources."""
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from lyrica.lyrics import Lyrics
 
@@ -13,5 +11,5 @@ class LyricsProvider(ABC):
 
     @abstractmethod
     def fetch(self, artist: str, title: str, duration: float = 0.0,
-              album: str = "") -> Optional[Lyrics]:
+              album: str = "") -> Lyrics | None:
         """Return lyrics for the track, or None if this source has nothing."""
