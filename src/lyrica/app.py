@@ -14,11 +14,27 @@ import tkinter as tk
 from typing import Optional
 
 from lyrica.lyrics import Lyrics
+from lyrica.overlay_text import draw_outlined
 from lyrica.providers import fetch_for_candidates
 from lyrica.smtc import SmtcReader, Snapshot
 
 TRANSPARENT = "#010203"
-WRAP = 880
+WIDTH, HEIGHT = 920, 210
+WRAP = 860
+OUTLINE = 2
+
+FONT_HEADER = ("Segoe UI", 10)
+FONT_SIDE = ("Segoe UI", 14)
+FONT_CURRENT = ("Segoe UI", 24, "bold")
+
+COLOUR_HEADER = "#c9cfda"
+COLOUR_SIDE = "#b6bdc9"
+COLOUR_CURRENT = "#ffffff"
+
+# Muted grey reads as "dimmed" on a dark background and as "nearly invisible"
+# on a bright one. The side lines are therefore only lightly dimmed and lean on
+# the outline for separation instead.
+ROW_GAP = 6
 
 
 class Overlay:
@@ -39,21 +55,13 @@ class Overlay:
         self.root.configure(bg=TRANSPARENT)
 
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        w, h = 920, 190
-        self.root.geometry(f"{w}x{h}+{(sw - w) // 2}+{sh - h - 80}")
+        self.root.geometry(f"{WIDTH}x{HEIGHT}+{(sw - WIDTH) // 2}+{sh - HEIGHT - 80}")
 
-        self.lbl_track = tk.Label(self.root, text="", font=("Segoe UI", 10),
-                                  fg="#8b93a1", bg=TRANSPARENT)
-        self.lbl_prev = tk.Label(self.root, text="", font=("Segoe UI", 14),
-                                 fg="#7a8290", bg=TRANSPARENT, wraplength=WRAP)
-        self.lbl_curr = tk.Label(self.root, text="", font=("Segoe UI", 24, "bold"),
-                                 fg="#ffffff", bg=TRANSPARENT, wraplength=WRAP)
-        self.lbl_next = tk.Label(self.root, text="", font=("Segoe UI", 14),
-                                 fg="#7a8290", bg=TRANSPARENT, wraplength=WRAP)
-        for lbl in (self.lbl_track, self.lbl_prev, self.lbl_curr, self.lbl_next):
-            lbl.pack(pady=1)
+        self.canvas = tk.Canvas(self.root, width=WIDTH, height=HEIGHT, bg=TRANSPARENT,
+                                highlightthickness=0, borderwidth=0)
+        self.canvas.pack(fill="both", expand=True)
 
-        for widget in (self.root, self.lbl_curr, self.lbl_prev, self.lbl_next, self.lbl_track):
+        for widget in (self.root, self.canvas):
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
             widget.bind("<Button-3>", lambda e: self.root.destroy())
@@ -87,13 +95,8 @@ class Overlay:
 
         threading.Thread(target=work, daemon=True).start()
 
-    # --- render ---
-    def _tick(self):
-        snap = self.reader.snapshot
-        if snap.ok and snap.track_key() != self.track_key:
-            self.track_key = snap.track_key()
-            self._start_fetch(snap)
-
+    def _rows(self, snap: Snapshot) -> tuple[str, str, str, str]:
+        """Header plus the previous, current and next lines."""
         artist, title = snap.norm_artist_title() if snap.ok else ("", "")
         header = f"{artist} – {title}" if snap.ok else "Waiting for music…"
         if self.offset:
@@ -112,12 +115,11 @@ class Overlay:
             i = lyr.line_index_at(pos)
             n = len(lyr.lines)
             prev_t = lyr.lines[i - 1][1] if i > 0 else ""
-            curr_t = lyr.lines[i][1] if i >= 0 else "♪"
+            curr_t = (lyr.lines[i][1] if i >= 0 else "") or "♪"
             next_t = lyr.lines[i + 1][1] if -1 <= i < n - 1 else ""
-            curr_t = curr_t or "♪"
         elif lyr.plain:
             # Unsynced: approximate paging by playback progress
-            lines = [l for l in lyr.plain.splitlines() if l.strip()]
+            lines = [ln for ln in lyr.plain.splitlines() if ln.strip()]
             if snap.duration > 0 and lines:
                 i = min(int(snap.live_position() / snap.duration * len(lines)), len(lines) - 1)
                 prev_t = lines[i - 1] if i > 0 else ""
@@ -126,13 +128,34 @@ class Overlay:
             else:
                 curr_t = "Lyrics available but not synced"
 
-        render = (header, prev_t, curr_t, next_t)
-        if render != self.last_render:
-            self.last_render = render
-            self.lbl_track.config(text=header)
-            self.lbl_prev.config(text=prev_t)
-            self.lbl_curr.config(text=curr_t)
-            self.lbl_next.config(text=next_t)
+        return header, prev_t, curr_t, next_t
+
+    # --- render ---
+    def _repaint(self, rows: tuple[str, str, str, str]) -> None:
+        header, prev_t, curr_t, next_t = rows
+        self.canvas.delete("all")
+        x, y = WIDTH // 2, 4
+        for text, font, colour in (
+            (header, FONT_HEADER, COLOUR_HEADER),
+            (prev_t, FONT_SIDE, COLOUR_SIDE),
+            (curr_t, FONT_CURRENT, COLOUR_CURRENT),
+            (next_t, FONT_SIDE, COLOUR_SIDE),
+        ):
+            used = draw_outlined(self.canvas, x, y, text, font=font, fill=colour,
+                                 wrap=WRAP, outline=OUTLINE)
+            if used:
+                y += used + ROW_GAP
+
+    def _tick(self):
+        snap = self.reader.snapshot
+        if snap.ok and snap.track_key() != self.track_key:
+            self.track_key = snap.track_key()
+            self._start_fetch(snap)
+
+        rows = self._rows(snap)
+        if rows != self.last_render:
+            self.last_render = rows
+            self._repaint(rows)
 
         self.root.after(100, self._tick)
 
