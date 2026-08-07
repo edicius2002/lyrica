@@ -27,7 +27,12 @@ dev = [
     "pyinstaller>=6",
 ]
 
-[project.scripts]
+# A GUI launcher, not a console one. `[project.scripts]` builds an executable
+# that allocates a console, which for an always-on-top overlay means a black
+# window sitting behind the lyrics for the entire session. Nothing is lost by
+# dropping it: the app already writes to a log file precisely because it has
+# nowhere else to write.
+[project.gui-scripts]
 lyrica = "lyrica.app:main"
 
 [tool.setuptools.packages.find]
