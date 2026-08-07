@@ -11,6 +11,7 @@ import logging
 import logging.handlers
 import os
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
@@ -258,7 +259,7 @@ class Overlay:
                     # where playback was, so the very next frame recomputed the
                     # old line and undid the jump, then jumped again half a
                     # second later. That bounce is the delay, not the seek.
-                    self._awaiting_seek = target
+                    self._awaiting_seek = (target, time.monotonic())
                     self._go_to_line(index, lyr)
                 return
 
@@ -508,10 +509,16 @@ class Overlay:
         if lyr is not None and lyr.synced and lyr.lines and not self._dragging:
             pos = snap.live_position() + self.offset
             if self._awaiting_seek is not None:
-                if abs(pos - self._awaiting_seek) <= SEEK_SETTLED_S:
+                target, since = self._awaiting_seek
+                # Keep counting from the jump rather than sitting on it. Holding
+                # the position still was what made the highlight freeze after a
+                # click: the sweep had nothing to advance along until the poll
+                # caught up, and then resumed with a lurch.
+                assumed = target + (time.monotonic() - since)
+                if abs(pos - assumed) <= SEEK_SETTLED_S:
                     self._awaiting_seek = None      # the player caught up
                 else:
-                    pos = self._awaiting_seek       # trust the jump, not the poll
+                    pos = assumed                   # trust the jump, not the poll
             index = lyr.line_index_at(pos + LINE_LEAD_S)
             if index != self.line_index:
                 self._go_to_line(index, lyr)
