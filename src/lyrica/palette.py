@@ -72,10 +72,19 @@ RETAIN = {"sung": 0.98, "unsung": 0.78, "side": 0.72, "far": 0.60,
 # channel minus smallest, which is exactly what reaches the glass while the
 # level stays under the ceiling.
 CHROMA = {"sung": 8, "unsung": 46, "side": 58, "far": 34,
-          "title": 20, "artist": 30, "sheen": 26}
+          "title": 44, "artist": 56, "sheen": 26}
 
 # A role may not fall below this fraction of its anchor luminance to buy colour.
 FLOOR = 0.55
+
+# What the card must clear against the wash it sits on. Higher than the lyrics'
+# floor on purpose: the title and the artist are read at a glance rather than
+# followed, and they are the smallest text on the panel. Measured across four
+# hues they land at 8.5-9.0:1 and 4.6-5.0:1 without giving anything up, so this
+# is a guarantee rather than a constraint that bites — but it is the guarantee
+# that lets the card keep the song's colour instead of being whitened for
+# safety.
+CARD_MIN_CONTRAST = 4.0
 
 # How bright the unsung line is allowed to get. A *design* limit, not a physical
 # one — it is what keeps a step between the line being sung and the line about
@@ -310,7 +319,17 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
         anchor = min(ANCHOR[role], top)
         want = luminance((anchor,) * 3) * RETAIN[role] * shared
         floor = luminance((anchor,) * 3) * FLOOR * shared
-        out[role] = solve(hue, max(want, floor), CHROMA[role] * strength, top)
+        got_role = CHROMA[role] * strength
+        for _ in range(12):
+            colour = solve(hue, max(want, floor), got_role, top)
+            if (role not in CARD_ROLES or got_role < 4
+                    or worst_contrast(colour, backdrop, law) >= CARD_MIN_CONTRAST):
+                break
+            # Pale out, never dim: the same ordering the rest of the design
+            # uses. The card keeps as much of the cover's colour as it can
+            # while still standing off the wash behind it.
+            got_role *= 0.85
+        out[role] = colour
     return out | {"_meta": (hue, strength, comp,
                             delta_e(law.compose(WORST_DESKTOP, sung),
                                     law.compose(WORST_DESKTOP, unsung)))}

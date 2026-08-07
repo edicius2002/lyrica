@@ -189,10 +189,26 @@ def test_a_coloured_cover_tints_the_words_and_the_card(chrome):
     p = pal_mod.for_song(chrome, TEAL)
     for role in ("unsung", "side"):
         assert chroma(getattr(p, role)) >= 10, f"{role} came out grey"
-    # The card carries a tint too, but a quieter one: it is read as a label
-    # rather than as the song's colour, so it sits closer to white.
+    # The card carries the cover's colour too. It is brighter than the lyrics
+    # rather than paler than them — the brightness is what makes it stand off
+    # the wash, so the tint does not have to be given up for legibility.
     for role in pal_mod.CARD_ROLES:
-        assert 4 <= chroma(getattr(p, role)) < chroma(p.unsung), role
+        assert chroma(getattr(p, role)) >= 10, f"{role} lost the song's colour"
+
+
+def test_the_card_always_stands_off_the_wash_behind_it():
+    # Panel only. Acrylic caps the card at its clamp ceiling of 138, and its
+    # plate then adds ~117 to the text and the wash alike over a bright
+    # desktop — measured worst 2.68:1, against the panel's 4.39:1. That is the
+    # same limit of additive composition the sweep runs into, not something the
+    # derivation can solve.
+    for wash in WASHES:
+        for hue in range(0, 360, 30):
+            song = SongColour(float(hue), 0.85, 0.45, float(hue), False, (0, 0, 0))
+            p = pal_mod.for_song(PANEL_CHROME, song, wash)
+            for role in pal_mod.CARD_ROLES:
+                got = pal_mod.worst_contrast(rgb_of(getattr(p, role)), wash, PANEL)
+                assert got >= 3.0, f"{role} at hue {hue} lands at {got:.2f}:1"
 
 
 @pytest.mark.parametrize("chrome", LAWS)
