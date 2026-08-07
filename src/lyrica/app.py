@@ -47,9 +47,6 @@ FONT_TITLE = ("Segoe UI Semibold", -20)
 FONT_ARTIST = ("Segoe UI", -16)
 THUMB_SIZE = 62
 
-# Kept beside the app rather than only inside the platform module, since the
-# sheen has to know where the curve begins in order to stay away from it.
-CORNER_RADIUS = 22
 # One size for every lyric line. A role change that also changed size would
 # force a relayout, which is a rebuild wearing a different name — and lines
 # reading as louder or quieter rather than bigger or smaller is what the
@@ -124,7 +121,11 @@ class Overlay:
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
         # virtualised numbers and every geometry it reports is off by the scale.
-        scale_hint = chrome_mod.prepare()
+        # The display's own scale, times whatever size the user asked for. They
+        # multiply because they are the same kind of quantity: both say how many
+        # device pixels a designed unit is worth, and folding them together here
+        # means every measurement downstream is scaled once, by one number.
+        scale_hint = chrome_mod.prepare() * config.size_scale()
 
         self.root = tk.Tk()
         self.root.title("Lyrica")

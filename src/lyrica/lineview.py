@@ -73,7 +73,7 @@ class LineView:
             total = sum(w for _, _, w in row) + space * (len(row) - 1)
             # Never started off the left edge: a word too wide to break would
             # otherwise lose its beginning, which is worse than losing its end.
-            x = max(EDGE_MARGIN, cx - total / 2)
+            x = max(EDGE_MARGIN * scale, cx - total / 2)
             self._row_spans.append((x, x + total))
             row_y = y + r * self.line_height
             for _token_index, word_text, _ in row:
