@@ -234,7 +234,14 @@ Research notes and source-viability scripts live in `research/`.
 
 ## Roadmap
 
-- NetEase as a second synced provider
-- Word-by-word (karaoke) layer: amll-ttml-db / Musixmatch richsync when available
-- Text outline/shadow for readability on light backgrounds
-- PyInstaller packaging
+Everything this once listed has shipped — NetEase, the word-by-word layer, the
+outline, the packaging — so what is left is what is actually left:
+
+- **Remember where the window was, and the sync offset.** The size is
+  remembered and these are not, which is the inconsistency you notice.
+- **A configurable provider order.** Fixed in code today. The current order is
+  measured rather than assumed, so this is a preference rather than a fix.
+- **A release workflow.** CI tests on both platforms but does not build or
+  publish the executable, so `pyinstaller lyrica.spec` is a local step.
+- **macOS on real hardware.** There is a session reader and CI compiles it, but
+  nobody has watched it read a song. Treat that path as unverified.

@@ -264,7 +264,7 @@ reported playback position.
 
 ### 3 — Docs PR
 
-**Status:** In progress on `docs/implementation-plan`.
+**Status:** Complete. This document, merged; the branch it names is long gone.
 
 - [x] `docs/IMPLEMENTATION_PLAN.md` — this file
 - [x] Translate the viability report to English and rename it `research/VIABILITY.md`
@@ -365,12 +365,48 @@ not be made inside a data-layer phase.
 
 ### 8 — Packaging
 
-**Status:** Not started.
+**Status:** Mostly complete. Delivered in
+[#69](https://github.com/edicius2002/lyrica/pull/69) and
+[#70](https://github.com/edicius2002/lyrica/pull/70).
 
-- [ ] PyInstaller executable
-- [ ] System tray icon with show, hide and quit
-- [ ] Optional start with Windows
-- [ ] Persist window position, sync offset and provider order
+- [x] PyInstaller executable — `pyinstaller lyrica.spec`, one file, ~30 MB, no
+      Python on the target machine. `winsdk` needed collecting explicitly or the
+      build started happily and then never noticed a track.
+- [x] System tray icon with show, hide and quit — written against
+      `Shell_NotifyIcon` directly rather than through a library, since the rest
+      of the Windows integration is already ctypes and a dependency would also
+      have had to survive PyInstaller.
+- [x] Optional start with Windows — a per-user registry entry, offered only by
+      the packaged build because a source checkout cannot name a stable command.
+- [ ] Persist window position, sync offset and provider order — **the one item
+      still open.** Size is remembered
+      ([#66](https://github.com/edicius2002/lyrica/pull/66),
+      [#67](https://github.com/edicius2002/lyrica/pull/67)); position and offset
+      are not, which is inconsistent, and the provider order is still fixed in
+      code.
+
+### 9 — Look and reaction
+
+**Status:** Complete for now, and entirely demand-driven rather than planned.
+
+- [x] Colours derived from the cover art, solved against the window's own
+      composition law ([#61](https://github.com/edicius2002/lyrica/pull/61),
+      [#76](https://github.com/edicius2002/lyrica/pull/76)).
+- [x] Rounded corners, traded for the frosting after measuring that DWM draws
+      the accent plate over the whole window rectangle and ignores the clip
+      region ([#63](https://github.com/edicius2002/lyrica/pull/63)).
+- [x] Global shortcuts and a compact panel for songs with no lyrics
+      ([#67](https://github.com/edicius2002/lyrica/pull/67),
+      [#68](https://github.com/edicius2002/lyrica/pull/68),
+      [#73](https://github.com/edicius2002/lyrica/pull/73)).
+- [x] A border that reacts to what is playing, read from the Windows endpoint
+      meter rather than by capturing audio
+      ([#77](https://github.com/edicius2002/lyrica/pull/77),
+      [#80](https://github.com/edicius2002/lyrica/pull/80),
+      [#84](https://github.com/edicius2002/lyrica/pull/84)).
+- [x] Even frame scheduling, which turned out to be why the existing lyric
+      animation stuttered as much as why the new border did
+      ([#79](https://github.com/edicius2002/lyrica/pull/79)).
 
 ---
 
@@ -518,6 +554,11 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 | 2026-08-06 | Browser metadata handled (#6). YouTube and SoundCloud now resolve on the exact endpoint instead of missing.      |
 | 2026-08-06 | Overlay text outlined (#8). Step 5 complete; only the bright-background eyeball is deferred.                     |
 | 2026-08-06 | Licence added and probes renamed (#11). The declared licence now has a file behind it.                           |
+| 2026-08-07 | Packaged, given a tray icon and optional autostart (#69, #70). Step 8 all but closed.                            |
+| 2026-08-07 | Frosting traded for rounded corners after measuring that DWM ignores the clip region under an accent (#63).      |
+| 2026-08-07 | Border made reactive from the endpoint meter, with no audio captured and no dependency added (#77, #80, #84).    |
+| 2026-08-07 | Tempo lookup and tempo-from-loudness both measured and rejected as unreliable; onset rate used instead (#72, #83).|
+| 2026-08-07 | Status corrected: steps 3 and 8 had been reporting stale state, and the roadmap listed shipped work as pending.  |
 | 2026-08-06 | Lint pinned and failures logged (#12). The reader thread keeps its broad catch, but no longer hides why.         |
 | 2026-08-06 | CI on every pull request (#13), verified by its own run. Step 4 complete; next delivery is step 6, providers.    |
 | 2026-08-06 | Answers ranked by precision (#15). The cascade keeps the best result rather than the first one offered.          |
