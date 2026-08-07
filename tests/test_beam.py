@@ -108,3 +108,68 @@ def test_asking_for_even_frames_is_safe_on_any_platform():
 
     chrome_mod.hold_timer_resolution(True)
     chrome_mod.hold_timer_resolution(False)
+
+
+# --- the two styles ---------------------------------------------------------
+
+def _lit(style, level):
+    """What every segment of a ring would be lit to, as brightness 0..255."""
+    import tkinter as tk
+
+    from lyrica import palette as pal_mod
+    from lyrica.beam import Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL, rgb_of
+    from lyrica.songcolour import SongColour
+
+    root = tk.Tk()
+    root.withdraw()
+    canvas = tk.Canvas(root, width=600, height=200)
+    palette = pal_mod.for_song(
+        Chrome(ChromeMode.PANEL, "#000", PANEL),
+        SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
+    ring = Beam(canvas, 600, 200, 18, 1.0, style)
+    ring.advance(0.0, level, palette)
+    levels = [max(rgb_of(s)) for s in ring._shades]
+    root.destroy()
+    return levels
+
+
+def test_the_comet_leaves_most_of_the_ring_dark():
+    # A travelling light needs somewhere dark to travel through; that is the
+    # whole difference between a comet and a lit border.
+    from lyrica.beam import COMET
+
+    levels = _lit(COMET, 1.0)
+    dark = sum(1 for v in levels if v < 40)
+    assert dark > len(levels) * 0.7, "too much of the ring is lit to read as a comet"
+    assert max(levels) > 200, "the head is not bright"
+
+
+def test_the_shine_lights_every_edge_at_once():
+    # Asked for as the quieter alternative: constant across all the borders,
+    # with the colour moving rather than a bright spot.
+    from lyrica.beam import SHINE
+
+    levels = _lit(SHINE, 1.0)
+    assert min(levels) > 50, "part of the border went dark"
+    assert max(levels) - min(levels) > 30, "nothing moves through it"
+
+
+def test_the_shine_stays_lit_with_no_audio_at_all():
+    # There often is none — playback can be rendered on another device
+    # entirely — so silence must not put the border out.
+    from lyrica.beam import SHINE
+
+    assert min(_lit(SHINE, 0.0)) > 20
+
+
+def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
+    from lyrica import config
+
+    monkeypatch.setenv("LYRICA_BEAM", "sparkles")
+    assert config.beam_style() == "comet"
+    monkeypatch.setenv("LYRICA_BEAM", "shine")
+    assert config.beam_style() == "shine"
+    monkeypatch.setenv("LYRICA_BEAM", "off")
+    assert config.beam_style() == "off"

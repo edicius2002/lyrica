@@ -91,15 +91,28 @@ def opacity() -> float:
     return max(OPACITY_MIN, min(OPACITY_MAX, value))
 
 
-def beam_enabled() -> bool:
-    """Whether the border reacts to what is playing.
+BEAM_STYLES = ("comet", "shine")
 
-    On by default and switched off with `LYRICA_BEAM=off`. It keeps the render
-    loop awake at 30 Hz for as long as the overlay is visible, which is the one
-    running cost the overlay has that nothing else asks for.
+
+def beam_style() -> str:
+    """How the border reacts to what is playing: `comet`, `shine` or `off`.
+
+    `comet` is a bright head travelling a dark ring. `shine` lights the whole
+    border and rotates a gradient through it, so every edge stays lit and what
+    moves is the colour — quieter to sit beside while reading.
+
+    Either keeps the render loop awake for as long as the overlay is visible,
+    which is the one running cost the overlay has that nothing else asks for.
     """
     raw = os.environ.get("LYRICA_BEAM", "").strip().lower()
-    return raw not in ("0", "off", "no", "false")
+    if raw in ("0", "off", "no", "false"):
+        return "off"
+    if raw in BEAM_STYLES:
+        return raw
+    if raw:
+        logger.warning("LYRICA_BEAM=%r is not one of %s or off; using comet",
+                       raw, ", ".join(BEAM_STYLES))
+    return "comet"
 
 
 def size_path() -> Path:

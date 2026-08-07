@@ -98,11 +98,12 @@ CONTEXT = 1
 # not crossed by accident.
 SIZE_STEP = 0.1
 
-# The border beam runs at 30 Hz rather than 60. It is a slow glow at the edge of
-# vision, and the loop is otherwise idle at 10 Hz between lyric lines — this is
-# the compromise between a beam that moves smoothly and an overlay that spins
-# the processor for a decoration nobody is looking straight at.
-BEAM_TICK_MS = 33
+# The border runs at the same rate as the lyric sweep. It was 30 Hz while the
+# loop could not keep an even 30 — measured at 22, with frames landing 2 ms
+# apart from where they belonged. Now that the scheduler holds a millisecond,
+# 60 Hz costs about half a millisecond a frame more and there is no reason to
+# animate one thing on the panel more coarsely than another.
+BEAM_TICK_MS = FAST_TICK_MS
 
 # What a track's lyrics are known to be. Three states rather than two, and the
 # third is the whole point: `None` lyrics means both "still asking" and "nobody
@@ -317,10 +318,11 @@ class Overlay:
 
         # Laid before the card and the lines so it can never sit on top of a
         # word; it lives at the very edge, where nothing else is drawn.
-        if config.beam_enabled() and self.chrome.washed:
+        style = config.beam_style()
+        if style != "off" and self.chrome.washed:
             self.beam = beam_mod.Beam(self.canvas, self.width, self.height,
                                       self.chrome.px(chrome_mod.CORNER_RADIUS),
-                                      self.chrome.scale)
+                                      self.chrome.scale, style)
 
         # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
