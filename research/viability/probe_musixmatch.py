@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Viabilidad Musixmatch NO OFICIAL (API de la app de escritorio).
 
 Prueba las condiciones reales:
@@ -7,7 +6,10 @@ Prueba las condiciones reales:
  3. ¿Aparecen captchas / límites?
 Esto es un endpoint no documentado: puede romperse o bloquearse en cualquier momento.
 """
-import sys, time, json
+import json
+import sys
+import time
+
 import requests
 
 sys.stdout.reconfigure(encoding="utf-8")

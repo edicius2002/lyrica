@@ -1,10 +1,8 @@
-# -*- coding: utf-8 -*-
 """LRCLIB provider (https://lrclib.net) — free, keyless, no rate limits.
 
 Lookup strategy: exact /get first (duration-matched ±2 s server-side),
 then fuzzy /search scored by artist/title/duration similarity.
 """
-from typing import Optional
 
 import requests
 
@@ -15,7 +13,7 @@ API = "https://lrclib.net/api"
 HEADERS = {"User-Agent": "lyrica/0.1.0 (personal research overlay)"}
 
 
-def _from_record(d: dict, source: str) -> Optional[Lyrics]:
+def _from_record(d: dict, source: str) -> Lyrics | None:
     if d.get("instrumental"):
         return Lyrics(instrumental=True, source=source)
     if d.get("syncedLyrics"):
@@ -48,7 +46,7 @@ class LrclibProvider(LyricsProvider):
     name = "lrclib"
 
     def fetch(self, artist: str, title: str, duration: float = 0.0,
-              album: str = "") -> Optional[Lyrics]:
+              album: str = "") -> Lyrics | None:
         if not title:
             return None
 
@@ -61,7 +59,7 @@ class LrclibProvider(LyricsProvider):
         if album:
             base["album_name"] = album
         if duration > 1:
-            attempts.append({**base, "duration": int(round(duration))})
+            attempts.append({**base, "duration": round(duration)})
         attempts.append(base)
 
         for params in attempts:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Viabilidad LRCLIB: cobertura, latencia y comportamiento sin API key.
 
 Prueba tres perfiles de metadata reales:
@@ -6,7 +5,10 @@ Prueba tres perfiles de metadata reales:
   - youtube: títulos sucios de video, sin duración confiable
   - soundcloud: remixes/underground con títulos no estándar
 """
-import sys, time, json, statistics
+import statistics
+import sys
+import time
+
 import requests
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -40,7 +42,7 @@ TESTS = [
 
 def clean_title(t: str) -> str:
     import re
-    t = re.sub(r"[\(\[][^\)\]]*(official|video|remaster|audio|lyric|hd|4k|mv)[^\)\]]*[\)\]]", "", t, flags=re.I)
+    t = re.sub(r"[\(\[][^\)\]]*(official|video|remaster|audio|lyric|hd|4k|mv)[^\)\]]*[\)\]]", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s{2,}", " ", t)
     return t.strip(" -|")
 
@@ -80,7 +82,7 @@ def main():
         results.setdefault(profile, []).append(kind)
         extra = ""
         if kind == "MISS":
-            k2, ms2, tn, an = search_fallback(artist, track)
+            k2, _, tn, an = search_fallback(artist, track)
             extra = f"  -> /search fallback: {k2}" + (f" ('{tn}' - {an})" if tn else "")
             results[profile][-1] = f"MISS->{k2}"
         print(f"[{profile:10s}] {kind:6s} {ms:6.0f}ms HTTP{code}  {artist} - {track}{extra}")
@@ -94,7 +96,7 @@ def main():
     print("\n=== Ráfaga: 30 requests seguidas (detectar 429/bloqueo) ===")
     codes, burst_lat = [], []
     t0 = time.perf_counter()
-    for i in range(30):
+    for _ in range(30):
         t1 = time.perf_counter()
         r = requests.get(f"{API}/get", params={"artist_name": "Coldplay", "track_name": "Yellow", "duration": 269},
                          headers=HEADERS, timeout=10)

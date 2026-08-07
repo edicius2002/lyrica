@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Outlined text rendering for the overlay canvas.
 
 tkinter has no text outline, and the overlay needs one: over a browser the

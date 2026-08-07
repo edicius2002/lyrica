@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Probe: what browsers actually publish to the Windows media session.
 
 Answers two questions the overlay currently assumes rather than observes:
@@ -26,7 +25,7 @@ import asyncio
 import json
 import statistics
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -50,7 +49,7 @@ async def read_all():
             pb = s.get_playback_info()
             updated = tl.last_updated_time
             if updated is not None and updated.tzinfo is None:
-                updated = updated.replace(tzinfo=timezone.utc)
+                updated = updated.replace(tzinfo=UTC)
             out.append({
                 "app": s.source_app_user_model_id or "",
                 "artist": media.artist or "",
@@ -95,7 +94,6 @@ async def run(seconds: float, label: str):
 
     t_end = asyncio.get_event_loop().time() + seconds
     while asyncio.get_event_loop().time() < t_end:
-        now = datetime.now(timezone.utc)
         for s in await read_all():
             app = s["app"]
             if "error" in s:

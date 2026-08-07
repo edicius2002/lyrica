@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 """Viabilidad del paquete `syncedlyrics` como agregador multi-proveedor.
 
 Prueba cada proveedor por separado para mapear condiciones reales
 (qué responde, qué está caído, qué tiene captcha).
 """
-import sys, time
+import sys
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Outline geometry, tested without a display.
 
 `draw_outlined` needs a live tkinter canvas, so only the offset geometry is

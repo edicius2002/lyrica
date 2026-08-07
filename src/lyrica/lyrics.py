@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Lyrics data model and LRC parsing."""
 import re
 from dataclasses import dataclass, field

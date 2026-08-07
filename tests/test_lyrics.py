@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Unit tests for LRC parsing and the Lyrics model (offline)."""
 from lyrica.lyrics import Lyrics, parse_lrc
 

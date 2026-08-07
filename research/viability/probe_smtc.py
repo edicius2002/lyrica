@@ -1,11 +1,12 @@
-# -*- coding: utf-8 -*-
 """Viabilidad SMTC (Windows Global System Media Transport Controls).
 
 Lista todas las sesiones de medios activas (Spotify app, Chrome, etc.),
 muestra metadata y monitorea la posición durante unos segundos para medir
 la precisión de actualización por fuente.
 """
-import sys, asyncio, time
+import asyncio
+import sys
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -38,7 +39,6 @@ async def dump_sessions(seconds: float = 12.0, interval: float = 1.0):
                 pb = s.get_playback_info()
                 pos_s = tl.position.total_seconds()
                 dur_s = tl.end_time.total_seconds()
-                last_upd = tl.last_updated_time
                 status = pb.playback_status.name if pb and pb.playback_status else "?"
                 delta = ""
                 if app in prev_pos:
