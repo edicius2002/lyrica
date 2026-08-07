@@ -1,4 +1,6 @@
 """Reading a local .env, for values that must not be committed (offline)."""
+import pytest
+
 from lyrica import config
 from lyrica.config import find_env, load, parse
 
@@ -86,35 +88,80 @@ def test_an_unreadable_file_is_not_an_error(tmp_path, monkeypatch):
 
 # --- how big the overlay is drawn -------------------------------------------
 
-def test_the_designed_size_is_the_default(monkeypatch):
+@pytest.fixture
+def clean_size(tmp_path, monkeypatch):
+    """No saved size and no inherited setting.
+
+    Both matter. A size chosen with the keyboard is written to the cache
+    directory and wins over the environment, so without redirecting the cache
+    these read whatever size the machine running them happens to be set to —
+    which passes until someone resizes their overlay, then fails for reasons
+    that have nothing to do with the change under test.
+    """
+    monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path))
     monkeypatch.delenv("LYRICA_SIZE", raising=False)
+    return tmp_path
+
+
+def test_the_designed_size_is_the_default(clean_size):
     assert config.size_scale() == 1.0
 
 
-def test_a_size_is_read_from_the_environment(monkeypatch):
+def test_a_size_chosen_with_the_keyboard_is_remembered(clean_size):
+    config.save_size(1.3)
+    assert config.size_scale() == 1.3
+
+
+def test_a_remembered_size_wins_over_the_setting(clean_size, monkeypatch):
+    # The only order that is not surprising: adjusting the window, watching it
+    # change, then finding it back where it was on the next run would read as
+    # the keyboard being broken.
+    monkeypatch.setenv("LYRICA_SIZE", "0.8")
+    config.save_size(1.3)
+    assert config.size_scale() == 1.3
+
+
+def test_a_remembered_size_is_clamped_on_the_way_out(clean_size):
+    config.size_path().write_text("99", encoding="utf-8")
+    assert config.size_scale() == config.SIZE_MAX
+
+
+def test_an_unreadable_saved_size_falls_back_to_the_setting(clean_size, monkeypatch):
+    monkeypatch.setenv("LYRICA_SIZE", "1.2")
+    config.size_path().write_text("grande", encoding="utf-8")
+    assert config.size_scale() == 1.2
+
+
+def test_saving_into_an_unwritable_place_is_not_an_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path / "file"))
+    (tmp_path / "file").write_text("not a directory", encoding="utf-8")
+    config.save_size(1.5)       # must not raise
+
+
+def test_a_size_is_read_from_the_environment(clean_size, monkeypatch):
     monkeypatch.setenv("LYRICA_SIZE", "1.35")
     assert config.size_scale() == 1.35
 
 
-def test_a_size_below_the_range_is_clamped(monkeypatch):
+def test_a_size_below_the_range_is_clamped(clean_size, monkeypatch):
     # Smaller than this and the lyric font rounds to a size where the sweep
     # lands on whole characters and stops reading as a sweep.
     monkeypatch.setenv("LYRICA_SIZE", "0.2")
     assert config.size_scale() == config.SIZE_MIN
 
 
-def test_a_size_above_the_range_is_clamped(monkeypatch):
+def test_a_size_above_the_range_is_clamped(clean_size, monkeypatch):
     monkeypatch.setenv("LYRICA_SIZE", "9")
     assert config.size_scale() == config.SIZE_MAX
 
 
-def test_nonsense_falls_back_rather_than_raising(monkeypatch):
+def test_nonsense_falls_back_rather_than_raising(clean_size, monkeypatch):
     # Read at startup on a machine with no console, so raising here would be a
     # window that never appears and no way to find out why.
     monkeypatch.setenv("LYRICA_SIZE", "grande")
     assert config.size_scale() == 1.0
 
 
-def test_an_empty_setting_is_the_designed_size(monkeypatch):
+def test_an_empty_setting_is_the_designed_size(clean_size, monkeypatch):
     monkeypatch.setenv("LYRICA_SIZE", "   ")
     assert config.size_scale() == 1.0

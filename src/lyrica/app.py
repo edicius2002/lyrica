@@ -5,7 +5,8 @@ lyrics over everything else, swept word by word.
 
 Run:      python -m lyrica   (or the `lyrica` console script)
 Keys:     Esc = quit | right click = quit | drag with mouse = move
-          +/- = nudge sync offset by ±0.25 s
+          +/- = nudge sync offset by ±0.25 s  (needs the overlay focused)
+Global:   Ctrl+Alt+plus / Ctrl+Alt+minus = resize | Ctrl+Alt+0 = designed size
 """
 import logging
 import logging.handlers
@@ -13,10 +14,12 @@ import os
 import threading
 import time
 import tkinter as tk
+from dataclasses import replace
 from pathlib import Path
 from tkinter import font as tkfont
+from typing import ClassVar
 
-from lyrica import artwork, config, motion, songcolour
+from lyrica import artwork, config, hotkeys, motion, songcolour
 from lyrica import chrome as chrome_mod
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
@@ -75,6 +78,11 @@ WORD_LEAD_S = 0.150
 # competing for the glance.
 CONTEXT = 1
 
+# How much one press of the resize keys moves the size. A tenth: coarse enough
+# that a couple of presses is a visible change, fine enough that the range is
+# not crossed by accident.
+SIZE_STEP = 0.1
+
 # How far the pointer may travel and still count as a click rather than a drag.
 CLICK_SLACK = 4
 
@@ -94,6 +102,7 @@ def _scaled_font(spec: tuple, scale: float) -> tuple:
 class Overlay:
     def __init__(self):
         self.reader = create_reader(interval=0.5)
+        self.hotkeys = hotkeys.create_listener()
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
@@ -110,6 +119,7 @@ class Overlay:
         self._press_y = 0
         self._moved = False
         self._pending_art = None
+        self._cover_data = None     # kept so a resize can re-derive both images
         self._backdrop_item = None
         self._backdrop_photo = None
         self._thumb_image = None
@@ -125,7 +135,9 @@ class Overlay:
         # multiply because they are the same kind of quantity: both say how many
         # device pixels a designed unit is worth, and folding them together here
         # means every measurement downstream is scaled once, by one number.
-        scale_hint = chrome_mod.prepare() * config.size_scale()
+        self._dpi_scale = chrome_mod.prepare()
+        self._size = config.size_scale()
+        scale_hint = self._dpi_scale * self._size
 
         self.root = tk.Tk()
         self.root.title("Lyrica")
@@ -184,6 +196,36 @@ class Overlay:
         self.root.bind("<Escape>", lambda e: self.root.destroy())
         self.root.bind("<plus>", lambda e: self._nudge(+0.25))
         self.root.bind("<minus>", lambda e: self._nudge(-0.25))
+        # Size. These are the fallback: they need the overlay focused, which
+        # means clicking it, which seeks. The global shortcuts are what anyone
+        # actually uses on Windows; this is what a platform without them gets.
+        # Several spellings per direction because which one arrives depends on
+        # the keyboard — `plus` needs Shift on most layouts, so `equal` is the
+        # key under the finger, and the numeric pad sends its own names again.
+        for sequence in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+            self.root.bind(sequence, lambda e: self._resize(+SIZE_STEP))
+        for sequence in ("<Control-minus>", "<Control-underscore>",
+                         "<Control-KP_Subtract>"):
+            self.root.bind(sequence, lambda e: self._resize(-SIZE_STEP))
+        self.root.bind("<Control-0>", lambda e: self._resize_to(1.0))
+
+    HOTKEY_ACTIONS: ClassVar[dict] = {
+        "bigger": lambda self: self._resize(+SIZE_STEP),
+        "smaller": lambda self: self._resize(-SIZE_STEP),
+        "reset": lambda self: self._resize_to(1.0),
+    }
+
+    def _drain_hotkeys(self) -> None:
+        """Act on global shortcuts pressed while something else had the focus.
+
+        Drained on the tick rather than delivered from the listener thread:
+        everything a resize touches is a Tk widget, and Tk is only safe on the
+        thread that made it.
+        """
+        for action in self.hotkeys.poll():
+            handler = self.HOTKEY_ACTIONS.get(action)
+            if handler:
+                handler(self)
 
     def _build_frame(self):
         """The parts that never move: the card.
@@ -314,6 +356,89 @@ class Overlay:
     def _nudge(self, dt: float):
         self.offset += dt
 
+    # --- size ---
+    def _resize(self, delta: float) -> None:
+        self._resize_to(self._size + delta)
+
+    def _resize_to(self, size: float) -> None:
+        size = round(config.clamp_size(size), 2)
+        if abs(size - self._size) < 1e-6:
+            return          # already at the limit; rebuilding would only flicker
+        self._size = size
+        config.save_size(size)
+        self._apply_scale()
+
+    def _apply_scale(self) -> None:
+        """Rebuild every measurement against the new scale.
+
+        Everything the layout knows is derived from `chrome.px()` and the
+        scaled fonts, so this recomputes exactly the same things `__init__`
+        did — which is the reason it can be this short, and the reason to keep
+        the two lists next to each other if either ever grows.
+        """
+        scale = self._dpi_scale * self._size
+        self.chrome = replace(self.chrome, scale=scale)
+
+        was = (self.root.winfo_x() + self.width // 2,
+               self.root.winfo_y() + self.height // 2)
+        self.width = self.chrome.px(WIDTH)
+        self.height = self.chrome.px(HEIGHT)
+        self.wrap = self.chrome.px(WRAP)
+        self.row_gap = self.chrome.px(ROW_GAP)
+        self.anchor_y = self.height * ANCHOR
+        self.f_title = _scaled_font(FONT_TITLE, scale)
+        self.f_artist = _scaled_font(FONT_ARTIST, scale)
+        self.f_line = _scaled_font(FONT_LINE, scale)
+        self._title_font = tkfont.Font(font=self.f_title)
+        self._artist_font = tkfont.Font(font=self.f_artist)
+        self._card_y = self.chrome.px(14)
+        self._thumb_size = self.chrome.px(THUMB_SIZE)
+        self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
+
+        # Grown or shrunk about its own middle, so the window stays where the
+        # eye left it instead of walking up-left as it grows. Clamped, because
+        # a window centred near an edge would otherwise grow off the screen.
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        x = max(0, min(was[0] - self.width // 2, sw - self.width))
+        y = max(0, min(was[1] - self.height // 2, sh - self.height))
+        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+        self.canvas.configure(width=self.width, height=self.height)
+        # After the geometry, never before: the clip region is in device pixels
+        # and does not track the window, so applying it early clips the window
+        # to whatever size it used to be.
+        self.root.update_idletasks()
+        chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+
+        self.canvas.itemconfigure(self._title_item, font=self.f_title)
+        self.canvas.itemconfigure(self._artist_item, font=self.f_artist)
+        # Both card caches, and the second one is not optional. The card is
+        # only laid out again when its *text* changes, so invalidating the
+        # fitted text alone leaves a resize where the text happens to come out
+        # identical — which is most of them — holding its old coordinates while
+        # the cover is rebuilt at the new size and placed into them. Measured at
+        # 1.4x: the title started 20 px inside the cover.
+        self._card_raw = None
+        self._card_text = None
+
+        # The lines cannot be resized in place: a LineView lays its characters
+        # out once, at the font and wrap width it was built with. Dropping them
+        # and forgetting which line was current makes the next tick rebuild and
+        # place them without animating, which is what a resize should look like.
+        for view in self._views.values():
+            view.destroy()
+        self._views.clear()
+        self._glides.clear()
+        self._targets.clear()
+        self.line_index = -1
+
+        # The cover has to be re-derived: both images were built for the old
+        # window. Inline rather than on a thread — it measures ~18 ms, and this
+        # is a keypress rather than a track change, so there is a hand waiting
+        # for it and nothing else in flight.
+        if self._cover_data:
+            self._pending_art = self._build_art(self._cover_data)
+        logger.info("overlay size %.2f (%dx%d)", self._size, self.width, self.height)
+
     # --- lyrics ---
     def _start_fetch(self, snap: Snapshot):
         self.fetch_gen += 1
@@ -341,18 +466,6 @@ class Overlay:
         artist, title = snap.norm_artist_title()
         album = snap.album
 
-        def build(data: bytes):
-            return (
-                artwork.make_thumbnail(data, self._thumb_size),
-                # The backdrop only makes sense where the panel has a body to
-                # wash; over a colour key it would be a dark rectangle.
-                artwork.make_backdrop(data, self.width, self.height)
-                if self.chrome.washed else None,
-                # Measured here rather than on the render thread: it costs a
-                # couple of milliseconds, and this thread has them to spare.
-                songcolour.extract(data),
-            )
-
         def work():
             # One cover, shown once. Fetching the good one first and only
             # falling back to the player's own means nothing is ever replaced on
@@ -363,9 +476,28 @@ class Overlay:
             data = (artwork.best_cover(artist, title, album, size=wanted)
                     or self.reader.read_artwork())
             if data and gen == self.fetch_gen:
-                self._pending_art = build(data)
+                self._cover_data = data
+                self._pending_art = self._build_art(data)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _build_art(self, data: bytes) -> tuple:
+        """Everything derived from one cover, at the current size.
+
+        Kept as a method rather than a closure because a resize needs it too:
+        both images are built for a particular window, so growing the window
+        means deriving them again from the same bytes.
+        """
+        return (
+            artwork.make_thumbnail(data, self._thumb_size),
+            # The backdrop only makes sense where the panel has a body to wash;
+            # over a colour key it would be a dark rectangle.
+            artwork.make_backdrop(data, self.width, self.height)
+            if self.chrome.washed else None,
+            # Measured here rather than on the render thread: it costs a couple
+            # of milliseconds, and whichever thread calls this has them.
+            songcolour.extract(data),
+        )
 
     def _apply_art(self) -> None:
         """Put prepared images on the canvas, on the render thread."""
@@ -566,6 +698,7 @@ class Overlay:
 
     # --- render ---
     def _tick(self):
+        self._drain_hotkeys()
         snap = self.reader.snapshot
         if snap.ok and snap.track_key() != self.track_key:
             self.track_key = snap.track_key()
@@ -654,8 +787,10 @@ class Overlay:
 
     def run(self):
         self.reader.start()
+        self.hotkeys.start()
         self._tick()
         self.root.mainloop()
+        self.hotkeys.stop()
         self.reader.stop()
 
 
