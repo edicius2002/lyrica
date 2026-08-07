@@ -23,9 +23,14 @@ from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
 # Logical pixels at 96 dpi; scaled by the chrome's DPI factor at startup.
-WIDTH, HEIGHT = 900, 300
+WIDTH, HEIGHT = 900, 340
 WRAP = 800
 ROW_GAP = 10
+
+# The band at the top and bottom where a line fades away. It has to be deep
+# enough that a line is fully gone before the edge would cut it, which means
+# roughly the height of a wrapped line.
+FADE_ZONE = 96
 
 # Where the line being sung sits, as a fraction of the window height. Above
 # centre, because the line you are about to sing matters more than the one
@@ -236,9 +241,12 @@ class Overlay:
                 y -= self._views[index].height + self.row_gap
         for index in sorted(indices):
             view = self._views[index]
-            previous = self._targets.get(index)
+            # A view seen for the first time starts from wherever it was born,
+            # so it travels in with the rest. Snapping it into place was what
+            # made arriving lines land on top of lines still moving.
+            previous = self._targets.get(index, view.y)
             self._targets[index] = y
-            if previous is None or not animate:
+            if not animate:
                 view.move_to(y)
                 self._glides.pop(index, None)
             elif abs(previous - y) >= 1:
@@ -296,6 +304,10 @@ class Overlay:
                 self._restyle(indices)
 
             if self._advance_glides():
+                # Brightness follows position, so it has to be recomputed while
+                # anything is still moving — otherwise a line would travel out
+                # of the frame at full strength and be clipped rather than fade.
+                self._restyle()
                 interval = FAST_TICK_MS
             active = self._views.get(self.line_index)
             if active is not None and active.words:
@@ -307,14 +319,28 @@ class Overlay:
 
         self.root.after(interval, self._tick)
 
-    def _restyle(self, indices: list[int]) -> None:
-        for index in indices:
-            view = self._views[index]
+    def _visibility(self, view: LineView) -> float:
+        """How present a line is, from where it sits rather than from its index.
+
+        A line fades as it nears either edge and is gone before it reaches one.
+        That is what stops a line ever being seen half-clipped by the frame: it
+        has already faded out by the time the edge would cut it.
+        """
+        fade = max(1, self.chrome.px(FADE_ZONE))
+        top, bottom = view.y, view.y + view.height
+        room = min(top / fade, (self.height - bottom) / fade, 1.0)
+        return max(0.0, room)
+
+    def _restyle(self, indices: list[int] | None = None) -> None:
+        for index in (indices if indices is not None else list(self._views)):
+            view = self._views.get(index)
+            if view is None:
+                continue
             active = index == self.line_index
             view.set_active(active)
             if not active:
-                view.show_inactive(
-                    self.palette.by_distance(abs(index - self.line_index)))
+                view.show_inactive(self.palette.faded(
+                    abs(index - self.line_index), self._visibility(view)))
 
     def run(self):
         self.reader.start()
