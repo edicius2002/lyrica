@@ -17,16 +17,20 @@ from pathlib import Path
 
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider
+from lyrica.providers.community import CommunityTtmlProvider
 from lyrica.providers.lrclib import LrclibProvider
 from lyrica.providers.netease import NeteaseProvider
 
 logger = logging.getLogger(__name__)
 
-# Ordered by expected precision first, then by measured latency. Neither source
-# offers word-level timing today, so the tiebreak is speed: LRCLIB answers in
-# roughly 0.7 s against NetEase's 2.6 s, and NetEase is only reached when
-# LRCLIB's answer was weak or absent.
+# Ordered by expected precision first, then by measured latency.
+#
+# The community source goes first because it is the only one here that returns
+# word-level timing, and it needs no token or key at all. LRCLIB follows: it has
+# no word timing but answers in ~0.7 s with near-total line-level coverage.
+# NetEase last, at ~2.6 s, reached only when both came up short.
 PROVIDERS: list[LyricsProvider] = [
+    CommunityTtmlProvider(),
     LrclibProvider(),
     NeteaseProvider(),
 ]
@@ -64,6 +68,10 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     # dataclass default rather than discarding an otherwise good answer.
     lyr = Lyrics(**{k: d[k] for k in _CACHE_FIELDS if k in d})
     lyr.lines = [tuple(x) for x in d["lines"]]
+    # JSON has no tuples, so word timings come back as lists and would compare
+    # unequal to freshly parsed ones. Restoring the shape keeps a cached hit
+    # indistinguishable from a live one.
+    lyr.words = [[tuple(w) for w in line] for line in d.get("words", [])]
     return lyr, asked
 
 
@@ -71,7 +79,7 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
     if result is None:
         payload = {"miss": True, "asked": asked}
     else:
-        payload = {"lines": result.lines, "asked": asked}
+        payload = {"lines": result.lines, "words": result.words, "asked": asked}
         payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -82,12 +90,27 @@ def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
     return best is None or new.precision > best.precision
 
 
+def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) -> bool:
+    """True when no unasked source could improve on what is already held.
+
+    This is what stops a line-level answer either ending the search while a
+    word-level source goes unasked, or forcing every source to be queried on
+    every track to find that out.
+    """
+    if best is None:
+        return False
+    if best.instrumental and best.exact:
+        return True
+    ceiling = max((p.max_precision for p in remaining), default=Precision.NONE)
+    return best.precision >= ceiling
+
+
 def _ask_providers(artist: str, title: str, duration: float,
                    album: str) -> tuple[Lyrics | None, list[str]]:
     """Walk the cascade keeping the best answer. Returns it and who was asked."""
     best: Lyrics | None = None
     asked: list[str] = []
-    for provider in PROVIDERS:
+    for index, provider in enumerate(PROVIDERS):
         started = time.perf_counter()
         try:
             result = provider.fetch(artist, title, duration, album)
@@ -105,7 +128,7 @@ def _ask_providers(artist: str, title: str, duration: float,
 
         if _better(result, best):
             best = result
-        if best is not None and best.is_definitive:
+        if _nothing_left_to_beat(best, PROVIDERS[index + 1:]):
             break
     return best, asked
 
@@ -129,14 +152,15 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
             cached, asked = None, _provider_names()  # unreadable: fetch again below
             cpath.unlink(missing_ok=True)
         else:
-            # A weak or absent cached answer is only trusted while nothing new
-            # could beat it. Once a provider exists that was never asked, the
-            # entry is worth revisiting — that is what lets a better source
-            # supersede a plain-text hit instead of being permanently shadowed.
-            unasked = [n for n in _provider_names() if n not in asked]
-            if (cached is not None and cached.is_definitive) or not unasked:
+            # A cached answer is only trusted while nothing unasked could beat
+            # it. Once a better source exists that this entry never saw, it is
+            # worth revisiting — that is what lets a word-level provider added
+            # later supersede a line-level hit instead of being shadowed by it.
+            unasked = [p for p in PROVIDERS if p.name not in asked]
+            if not unasked or _nothing_left_to_beat(cached, unasked):
                 return cached
-            logger.info("re-querying %r - %r: %s never asked", artist, title, unasked)
+            logger.info("re-querying %r - %r: %s never asked", artist, title,
+                        [p.name for p in unasked])
 
     best, asked = _ask_providers(artist, title, duration, album)
     try:
@@ -159,7 +183,9 @@ def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.
         result = fetch_lyrics(artist, title, duration, album)
         if _better(result, best):
             best = result
-        if best is not None and best.is_definitive:
+        # Every candidate asks the whole cascade, so the bar to clear here is
+        # the best any source could give, not what is left to ask.
+        if _nothing_left_to_beat(best, PROVIDERS):
             return best
     return best
 

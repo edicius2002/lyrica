@@ -24,9 +24,11 @@ def instrumental(source: str = "fake", *, exact: bool = True) -> Lyrics:
 class Fake:
     """A provider that answers with whatever it was handed, and counts calls."""
 
-    def __init__(self, name: str, result: Lyrics | None):
+    def __init__(self, name: str, result: Lyrics | None,
+                 ceiling: Precision = Precision.LINE):
         self.name = name
         self.result = result
+        self.max_precision = ceiling
         self.calls = 0
 
     def fetch(self, artist, title, duration=0.0, album=""):
@@ -36,6 +38,7 @@ class Fake:
 
 class Exploding:
     name = "exploding"
+    max_precision = Precision.LINE
 
     def __init__(self):
         self.calls = 0
@@ -206,10 +209,13 @@ def test_candidates_prefer_the_best_reading_not_the_first(monkeypatch):
 
 def test_candidates_stop_at_a_definitive_answer(monkeypatch):
     seen = []
+    # Word level, because the real provider list contains a word-capable source
+    # and a line-level answer therefore leaves something worth looking for.
+    word_level = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 0.5, "a")]], synced=True)
 
     def fake_fetch(artist, title, duration=0.0, album=""):
         seen.append(title)
-        return synced() if title == "strong" else None
+        return word_level if title == "strong" else None
 
     monkeypatch.setattr(providers, "fetch_lyrics", fake_fetch)
     providers.fetch_for_candidates([("A", "strong"), ("A", "never")])
