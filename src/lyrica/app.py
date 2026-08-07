@@ -20,8 +20,22 @@ from pathlib import Path
 from tkinter import font as tkfont
 from typing import ClassVar
 
-from lyrica import artwork, autostart, config, hotkeys, motion, songcolour, tray
+from lyrica import (
+    artwork,
+    autostart,
+    config,
+    hotkeys,
+    motion,
+    songcolour,
+    tray,
+)
+from lyrica import (
+    beam as beam_mod,
+)
 from lyrica import chrome as chrome_mod
+from lyrica import (
+    meter as meter_mod,
+)
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
 from lyrica.lyrics import Lyrics
@@ -84,6 +98,12 @@ CONTEXT = 1
 # not crossed by accident.
 SIZE_STEP = 0.1
 
+# The border beam runs at 30 Hz rather than 60. It is a slow glow at the edge of
+# vision, and the loop is otherwise idle at 10 Hz between lyric lines — this is
+# the compromise between a beam that moves smoothly and an overlay that spins
+# the processor for a decoration nobody is looking straight at.
+BEAM_TICK_MS = 33
+
 # What a track's lyrics are known to be. Three states rather than two, and the
 # third is the whole point: `None` lyrics means both "still asking" and "nobody
 # has any", and a panel that collapsed on the first would shrink and grow again
@@ -127,6 +147,9 @@ class Overlay:
     def __init__(self):
         self.reader = create_reader(interval=0.5)
         self.hotkeys = hotkeys.create_listener()
+        self.meter = meter_mod.create_meter()
+        self.beam = None
+        self._beam_at = None
         self.tray = tray.create_tray(autostart=autostart.enabled(),
                                      can_autostart=autostart.available())
         self.lyrics: Lyrics | None = None
@@ -291,6 +314,13 @@ class Overlay:
             0, 0, text="", anchor="w", font=self.f_title, fill=self.palette.title)
         self._artist_item = self.canvas.create_text(
             0, 0, text="", anchor="w", font=self.f_artist, fill=self.palette.artist)
+
+        # Laid before the card and the lines so it can never sit on top of a
+        # word; it lives at the very edge, where nothing else is drawn.
+        if config.beam_enabled() and self.chrome.washed:
+            self.beam = beam_mod.Beam(self.canvas, self.width, self.height,
+                                      self.chrome.px(chrome_mod.CORNER_RADIUS),
+                                      self.chrome.scale)
 
         # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
@@ -490,6 +520,9 @@ class Overlay:
         self.canvas.configure(width=width, height=height)
         self.root.update_idletasks()
         chrome_mod.shape(self.root, self.chrome, width, height)
+        if self.beam is not None:
+            self.beam.reshape(width, height,
+                              self.chrome.px(chrome_mod.CORNER_RADIUS))
         title, artists = self._card_text or ("", "")
         self._lay_out_card(title, artists)
         self._place_thumb()
@@ -897,6 +930,8 @@ class Overlay:
             self._place_thumb()
 
         interval = SLOW_TICK_MS
+        if self._advance_beam():
+            interval = BEAM_TICK_MS
         self._retarget_size()
         if self._advance_collapse():
             interval = FAST_TICK_MS
@@ -945,6 +980,17 @@ class Overlay:
 
         self.root.after(interval, self._tick)
 
+    def _advance_beam(self) -> bool:
+        """Move the border light. True while it needs the loop kept awake."""
+        if self.beam is None:
+            return False
+        now = time.monotonic()
+        dt = min(0.25, now - (self._beam_at or now))
+        self._beam_at = now
+        level = self.meter.level(dt or 1 / 30)
+        self.beam.advance(dt, level, self.palette.ramp)
+        return True
+
     def _visibility(self, view: LineView) -> float:
         """How present a line is, from where it sits rather than from its index.
 
@@ -978,6 +1024,7 @@ class Overlay:
         self.tray.stop()
         self.hotkeys.stop()
         self.reader.stop()
+        self.meter.close()
 
 
 def setup_logging() -> Path:

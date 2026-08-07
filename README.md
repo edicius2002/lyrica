@@ -57,6 +57,22 @@ need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
 
+## The border reacts to the music
+
+The panel's edge carries a slow light that brightens with what is playing. It
+reads the output level from Windows' own endpoint meter — no audio is captured,
+no samples reach this process, and there is no extra dependency. A reading costs
+0.21 ms and the loop it keeps awake runs at 30 Hz, measured at 1.1 % of a
+twelve-core machine.
+
+`LYRICA_BEAM=off` turns it off.
+
+What it cannot do is follow a beat. The meter reports loudness and has no
+spectrum, so there is nothing in it to find a downbeat with — the head travels
+at a fixed rate and only its brightness answers the music. Looking the tempo up
+instead was measured and rejected: see
+[`research/viability/probe_bpm.py`](research/viability/probe_bpm.py).
+
 ## How solid the panel is
 
 `LYRICA_OPACITY` sets it, between `0.6` and `1.0`, defaulting to `0.90`:
