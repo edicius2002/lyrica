@@ -98,6 +98,14 @@ def setup(root: tk.Tk, scale: float = 1.0) -> Chrome:
     return _keyed(root, scale)
 
 
+def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
+    """Drop the blur while the window is being moved, restore it after."""
+    if chrome.mode is not ChromeMode.GLASS or sys.platform != "win32":
+        return
+    from lyrica.chrome import windows as win
+    win.suspend_glass(root, suspended)
+
+
 def move(root: tk.Tk, x: int, y: int) -> None:
     """Move the window, by the quickest route the platform offers."""
     if sys.platform == "win32":
