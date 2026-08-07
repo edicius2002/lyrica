@@ -98,6 +98,15 @@ def setup(root: tk.Tk, scale: float = 1.0) -> Chrome:
     return _keyed(root, scale)
 
 
+def move(root: tk.Tk, x: int, y: int) -> None:
+    """Move the window, by the quickest route the platform offers."""
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+        if win.move_window(root, x, y):
+            return
+    root.geometry(f"+{int(x)}+{int(y)}")
+
+
 def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:
     """Clip the window to rounded corners. **Call after the geometry is set.**
 
