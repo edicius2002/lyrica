@@ -173,3 +173,139 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
     assert config.beam_style() == "shine"
     monkeypatch.setenv("LYRICA_BEAM", "off")
     assert config.beam_style() == "off"
+
+
+# --- the music's character drives the shine ---------------------------------
+
+def _shine(character):
+    import tkinter as tk
+
+    from lyrica import palette as pal_mod
+    from lyrica.beam import SHINE, Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL, rgb_of
+    from lyrica.songcolour import SongColour
+
+    root = tk.Tk()
+    root.withdraw()
+    canvas = tk.Canvas(root, width=1125, height=375)
+    palette = pal_mod.for_song(
+        Chrome(ChromeMode.PANEL, "#000", PANEL),
+        SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
+    ring = Beam(canvas, 1125, 375, 18, 1.25, SHINE)
+    ring.advance(0.0, character, palette)
+    levels = [max(rgb_of(s)) for s in ring._shades]
+    root.destroy()
+    return max(levels) - min(levels)
+
+
+def test_a_flat_master_gets_an_even_border():
+    # Where the style of the music shows. A wall of sound has no air in it, and
+    # neither should the border round it: measured 0.05 dynamics for a heavily
+    # compressed master against 0.94 for an open one.
+    from lyrica.meter import Character
+
+    flat = _shine(Character(level=0.6, dynamics=0.05, rate=0.8))
+    open_ = _shine(Character(level=0.6, dynamics=0.90, rate=0.5))
+    assert open_ > flat * 2, f"flat {flat}, open {open_} — the styles look alike"
+
+
+def test_silence_leaves_it_lit_but_still():
+    from lyrica.meter import Character
+
+    assert _shine(Character()) < 20
+
+
+def test_busier_music_turns_it_faster():
+    # Driven by the onset rate rather than a tempo. Which multiple of the beat
+    # that rate counts is not recoverable from loudness, so a ring spinning once
+    # per beat would spin at half or double speed about half the time.
+    import tkinter as tk
+
+    from lyrica import palette as pal_mod
+    from lyrica.beam import SHINE, Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.meter import Character
+    from lyrica.songcolour import NEUTRAL
+
+    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
+    moved = []
+    for rate in (0.0, 1.0):
+        # A root of its own each time. Sharing one across the loop made this
+        # pass in the suite and fail alone, which is tkinter's default-root
+        # state rather than anything about the beam.
+        root = tk.Tk()
+        root.withdraw()
+        ring = Beam(tk.Canvas(root, width=600, height=200), 600, 200, 18, 1.0,
+                    SHINE)
+        ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
+        moved.append(ring._phase)
+        root.destroy()
+    assert moved[1] > moved[0], "the rate did not reach the rotation"
+
+
+def test_the_comet_ignores_the_character():
+    # Only the shine reads it. The comet's whole shape is a travelling head, and
+    # varying its speed with the music would fight the thing you follow.
+    import tkinter as tk
+
+    from lyrica import palette as pal_mod
+    from lyrica.beam import COMET, Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.meter import Character
+    from lyrica.songcolour import NEUTRAL
+
+    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
+    phases = []
+    for rate in (0.0, 1.0):
+        root = tk.Tk()
+        root.withdraw()
+        ring = Beam(tk.Canvas(root, width=600, height=200), 600, 200, 18, 1.0,
+                    COMET)
+        ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
+        phases.append(ring._phase)
+        root.destroy()
+    assert phases[0] == phases[1]
+
+
+# --- reading the character off a level ---------------------------------------
+
+def test_a_flat_level_is_not_a_beat():
+    # The relative threshold needs an absolute floor under it: a fraction of a
+    # tiny range is a tiny number, and a flat tone's own ripple clears it over
+    # and over. Measured a rate of 0.56 out of pure noise before that floor.
+    import math
+
+    from lyrica.meter import Envelope
+
+    envelope = Envelope()
+    for i in range(300):
+        envelope.push(0.5 + 0.01 * math.sin(i / 7))
+    got = envelope.character(0.5)
+    assert got.rate == 0.0
+    assert got.dynamics == 0.0
+
+
+def test_a_compressed_beat_still_reports_its_rate():
+    # The point of the relative threshold: a master squashed to a twentieth of
+    # a clean track's range still has its beat found.
+    import math
+
+    from lyrica.meter import Envelope
+
+    envelope = Envelope()
+    period = 60 / 128
+    for i in range(300):
+        t = i / 60
+        envelope.push(0.45 + 0.12 * math.exp(-((t % period) / period) * 9))
+    assert envelope.character(0.5).rate > 0.2
+
+
+def test_an_empty_envelope_reports_nothing():
+    from lyrica.meter import Envelope
+
+    got = Envelope().character(0.4)
+    assert got.level == 0.4
+    assert got.dynamics == 0.0 and got.rate == 0.0

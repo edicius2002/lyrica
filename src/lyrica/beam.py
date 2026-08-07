@@ -47,6 +47,22 @@ SHINE_CYCLES = 1.0
 # is what keeps the dimmest part of the border plainly lit.
 SHINE_FLOOR = 0.34
 
+# How far the gradient swings between its light and dark parts, and what the
+# music's own dynamics do to that. A compressed wall of sound gets an almost
+# even border; something with air between its hits gets a border with the same
+# air in it. This is where the *style* of the music shows, and it needs no beat
+# to be found — measured at 0.05 for a heavily compressed master against 0.94
+# for an open one.
+SHINE_SWING_FLAT = 0.16
+SHINE_SWING_OPEN = 0.62
+
+# How much busier music turns the gradient faster. Driven by the onset rate,
+# which is honest, rather than by a tempo, which is not: which multiple of the
+# beat that rate counts cannot be recovered from loudness, so a beam that spun
+# once per beat would spin at half or double speed about half the time. A beam
+# that is merely *more agitated* when the music is cannot be wrong that way.
+SHINE_SPEED_GAIN = 0.55
+
 # How much of the ring trails behind the head, as a fraction of the whole. Short
 # on purpose: a comet with a tail a quarter of the way round is a lit border
 # with a bright patch, which is not the same thing to look at.
@@ -156,11 +172,12 @@ class Beam:
         self._items.clear()
         self._shades.clear()
 
-    def advance(self, dt: float, level: float, palette) -> None:
+    def advance(self, dt: float, music, palette) -> None:
         """Move the head and recolour the ring.
 
-        The gradient is derived from the palette, so the beam wears the cover's
-        colour, and rebuilt only when the palette itself changes.
+        `music` carries the level and, for the shine, what the music has been
+        doing around it. The gradient is derived from the palette, so the beam
+        wears the cover's colour, and rebuilt only when the palette changes.
         """
         if not self._items:
             return
@@ -169,25 +186,32 @@ class Beam:
             self._gradient = _gradient(palette)
             self._shades = [""] * len(self._items)   # force a full repaint
 
-        period = SHINE_PERIOD_S if self.style == SHINE else PERIOD_S
-        self._phase = (self._phase + dt / period) % 1.0
-        level = max(0.0, min(1.0, level))
+        level = max(0.0, min(1.0, getattr(music, "level", music)))
+        dynamics = max(0.0, min(1.0, getattr(music, "dynamics", 0.0)))
+        rate = max(0.0, min(1.0, getattr(music, "rate", 0.0)))
         top = len(self._gradient) - 1
         count = len(self._items)
 
         if self.style == SHINE:
+            # Busier music turns it faster; nothing here claims to know a beat.
+            period = SHINE_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
+            self._phase = (self._phase + dt / period) % 1.0
             strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
+            swing = SHINE_SWING_FLAT + (SHINE_SWING_OPEN - SHINE_SWING_FLAT) * dynamics
+            base = 1.0 - swing
             for i, item in enumerate(self._items):
                 # A cosine rather than a sawtooth: the ring closes on itself, so
                 # a gradient that ran end to end would show a seam where it
                 # wrapped. This one has no ends.
                 turn = (i / count) * SHINE_CYCLES + self._phase
                 wave = 0.5 + 0.5 * math.cos(2 * math.pi * turn)
-                shade = self._gradient[int(top * (0.35 + 0.65 * wave) * strength)]
+                shade = self._gradient[int(top * (base + swing * wave) * strength)]
                 if shade != self._shades[i]:
                     self.canvas.itemconfigure(item, fill=shade)
                     self._shades[i] = shade
             return
+
+        self._phase = (self._phase + dt / PERIOD_S) % 1.0
 
         strength = FLOOR + GAIN * level
         for i, item in enumerate(self._items):
