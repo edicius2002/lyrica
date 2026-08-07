@@ -23,6 +23,8 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.4",
+    # Only for building the standalone executable; nothing imports it.
+    "pyinstaller>=6",
 ]
 
 [project.scripts]
