@@ -14,7 +14,7 @@ import tkinter as tk
 from typing import Optional
 
 from lyrica.lyrics import Lyrics
-from lyrica.providers import fetch_lyrics
+from lyrica.providers import fetch_for_candidates
 from lyrica.smtc import SmtcReader, Snapshot
 
 TRANSPARENT = "#010203"
@@ -80,10 +80,7 @@ class Overlay:
         self.status_msg = f"Searching lyrics: {artist} – {title}"
 
         def work():
-            lyr = fetch_lyrics(artist, title, snap.duration, snap.album)
-            # Browser retry with the raw title in case cleaning broke the match
-            if lyr is None and snap.is_browser and snap.artist:
-                lyr = fetch_lyrics(snap.artist, snap.title, snap.duration)
+            lyr = fetch_for_candidates(snap.lookup_candidates(), snap.duration, snap.album)
             if gen == self.fetch_gen:
                 self.lyrics = lyr
                 self.status_msg = "" if lyr else "No lyrics found"

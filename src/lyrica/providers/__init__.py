@@ -49,15 +49,20 @@ def _cache_write(path: Path, result: Optional[Lyrics]) -> None:
 
 def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
                  album: str = "") -> Optional[Lyrics]:
-    """Cascade through providers; None when no source has the track."""
+    """Cascade through providers for one artist/title pair.
+
+    None when no source has the track. The answer, hit or miss, is cached: a
+    track with no lyrics anywhere is the common case on SoundCloud, and without
+    caching that the full cascade would run again on every replay.
+    """
     if not title:
         return None
     cpath = _cache_path(artist, title, duration)
     if cpath.exists():
         try:
             return _cache_read(cpath)
-        except Exception:
-            pass
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # unreadable cache entry: fall through and fetch again
 
     result = None
     for provider in PROVIDERS:
@@ -70,3 +75,19 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
     except OSError:
         pass
     return result
+
+
+def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.0,
+                         album: str = "") -> Optional[Lyrics]:
+    """Try each artist/title reading in turn and keep the first that resolves.
+
+    Browsers disagree about what their metadata fields mean, so a payload can
+    have several defensible readings. Each is cached separately, which means a
+    miss on an early candidate costs one request the first time and nothing
+    afterwards.
+    """
+    for artist, title in candidates:
+        result = fetch_lyrics(artist, title, duration, album)
+        if result is not None:
+            return result
+    return None
