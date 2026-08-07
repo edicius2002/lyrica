@@ -4,6 +4,7 @@ The document below has the shape captured from the live community source —
 namespaces, `itunes:timing`, spans carrying both `begin` and `end`, and a
 background-vocal wrapper — with invented placeholder words.
 """
+from lyrica import ttml
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.ttml import declare_missing_namespaces, declared_timing, parse_time, parse_ttml
 
@@ -170,3 +171,47 @@ def test_words_at_tolerates_an_out_of_range_line():
 def test_a_zero_length_word_is_treated_as_complete():
     lyr = Lyrics(lines=[(0.0, "x")], words=[[(1.0, 1.0, "x")]], synced=True)
     assert lyr.word_progress_at(0, 1.0) == (0, 1.0)
+
+
+# --- words split below the word ---------------------------------------------
+
+def rejoined(*spans: str) -> str:
+    """The line a document of these spans displays as."""
+    body = "".join(f'<span begin="{i}s" end="{i + 1}s">{s}</span>'
+                   for i, s in enumerate(spans))
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           f'<p begin="0s" end="9s">{body}</p></div></body></tt>')
+    return ttml.parse_ttml(doc).lines[0][1]
+
+
+def test_adjacent_spans_are_not_pushed_apart():
+    # Word-timed documents split below the word: "ofenderte" arrives as two
+    # spans with nothing between them, and joining the trimmed tokens with a
+    # space displayed it as "Sin ofender te".
+    assert rejoined("Sin ", "ofender", "te") == "Sin ofenderte"
+    assert rejoined("aca", "be", " con", "migo") == "acabe conmigo"
+
+
+def test_spans_that_were_separate_stay_separate():
+    # The other half of it: a fix that simply concatenated would run genuinely
+    # separate words together.
+    assert rejoined("dos ", "palabras") == "dos palabras"
+
+
+def test_the_timings_still_carry_the_syllables():
+    # The sweep needs the pieces even though the line shows them joined.
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="3s">'
+           '<span begin="0s" end="1s">ofender</span>'
+           '<span begin="1s" end="2s">te</span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert lyrics.lines[0][1] == "ofenderte"
+    assert [w[2] for w in lyrics.words[0]] == ["ofender", "te"]
+
+
+def test_a_line_with_no_timed_spans_still_reads():
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="3s">una  linea   suelta</p>'
+           '</div></body></tt>')
+    assert ttml.parse_ttml(doc).lines[0][1] == "una linea suelta"

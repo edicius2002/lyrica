@@ -57,9 +57,15 @@ def _is_background(el: ET.Element) -> bool:
     return el.get(f"{{{TTM_NS}}}role") == "x-bg" or el.get("role") == "x-bg"
 
 
-def _collect_words(node: ET.Element) -> list:
-    """Timed spans under a line, in document order, skipping background vocals."""
-    words = []
+def _collect_spans(node: ET.Element) -> list:
+    """Timed spans under a line, in order, with the text that separated them.
+
+    Each entry carries the span's own text *and* whatever followed it before
+    the next span. That tail is the only record of whether two spans were
+    adjacent in the source or had a space between them, and it is what a line
+    has to be rebuilt from.
+    """
+    spans = []
     for child in node:
         if _local(child.tag) != "span":
             continue
@@ -69,19 +75,32 @@ def _collect_words(node: ET.Element) -> list:
         end = parse_time(child.get("end"))
         text = "".join(child.itertext())
         if start is not None and end is not None and text.strip():
-            # Trailing whitespace belongs between words, not inside one, but a
-            # word that is only whitespace has already been filtered out.
-            words.append((start, end, text.strip()))
-        # A span may wrap further spans without being a background marker.
-        words.extend(_collect_words(child))
-    return words
+            spans.append((start, end, text, child.tail or ""))
+        else:
+            # A span may wrap further spans without being timed or a background
+            # marker; its children are the real words.
+            spans.extend(_collect_spans(child))
+    return spans
 
 
-def _line_text(node: ET.Element, words: list) -> str:
-    """The full line. Prefer joining the timed words, since that drops the
-    background vocals the timing already excluded."""
-    if words:
-        return " ".join(w[2] for w in words)
+def _words(spans: list) -> list:
+    """Just the timings, with each token trimmed for display."""
+    return [(start, end, text.strip()) for start, end, text, _tail in spans]
+
+
+def _line_text(node: ET.Element, spans: list) -> str:
+    """The full line, with the source's own spacing.
+
+    Rebuilt by concatenating each span with what followed it, rather than by
+    joining the trimmed tokens with spaces. Word-timed documents split below
+    the word — "ofenderte" arrives as "ofender" and "te", two spans with
+    nothing between them — so joining with a space put one inside the word and
+    the line displayed as "Sin ofender te". The tails say which pairs were
+    adjacent; the join could only guess, and guessed the same way every time.
+    """
+    if spans:
+        joined = "".join(text + tail for _s, _e, text, tail in spans)
+        return " ".join(joined.split())
     return " ".join("".join(node.itertext()).split())
 
 
@@ -151,8 +170,9 @@ def parse_ttml(body: str) -> Lyrics | None:
         start = parse_time(p.get("begin"))
         if start is None:
             continue
-        line_words = _collect_words(p)
-        text = _line_text(p, line_words)
+        spans = _collect_spans(p)
+        line_words = _words(spans)
+        text = _line_text(p, spans)
         if not text:
             continue
         lines.append((start, text))

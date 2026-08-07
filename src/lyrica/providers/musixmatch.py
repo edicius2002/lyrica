@@ -65,11 +65,14 @@ def richsync_to_words(parsed: list) -> tuple[list, list]:
             continue
 
         line_words = []
+        raw_parts = []
         for i, event in enumerate(events):
-            text = (event.get("c") or "").strip()
+            raw = event.get("c") or ""
+            text = raw.strip()
             offset = event.get("o")
             if not text or offset is None:
                 continue
+            raw_parts.append(raw)
             word_start = start + offset
             if i + 1 < len(events) and events[i + 1].get("o") is not None:
                 word_end = start + events[i + 1]["o"]
@@ -80,7 +83,12 @@ def richsync_to_words(parsed: list) -> tuple[list, list]:
             word_end = min(word_end, word_start + MAX_INFERRED_WORD_S)
             line_words.append((word_start, max(word_end, word_start), text))
 
-        text = (line.get("x") or " ".join(w[2] for w in line_words)).strip()
+        # Richsync's own line text first. The fallback concatenates the raw
+        # events rather than joining the trimmed ones, because this source
+        # splits below the word too — "conmigo" arrives as "con" and "migo"
+        # with no space between them, and joining with one puts a space inside
+        # the word.
+        text = (line.get("x") or " ".join("".join(raw_parts).split())).strip()
         if not text:
             continue
         lines.append((start, text))
