@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from lyrica import palette as pal_mod
-from lyrica.beam import Beam, _rounded_path
+from lyrica.beam import COMET, SHINE, Beam, _rounded_path
 from lyrica.chrome import Chrome, ChromeMode
 from lyrica.glass import PANEL
 from lyrica.meter import create_meter
@@ -38,28 +38,35 @@ def main() -> int:
         chrome, SongColour(38, 0.8, 0.45, 38, False, (0, 0, 0)), (29, 24, 14))
     meter = create_meter()
 
-    print(f"{'panel':10s} {'segmentos':>10s} {'advance()':>22s} "
-          f"{'una lectura':>13s}")
+    print(f"{'panel':10s} {'estilo':>7s} {'segmentos':>10s} {'advance()':>22s} "
+          f"{'repintes':>9s}")
     for label, width, height in SIZES:
         canvas = tk.Canvas(root, width=width, height=height)
         canvas.pack()
         beam = Beam(canvas, width, height, 18, 1.25)
         root.update()
 
-        costs, meter_costs = [], []
-        for _ in range(FRAMES):
-            t0 = time.perf_counter()
-            level = meter.level(1 / 30)
-            t1 = time.perf_counter()
-            beam.advance(1 / 30, level, palette)
-            root.update_idletasks()
-            costs.append((time.perf_counter() - t1) * 1000)
-            meter_costs.append((t1 - t0) * 1000)
-
         segments = len(_rounded_path(width, height, 18, 2.5))
-        print(f"{label:10s} {segments:10d} "
-              f"{statistics.median(costs):7.2f} ms  p95 {sorted(costs)[int(FRAMES * .95)]:6.2f} ms "
-              f"{statistics.median(meter_costs):10.3f} ms")
+        for style in (COMET, SHINE):
+            beam.destroy()
+            beam = Beam(canvas, width, height, 18, 1.25, style)
+            root.update_idletasks()
+            costs, repaints = [], []
+            for i in range(FRAMES):
+                # A level that keeps moving, which is the case that matters:
+                # a still one leaves every segment where it was.
+                level = 0.5 + 0.5 * ((i * 7) % 13) / 13
+                before = list(beam._shades)
+                t0 = time.perf_counter()
+                beam.advance(1 / 60, level, palette)
+                root.update_idletasks()
+                costs.append((time.perf_counter() - t0) * 1000)
+                repaints.append(sum(1 for a, b in zip(before, beam._shades,
+                                                      strict=True) if a != b))
+            print(f"{label:10s} {style:>7s} {segments:10d} "
+                  f"{statistics.median(costs):7.2f} ms  "
+                  f"p95 {sorted(costs)[int(FRAMES * .95)]:6.2f} ms "
+                  f"{statistics.mean(repaints):9.1f}")
         beam.destroy()
         canvas.destroy()
 
