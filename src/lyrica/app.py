@@ -16,7 +16,7 @@ import tkinter as tk
 from pathlib import Path
 
 from lyrica.lyrics import Lyrics
-from lyrica.overlay_text import draw_outlined
+from lyrica.overlay_text import WordLine, draw_outlined
 from lyrica.providers import fetch_for_candidates
 from lyrica.smtc import SmtcReader, Snapshot
 
@@ -33,6 +33,15 @@ COLOUR_HEADER = "#c9cfda"
 COLOUR_SIDE = "#b6bdc9"
 COLOUR_CURRENT = "#ffffff"
 
+# Word states on the current line. Unsung stays legible rather than faint: it is
+# the line you are about to sing, and the outline already separates it from the
+# background, so brightness carries the timing instead of visibility.
+COLOUR_SUNG = "#ffffff"
+COLOUR_UNSUNG = "#9aa3b2"
+
+SLOW_TICK_MS = 100
+SWEEP_TICK_MS = 33
+
 # Muted grey reads as "dimmed" on a dark background and as "nearly invisible"
 # on a bright one. The side lines are therefore only lightly dimmed and lean on
 # the outline for separation instead.
@@ -48,6 +57,8 @@ class Overlay:
         self.status_msg = "Waiting for music…"
         self.offset = 0.0
         self.last_render = None
+        self.line_index = -1
+        self.word_line: WordLine | None = None
 
         self.root = tk.Tk()
         self.root.title("Lyrica")
@@ -104,6 +115,7 @@ class Overlay:
         if self.offset:
             header += f"   [offset {self.offset:+.2f}s]"
         prev_t = curr_t = next_t = ""
+        self.line_index = -1
 
         lyr = self.lyrics
         if not snap.ok:
@@ -116,6 +128,7 @@ class Overlay:
             pos = snap.live_position() + self.offset
             i = lyr.line_index_at(pos)
             n = len(lyr.lines)
+            self.line_index = i
             prev_t = lyr.lines[i - 1][1] if i > 0 else ""
             curr_t = (lyr.lines[i][1] if i >= 0 else "") or "♪"
             next_t = lyr.lines[i + 1][1] if -1 <= i < n - 1 else ""
@@ -132,21 +145,40 @@ class Overlay:
 
         return header, prev_t, curr_t, next_t
 
+    def _active_words(self) -> list:
+        """Word timings for the line on screen, if it has any."""
+        lyr = self.lyrics
+        if lyr is None or self.line_index < 0:
+            return []
+        return lyr.words_at(self.line_index)
+
     # --- render ---
-    def _repaint(self, rows: tuple[str, str, str, str]) -> None:
+    def _repaint(self, rows: tuple[str, str, str, str], words: list) -> None:
         header, prev_t, curr_t, next_t = rows
         self.canvas.delete("all")
+        self.word_line = None
         x, y = WIDTH // 2, 4
-        for text, font, colour in (
-            (header, FONT_HEADER, COLOUR_HEADER),
-            (prev_t, FONT_SIDE, COLOUR_SIDE),
-            (curr_t, FONT_CURRENT, COLOUR_CURRENT),
-            (next_t, FONT_SIDE, COLOUR_SIDE),
-        ):
+
+        for text, font, colour in ((header, FONT_HEADER, COLOUR_HEADER),
+                                   (prev_t, FONT_SIDE, COLOUR_SIDE)):
             used = draw_outlined(self.canvas, x, y, text, font=font, fill=colour,
                                  wrap=WRAP, outline=OUTLINE)
             if used:
                 y += used + ROW_GAP
+
+        if words:
+            self.word_line = WordLine(self.canvas, x, y, words, font=FONT_CURRENT,
+                                      wrap=WRAP, sung=COLOUR_SUNG,
+                                      active=COLOUR_CURRENT, unsung=COLOUR_UNSUNG)
+            y += self.word_line.height + ROW_GAP
+        else:
+            used = draw_outlined(self.canvas, x, y, curr_t, font=FONT_CURRENT,
+                                 fill=COLOUR_CURRENT, wrap=WRAP, outline=OUTLINE)
+            if used:
+                y += used + ROW_GAP
+
+        draw_outlined(self.canvas, x, y, next_t, font=FONT_SIDE, fill=COLOUR_SIDE,
+                      wrap=WRAP, outline=OUTLINE)
 
     def _tick(self):
         snap = self.reader.snapshot
@@ -155,11 +187,25 @@ class Overlay:
             self._start_fetch(snap)
 
         rows = self._rows(snap)
-        if rows != self.last_render:
-            self.last_render = rows
-            self._repaint(rows)
+        words = self._active_words()
+        # The line itself is the layout; its word colours are not. Rebuilding on
+        # a colour change would tear the line down mid-sweep.
+        layout = (rows, len(words))
+        if layout != self.last_render:
+            self.last_render = layout
+            self._repaint(rows, words)
 
-        self.root.after(100, self._tick)
+        interval = SLOW_TICK_MS
+        if self.word_line is not None:
+            pos = snap.live_position() + self.offset
+            index, fraction = self.lyrics.word_progress_at(self.line_index, pos)
+            self.word_line.update(index, fraction)
+            # A faster tick only while a word is actually lit; the rest of the
+            # time the overlay costs nothing.
+            if 0 <= index < len(words):
+                interval = SWEEP_TICK_MS
+
+        self.root.after(interval, self._tick)
 
     def run(self):
         self.reader.start()
