@@ -57,6 +57,19 @@ need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
 
+## Songs with no lyrics
+
+When a search comes back empty the panel shrinks to just the cover, the title
+and the artist, and grows again for the next track that has words. The width
+follows the title, so a short name gets a small panel rather than a wide one
+with space nobody is using.
+
+It waits for a definite answer before moving. A search takes a second or two,
+and "still asking" is deliberately not the same state as "nobody has any" —
+collapsing on the first would shrink and grow the panel on every track change.
+Lyrics that exist but carry no timings count as absent, because they are never
+drawn.
+
 ## Notification area
 
 There is an icon beside the clock. Left click hides and shows the overlay; right

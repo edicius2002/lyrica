@@ -84,6 +84,17 @@ CONTEXT = 1
 # not crossed by accident.
 SIZE_STEP = 0.1
 
+# What a track's lyrics are known to be. Three states rather than two, and the
+# third is the whole point: `None` lyrics means both "still asking" and "nobody
+# has any", and a panel that collapsed on the first would shrink and grow again
+# on every single track change.
+LYRICS_UNKNOWN, LYRICS_PRESENT, LYRICS_ABSENT = "unknown", "present", "absent"
+
+# The panel with nothing to say: the card, and the same margin under it as
+# above it. Everything else was the room the lyrics needed.
+COMPACT_MIN_WIDTH = 260
+COLLAPSE_MS = 320
+
 # How far the pointer may travel and still count as a click rather than a drag.
 CLICK_SLACK = 4
 
@@ -93,6 +104,18 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
+
+
+def lyrics_state(lyr: Lyrics | None) -> str:
+    """What a finished search means for the panel.
+
+    Unsynced counts as absent. Plain words with no timings are never drawn, so
+    a panel holding room for them would be holding room for nothing — and this
+    is only ever called once a search has finished, which is what keeps
+    `UNKNOWN` meaning "still asking" rather than "nobody has any".
+    """
+    return (LYRICS_PRESENT if lyr and lyr.synced and lyr.lines
+            else LYRICS_ABSENT)
 
 
 def _scaled_font(spec: tuple, scale: float) -> tuple:
@@ -131,6 +154,9 @@ class Overlay:
         self._card_raw = None
         self._awaiting_seek = None
         self._hidden = False
+        self._lyrics_state = LYRICS_UNKNOWN
+        self._compact = False
+        self._collapse = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -369,6 +395,100 @@ class Overlay:
     def _nudge(self, dt: float):
         self.offset += dt
 
+    # --- collapsing to the card ---
+    def _card_span(self) -> int:
+        """How wide the card's own contents are, cover and text together.
+
+        Measured rather than assumed, because it is the song title that decides
+        it and that changes with every track.
+        """
+        title, artists = self._card_text or ("", "")
+        text = max(self._title_font.measure(title),
+                   self._artist_font.measure(artists))
+        return self._thumb_size + self.chrome.px(10) + text
+
+    def _target_size(self) -> tuple[int, int]:
+        """What the window should be, given whether there are lyrics to show.
+
+        Compact hugs the card: its height is the cover plus the same margin
+        under it as above, and its width follows the title rather than being
+        fixed, so a short name gets a small panel instead of a wide one with
+        space nobody is using.
+        """
+        full = (self.chrome.px(WIDTH), self.chrome.px(HEIGHT))
+        if not self._compact:
+            return full
+        height = self._card_y * 2 + self._thumb_size
+        width = self._card_span() + self.chrome.px(12) * 2
+        return (max(self.chrome.px(COMPACT_MIN_WIDTH), min(width, full[0])),
+                height)
+
+    def _want_compact(self) -> bool:
+        # Only on a definite answer. While a fetch is still out the panel keeps
+        # whatever size it has, so a track change does not flicker through a
+        # collapse on its way to lyrics that were coming all along.
+        return self._lyrics_state == LYRICS_ABSENT
+
+    def _retarget_size(self, animate: bool = True) -> None:
+        """Start moving toward the size the current state calls for."""
+        want = self._want_compact()
+        if want == self._compact and self._collapse is None:
+            return
+        self._compact = want
+        target = self._target_size()
+        if (self.width, self.height) == target:
+            self._collapse = None
+            return
+        if not animate:
+            self._collapse = None
+            self._resize_window(*target)
+            return
+        self._collapse = (self.width, self.height, *target, time.monotonic())
+
+    def _advance_collapse(self) -> bool:
+        """Move one frame along the collapse. True while it is still going."""
+        if self._collapse is None:
+            return False
+        from_w, from_h, to_w, to_h, started = self._collapse
+        elapsed = (time.monotonic() - started) * 1000
+        done = elapsed >= COLLAPSE_MS
+        t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS)
+        self._resize_window(round(from_w + (to_w - from_w) * t),
+                            round(from_h + (to_h - from_h) * t))
+        if not done:
+            return True
+        self._collapse = None
+        # The wash was built for the size the window used to be. Rebuilt once,
+        # at the end: doing it per frame costs 5-12 ms a time, and a slightly
+        # mis-scaled backdrop for a third of a second is not visible while the
+        # panel is still moving.
+        if self._cover_data:
+            self._pending_art = self._build_art(self._cover_data)
+        return False
+
+    def _resize_window(self, width: int, height: int) -> None:
+        """Put the window at a size, keeping the card exactly where it is.
+
+        The top edge and the horizontal centre are held. The card lives at the
+        top, so anchoring there means the one thing still on screen does not
+        move while everything below it goes away.
+        """
+        if (width, height) == (self.width, self.height):
+            return
+        centre = self.root.winfo_x() + self.width // 2
+        top = self.root.winfo_y()
+        self.width, self.height = width, height
+        self.anchor_y = self.height * ANCHOR
+        sw = self.root.winfo_screenwidth()
+        x = max(0, min(centre - width // 2, sw - width))
+        self.root.geometry(f"{width}x{height}+{x}+{top}")
+        self.canvas.configure(width=width, height=height)
+        self.root.update_idletasks()
+        chrome_mod.shape(self.root, self.chrome, width, height)
+        title, artists = self._card_text or ("", "")
+        self._lay_out_card(title, artists)
+        self._place_thumb()
+
     # --- showing and hiding ---
     def _toggle_visible(self) -> None:
         """Put the overlay away, or bring it back.
@@ -423,11 +543,8 @@ class Overlay:
 
         was = (self.root.winfo_x() + self.width // 2,
                self.root.winfo_y() + self.height // 2)
-        self.width = self.chrome.px(WIDTH)
-        self.height = self.chrome.px(HEIGHT)
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
-        self.anchor_y = self.height * ANCHOR
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
@@ -436,6 +553,13 @@ class Overlay:
         self._card_y = self.chrome.px(14)
         self._thumb_size = self.chrome.px(THUMB_SIZE)
         self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
+        # After the fonts and the cover, because a compact panel's width is
+        # measured from the card and both have just changed. A collapse in
+        # flight is abandoned: it was interpolating toward a size from the old
+        # scale, and its destination no longer exists.
+        self._collapse = None
+        self.width, self.height = self._target_size()
+        self.anchor_y = self.height * ANCHOR
 
         # Grown or shrunk about its own middle, so the window stays where the
         # eye left it instead of walking up-left as it grows. Clamped, because
@@ -486,12 +610,14 @@ class Overlay:
         self.fetch_gen += 1
         gen = self.fetch_gen
         self.lyrics = None
+        self._lyrics_state = LYRICS_UNKNOWN
         self._clear_views()
 
         def work():
             lyr = fetch_for_candidates(snap.lookup_candidates(), snap.duration, snap.album)
             if gen == self.fetch_gen:
                 self.lyrics = lyr
+                self._lyrics_state = lyrics_state(lyr)
 
         threading.Thread(target=work, daemon=True).start()
         self._start_artwork(gen, snap)
@@ -766,6 +892,10 @@ class Overlay:
             self._place_thumb()
 
         interval = SLOW_TICK_MS
+        self._retarget_size()
+        if self._advance_collapse():
+            interval = FAST_TICK_MS
+
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines and not self._dragging:
             pos = snap.live_position() + self.offset
