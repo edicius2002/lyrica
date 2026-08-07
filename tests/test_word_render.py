@@ -1,6 +1,6 @@
 """Word layout and recolouring logic (offline, no display).
 
-`WordLine` needs a live canvas, so what is covered here is the geometry and the
+LineView needs a live canvas, so what is covered here is the geometry and the
 state machine underneath it: wrapping, measurement memoisation and which colour
 each word takes. Placeholder words only.
 """
@@ -80,17 +80,18 @@ def test_no_words_makes_no_rows():
 
 # --- outline ----------------------------------------------------------------
 
-def test_word_outline_is_symmetric_like_the_line_outline():
-    offsets = set(ring_offsets(overlay_text.WORD_OUTLINE))
+def test_the_outline_ring_is_symmetric():
+    # Weighted to one side it would read as a drop shadow rather than an edge.
+    offsets = set(ring_offsets(2))
     assert offsets
     assert all((-dx, -dy) in offsets for dx, dy in offsets)
-    assert (0, 0) not in offsets
+    assert (0, 0) not in offsets, "the centre is where the fill goes"
 
 
 # --- colour state -----------------------------------------------------------
 
 def colour_for(index: int, active_index: int, fraction: float) -> str:
-    """The rule WordLine.update applies, isolated from the canvas."""
+    """The word-state rule, isolated from the canvas."""
     if index < active_index:
         return "sung"
     if index > active_index:
@@ -120,7 +121,7 @@ def test_before_the_first_word_nothing_is_sung():
 
 def sweep_t(char_row: int, active_row: int, char_centre: float,
             front_x: float, feather: float = 40.0) -> float:
-    """The rule SweepLine.update applies, isolated from the canvas.
+    """The rule LineView.show_sweep applies, isolated from the canvas.
 
     Rows share the same horizontal range, so an x position alone cannot say
     whether a character has been sung.
