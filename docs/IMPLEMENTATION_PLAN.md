@@ -1,14 +1,16 @@
 # Implementation Plan and Decision Log
 
-> **Status:** Two ranked sources behind one cascade. The overlay resolves tracks from Spotify,
-> YouTube, YouTube Music and SoundCloud, and every pull request is linted and tested.
+> **Status:** Word-by-word lyrics, four ranked sources behind one cascade. The overlay resolves
+> tracks from Spotify, YouTube, YouTube Music and SoundCloud, and every pull request is linted and
+> tested.
 > **Last updated:** 2026-08-06
-> **Review status:** Phase 6 merged across [#15](https://github.com/edicius2002/lyrica/pull/15)
-> and [#16](https://github.com/edicius2002/lyrica/pull/16).
-> **Phase closure:** Steps 0–6 complete. Two things deferred by agreement: the overlay outline has
-> not been eyeballed over a genuinely bright background, and configurable provider ordering waits
-> for the settings work in step 8.
-> **Next delivery:** Step 7, word-by-word. One issue per slice, written before its work.
+> **Review status:** Phase 7 merged across [#19](https://github.com/edicius2002/lyrica/pull/19),
+> [#21](https://github.com/edicius2002/lyrica/pull/21), [#23](https://github.com/edicius2002/lyrica/pull/23),
+> [#25](https://github.com/edicius2002/lyrica/pull/25) and [#27](https://github.com/edicius2002/lyrica/pull/27).
+> **Phase closure:** Steps 0–7 complete. Deferred by agreement: the overlay outline has not been
+> eyeballed over a genuinely bright background, configurable provider ordering waits for step 8,
+> and the visual treatment is being researched separately.
+> **Next delivery:** Step 8, packaging. One issue per slice, written before its work.
 
 ---
 
@@ -337,12 +339,29 @@ would otherwise have shipped. Fixed by decision 7.2.
 
 ### 7 — Word-by-word
 
-**Status:** Not started. Scope constrained by measurement — see decisions 4.4 and 4.5.
+**Status:** Complete. Delivered in [#19](https://github.com/edicius2002/lyrica/pull/19),
+[#21](https://github.com/edicius2002/lyrica/pull/21), [#23](https://github.com/edicius2002/lyrica/pull/23),
+[#25](https://github.com/edicius2002/lyrica/pull/25) and [#27](https://github.com/edicius2002/lyrica/pull/27).
 
-- [ ] Extend the `Lyrics` model to carry optional per-word timings
-- [ ] amll-ttml-db lookup, including resolving a Spotify track ID the media session does not expose
-- [ ] Musixmatch richsync only if the endpoint can be solved reliably
-- [ ] Render word highlighting, degrading to line highlighting when timings are absent
+Phase 0 concluded that no free, unlimited source had broad word-level coverage. That was wrong on
+both counts, and re-measuring is what moved this phase from doubtful to done — see decision 8.1.
+
+- [x] Optional per-word timings on `Lyrics`, plus the sweep fraction a renderer needs
+- [x] TTML parser, including the two robustness cases real documents forced (decision 8.2)
+- [x] Community TTML source — word-level with no authentication of any kind (decision 8.3)
+- [x] Musixmatch richsync as the second word source, rate-limit aware (decisions 8.4, 8.5)
+- [x] Render the current line word by word, degrading to whole lines without timings
+- [x] Cache location configurable, so it follows between machines (decision 8.7)
+- [ ] amll-ttml-db — **dropped**: measured at ~2,400 Spotify-indexed entries with 1 of 4 Western
+      probes resolving, and it keys on an ID the media session does not expose. Two better sources
+      now cover the same ground.
+
+Measured end to end on real tracks, the cascade resolves word-level for every one tried, with the
+community source carrying the common case and Musixmatch covering what it misses.
+
+**Deferred:** the visual treatment — frosted background, Apple-style motion, easing. Being
+researched separately, since it may argue for a different rendering stack and that decision should
+not be made inside a data-layer phase.
 
 ### 8 — Packaging
 
@@ -444,6 +463,22 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | 7.6 | A provider that raises does not deny the track lyrics another source has.         | One source being broken or blocked is not evidence the song has no lyrics. The traceback is logged and the cascade continues.                                                                                                                                       |
 | 7.7 | Configurable provider ordering waits for the settings work in step 8.             | The default ordering is principled rather than arbitrary, so a config format invented here would buy nothing and be replaced by the persistence step 8 already owns.                                                                                                |
 
+### 8. Word-level lyrics
+
+Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the probes beside it.
+
+| ID  | Decision                                                                        | Rationale                                                                                                                                                                                                                                                     |
+| --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 8.1 | Sources are re-measured before a phase, not trusted from an earlier one.         | Phase 0 recorded richsync as dead on 404s that came from calling it by name instead of by track id, and NetEase as having no word data because the probe asked for a format almost no record uses. Two sources were written off by measurement error, not absence. |
+| 8.2 | The TTML parser repairs what it can and refuses what it must.                     | Real documents use namespace prefixes they never declare, and discarding the lyrics over a missing attribute helps nobody. A DTD is refused outright instead: these arrive over the network, and entity expansion is the only attack ElementTree still allows.  |
+| 8.3 | The community TTML source leads the cascade.                                      | Word-level with no token, key, captcha or signing anywhere — the only source here with no authentication at all. 6 of 10 tracks played on this machine came back word-timed.                                                                                    |
+| 8.4 | Musixmatch is second, never first.                                                | Wider coverage (13/16 against 6/10) but undocumented, commercial and throttled. Placing it behind the free source keeps it off the common path, so it is asked only for what the free source missed.                                                            |
+| 8.5 | A refusal stops the provider entirely for fifteen minutes.                        | It throttles after roughly twenty paced lookups, and refuses by reporting *no match* rather than an error — so a run that hits the limit silently reports every remaining track as missing. Retrying into that is what turns a temporary limit into a block.    |
+| 8.6 | An inferred word duration is capped.                                              | richsync gives offsets and no durations, so a word's end comes from the next word's start. Uncapped, an instrumental break inside a line reads as one enormous word and leaves the highlight stuck mid-line for seconds.                                        |
+| 8.7 | The cache stays many small immutable files, and its location is configurable.      | That shape is what makes plain folder sync safe between machines: entries are written once and never modified, so two machines can add different files but never disagree about one. A shared database would be worse — concurrent writers are what corrupt one. |
+| 8.8 | Canvas items are built per line and afterwards only recoloured.                    | A sweep changes continuously, so rebuilding each frame is exactly what makes it look stepped. The fast tick also applies only while a word is lit: the overlay sits on screen all day, and 33 ms on a still line is pure cost.                                  |
+| 8.9 | Word-level degrades silently to line level, per line.                              | Coverage is not all-or-nothing even within a track — verses can be word-timed and a shouted chorus not. Representing that per line means the seam never shows.                                                                                                 |
+
 ### Superseded decisions
 
 | ID  | Change                                                                                  | When       |
@@ -461,6 +496,9 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | S.11 | Failures swallowed silently → logged to a file the user can actually read (decisions 3.10, 5.7). | 2026-08-06 |
 | S.12 | The cascade returning the first answer → the best answer (decision 7.1).                | 2026-08-06 |
 | S.13 | Any instrumental ending the search → only an exactly matched one (decision 7.2).        | 2026-08-06 |
+| S.14 | "No free source has broad word-level coverage" → two do; the phase 0 finding was a measurement error (decision 8.1). | 2026-08-06 |
+| S.15 | Musixmatch richsync written off as a dead endpoint → it keys on track id, not names.    | 2026-08-06 |
+| S.16 | amll-ttml-db as the word-level source → dropped; two better sources cover it.           | 2026-08-06 |
 
 ---
 
@@ -482,3 +520,8 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | 2026-08-06 | Answers ranked by precision (#15). The cascade keeps the best result rather than the first one offered.          |
 | 2026-08-06 | NetEase added (#16), and guessed instrumentals no longer end the search — a silent wrong answer caught live.     |
 | 2026-08-06 | Step 6 complete, ordering config deferred to step 8. Next delivery is step 7, word-by-word.                      |
+| 2026-08-06 | Word timings and a TTML parser (#19). The WORD tier becomes reachable after existing unused since step 6.        |
+| 2026-08-06 | Community TTML source and precision ceilings (#21). Caught word timings never reaching the cache.                |
+| 2026-08-06 | The current line renders word by word (#23), rebuilt per line and recoloured per frame.                          |
+| 2026-08-06 | The cache can live in a synced folder (#25), so a second machine inherits it.                                    |
+| 2026-08-06 | Musixmatch richsync added (#27). Step 7 complete; the visual treatment is deferred to its own work.              |
