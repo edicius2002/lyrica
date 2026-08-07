@@ -184,6 +184,10 @@ class SessionReader(ABC):
         """Whether this reader can work on the machine it is running on."""
         return False
 
+    def read_artwork(self) -> bytes | None:
+        """The current track's artwork, if the platform publishes any."""
+        return None
+
     def seek(self, seconds: float) -> bool:
         """Ask the player to jump to a position. False if it will not.
 

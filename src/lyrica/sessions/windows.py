@@ -63,6 +63,44 @@ class WindowsSessionReader(SessionReader):
         return bool(await session.try_change_playback_position_async(
             int(seconds * 10_000_000)))
 
+    def read_artwork(self) -> bytes | None:
+        """The current track's artwork, if the player published any.
+
+        Read on demand rather than with every poll: it is tens of kilobytes and
+        changes once per track, where the position changes constantly.
+        """
+        try:
+            return asyncio.run(self._artwork())
+        except Exception:
+            logger.debug("could not read artwork", exc_info=True)
+            return None
+
+    async def _artwork(self) -> bytes | None:
+        from winsdk.windows.storage.streams import (
+            Buffer,
+            DataReader,
+            InputStreamOptions,
+        )
+
+        manager_cls = _session_manager_class()
+        mgr = await manager_cls.request_async()
+        session = mgr.get_current_session()
+        if session is None:
+            return None
+        media = await session.try_get_media_properties_async()
+        reference = media.thumbnail
+        if reference is None:
+            return None
+
+        stream = await reference.open_read_async()
+        size = stream.size
+        if not size:
+            return None
+        buffer = Buffer(size)
+        await stream.read_async(buffer, size, InputStreamOptions.READ_AHEAD)
+        reader = DataReader.from_buffer(buffer)
+        return bytes(reader.read_bytes(buffer.length))
+
     def _run(self):
         asyncio.run(self._loop())
 
