@@ -119,3 +119,20 @@ def test_an_entry_pointing_somewhere_else_does_not_count_as_enabled(monkeypatch)
 def test_changing_it_from_a_source_checkout_is_a_no_op(monkeypatch):
     monkeypatch.setattr(autostart, "frozen", lambda: False)
     assert autostart.set_enabled(True) is False
+
+
+def test_every_module_imports_on_any_platform():
+    """The whole package, imported, wherever this runs.
+
+    Windows-only type machinery — `ctypes.wintypes`, `ctypes.WINFUNCTYPE` —
+    does not exist elsewhere, so declaring a struct at module level breaks the
+    import on every other platform. That is how this file first failed CI: a
+    collection error, from a module the rest of the app imports unconditionally.
+    """
+    import importlib
+    import pkgutil
+
+    import lyrica
+
+    for module in pkgutil.walk_packages(lyrica.__path__, "lyrica."):
+        importlib.import_module(module.name)

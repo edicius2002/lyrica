@@ -20,7 +20,6 @@ import logging
 import queue
 import sys
 import threading
-from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
 
@@ -54,43 +53,49 @@ TPM_RETURNCMD = 0x0100
 CW_USEDEFAULT = 0x80000000
 HWND_MESSAGE = -3
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, ctypes.c_uint,
-                             wintypes.WPARAM, wintypes.LPARAM)
+# Everything below needs the Win32 type machinery, and `ctypes.wintypes` and
+# `ctypes.WINFUNCTYPE` do not exist off Windows — importing them at module level
+# breaks the import everywhere else, which is what CI caught. The constants and
+# the menu above are plain values and stay unguarded so they can be tested
+# anywhere.
+if sys.platform == "win32":
+    from ctypes import wintypes
 
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, wintypes.HWND, ctypes.c_uint,
+                                 wintypes.WPARAM, wintypes.LPARAM)
 
-class WNDCLASS(ctypes.Structure):
-    _fields_ = [
-        ("style", ctypes.c_uint),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HBRUSH),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-    ]
+    class WNDCLASS(ctypes.Structure):
+        _fields_ = [
+            ("style", ctypes.c_uint),
+            ("lpfnWndProc", WNDPROC),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wintypes.HINSTANCE),
+            ("hIcon", wintypes.HICON),
+            ("hCursor", wintypes.HANDLE),
+            ("hbrBackground", wintypes.HBRUSH),
+            ("lpszMenuName", wintypes.LPCWSTR),
+            ("lpszClassName", wintypes.LPCWSTR),
+        ]
 
-
-class NOTIFYICONDATA(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("hWnd", wintypes.HWND),
-        ("uID", ctypes.c_uint),
-        ("uFlags", ctypes.c_uint),
-        ("uCallbackMessage", ctypes.c_uint),
-        ("hIcon", wintypes.HICON),
-        ("szTip", ctypes.c_wchar * 128),
-        ("dwState", wintypes.DWORD),
-        ("dwStateMask", wintypes.DWORD),
-        ("szInfo", ctypes.c_wchar * 256),
-        ("uVersion", ctypes.c_uint),
-        ("szInfoTitle", ctypes.c_wchar * 64),
-        ("dwInfoFlags", wintypes.DWORD),
-        ("guidItem", ctypes.c_byte * 16),
-        ("hBalloonIcon", wintypes.HICON),
-    ]
+    class NOTIFYICONDATA(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("hWnd", wintypes.HWND),
+            ("uID", ctypes.c_uint),
+            ("uFlags", ctypes.c_uint),
+            ("uCallbackMessage", ctypes.c_uint),
+            ("hIcon", wintypes.HICON),
+            ("szTip", ctypes.c_wchar * 128),
+            ("dwState", wintypes.DWORD),
+            ("dwStateMask", wintypes.DWORD),
+            ("szInfo", ctypes.c_wchar * 256),
+            ("uVersion", ctypes.c_uint),
+            ("szInfoTitle", ctypes.c_wchar * 64),
+            ("dwInfoFlags", wintypes.DWORD),
+            ("guidItem", ctypes.c_byte * 16),
+            ("hBalloonIcon", wintypes.HICON),
+        ]
 
 
 # The menu, in order. `None` is a separator. The identifiers start at 1 because
