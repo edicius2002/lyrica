@@ -28,6 +28,7 @@ class Lyrics:
     synced: bool = False
     source: str = ""
     instrumental: bool = False
+    exact: bool = False  # the provider identified the track, rather than guessing at it
 
     @property
     def precision(self) -> Precision:
@@ -41,11 +42,15 @@ class Lyrics:
     def is_definitive(self) -> bool:
         """True when no other source could improve on this.
 
-        An instrumental is definitive despite scoring NONE: the track having no
-        lyrics is a complete answer, and asking further sources would only
-        invite one of them to invent some.
+        An instrumental counts only when the provider matched the track
+        exactly. "This recording has no lyrics" is a complete answer, but a
+        fuzzy search reaches for the nearest thing it can find, and karaoke and
+        backing-track uploads sit right next to the songs they came from. One
+        of those matched loosely would otherwise end the search and report a
+        song as instrumental while another source had its lyrics all along —
+        a silent wrong answer, which is the worst kind.
         """
-        return self.instrumental or self.precision >= Precision.LINE
+        return (self.instrumental and self.exact) or self.precision >= Precision.LINE
 
     def line_index_at(self, t: float) -> int:
         """Index of the active line at time t (-1 before the first line)."""

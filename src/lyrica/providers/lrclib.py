@@ -13,14 +13,14 @@ API = "https://lrclib.net/api"
 HEADERS = {"User-Agent": "lyrica/0.1.0 (personal research overlay)"}
 
 
-def _from_record(d: dict, source: str) -> Lyrics | None:
+def _from_record(d: dict, source: str, *, exact: bool) -> Lyrics | None:
     if d.get("instrumental"):
-        return Lyrics(instrumental=True, source=source)
+        return Lyrics(instrumental=True, source=source, exact=exact)
     if d.get("syncedLyrics"):
         return Lyrics(lines=parse_lrc(d["syncedLyrics"]), plain=d.get("plainLyrics") or "",
-                      synced=True, source=source)
+                      synced=True, source=source, exact=exact)
     if d.get("plainLyrics"):
-        return Lyrics(plain=d["plainLyrics"], synced=False, source=source)
+        return Lyrics(plain=d["plainLyrics"], synced=False, source=source, exact=exact)
     return None
 
 
@@ -62,11 +62,13 @@ class LrclibProvider(LyricsProvider):
             attempts.append({**base, "duration": round(duration)})
         attempts.append(base)
 
+        # A /get hit names the track; a /search hit is the closest thing found.
+        # The distinction matters for instrumentals — see Lyrics.is_definitive.
         for params in attempts:
             try:
                 r = requests.get(f"{API}/get", params=params, headers=HEADERS, timeout=10)
                 if r.status_code == 200:
-                    result = _from_record(r.json(), "lrclib/get")
+                    result = _from_record(r.json(), "lrclib/get", exact=True)
                     if result is not None:
                         return result
             except requests.RequestException:
@@ -78,7 +80,7 @@ class LrclibProvider(LyricsProvider):
             if r.status_code == 200 and r.json():
                 best = max(r.json(), key=lambda rec: _score(rec, artist, title, duration))
                 if _score(best, artist, title, duration) >= 2:
-                    return _from_record(best, "lrclib/search")
+                    return _from_record(best, "lrclib/search", exact=False)
         except requests.RequestException:
             pass
         return None
