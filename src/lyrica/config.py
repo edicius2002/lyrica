@@ -36,6 +36,53 @@ def cache_root() -> Path:
 SIZE_MIN, SIZE_MAX = 0.6, 2.0
 
 
+def clamp_size(value: float) -> float:
+    return max(SIZE_MIN, min(SIZE_MAX, value))
+
+
+def _parse_size(raw: str, source: str) -> float | None:
+    """A size from text, or None if there was nothing usable in it.
+
+    Never raises. These are read at startup on a machine with no console, so an
+    exception here would be a window that never appears and no way to find out
+    why — a warning in the log and the designed size is the honest failure.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s=%r is not a number; using the designed size", source, raw)
+        return None
+    if not SIZE_MIN <= value <= SIZE_MAX:
+        logger.warning("%s=%s is outside %s-%s; using %s",
+                       source, value, SIZE_MIN, SIZE_MAX, clamp_size(value))
+    return clamp_size(value)
+
+
+def size_path() -> Path:
+    """Where a size chosen with the keyboard is remembered."""
+    return cache_root() / "size"
+
+
+def saved_size() -> float | None:
+    try:
+        return _parse_size(size_path().read_text(encoding="utf-8"), "the saved size")
+    except OSError:
+        return None
+
+
+def save_size(value: float) -> None:
+    """Remember a size chosen with the keyboard. Failing to is not fatal."""
+    try:
+        path = size_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{clamp_size(value):.2f}", encoding="utf-8")
+    except OSError:
+        logger.debug("could not save the overlay size", exc_info=True)
+
+
 def size_scale() -> float:
     """How much bigger or smaller than designed the overlay should be.
 
@@ -43,24 +90,17 @@ def size_scale() -> float:
     way DPI does — window, fonts, cover, gaps and fade bands together. That is
     what keeps the proportions: nothing is resized against anything else.
 
-    A bad value is ignored rather than fatal. This is read at startup on a
-    machine with no console, so raising here would be a window that never
-    appears and no way to find out why.
+    A size chosen with the keyboard wins over `LYRICA_SIZE`, which is the only
+    order that is not surprising: adjusting the window and watching it change,
+    then finding it back where it was on the next run, would read as the
+    keyboard being broken rather than as a setting taking precedence. So
+    `LYRICA_SIZE` is where a machine starts, and the keyboard is what overrides
+    it from then on. Which source won is logged, since the loser is invisible.
     """
-    raw = os.environ.get("LYRICA_SIZE", "").strip()
-    if not raw:
-        return 1.0
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("LYRICA_SIZE=%r is not a number; using the designed size", raw)
-        return 1.0
-    if not SIZE_MIN <= value <= SIZE_MAX:
-        clamped = max(SIZE_MIN, min(SIZE_MAX, value))
-        logger.warning("LYRICA_SIZE=%s is outside %s-%s; using %s",
-                       value, SIZE_MIN, SIZE_MAX, clamped)
-        return clamped
-    return value
+    saved = saved_size()
+    if saved is not None:
+        return saved
+    return _parse_size(os.environ.get("LYRICA_SIZE", ""), "LYRICA_SIZE") or 1.0
 
 
 def find_env(start: Path | None = None) -> Path | None:

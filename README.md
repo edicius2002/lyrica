@@ -22,10 +22,19 @@ Play something and the overlay appears at the bottom center of the screen.
 | Move the overlay | Drag with the mouse |
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s) |
+| Make it bigger / smaller | `Ctrl`+`Alt`+`+` / `Ctrl`+`Alt`+`-` |
+| Back to the designed size | `Ctrl`+`Alt`+`0` |
 
-The overlay is drawn at a size that follows the display's own DPI scale. To make
-it bigger or smaller than that, set `LYRICA_SIZE` to a multiple of the designed
-size — `0.8` for a smaller box, `1.4` for a larger one, between `0.6` and `2.0`:
+The size shortcuts are global on Windows: they work while Spotify or a browser
+has the keyboard, which is the only way they are any use — focusing the overlay
+means clicking it, and clicking it seeks to a line. `Esc` and `+` / `-` still
+need it focused. On other platforms the size keys need the focus too.
+
+A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
+
+The overlay is drawn at a size that follows the display's own DPI scale. The
+keyboard is the quickest way to change that, and `LYRICA_SIZE` sets where a
+machine starts — a multiple of the designed size, between `0.6` and `2.0`:
 
 ```powershell
 $env:LYRICA_SIZE = "1.4"; lyrica     # or put LYRICA_SIZE=1.4 in .env
