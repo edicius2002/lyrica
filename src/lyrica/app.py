@@ -44,7 +44,9 @@ FADE_ZONE = 64
 # the larger share of the room.
 ANCHOR = 0.45
 
-FONT_HEADER = ("Segoe UI", -15)
+FONT_TITLE = ("Segoe UI Semibold", -16)
+FONT_ARTIST = ("Segoe UI", -13)
+THUMB_SIZE = 46
 # One size for every lyric line. A role change that also changed size would
 # force a relayout, which is a rebuild wearing a different name — and lines
 # reading as louder or quieter rather than bigger or smaller is what the
@@ -94,9 +96,12 @@ class Overlay:
         self._press_at = (0, 0)
         self._press_y = 0
         self._moved = False
-        self._pending_backdrop = None
+        self._pending_art = None
         self._backdrop_item = None
         self._backdrop_photo = None
+        self._thumb_image = None
+        self._thumb_photo = None
+        self._card_text = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -119,7 +124,8 @@ class Overlay:
         self.height = self.chrome.px(HEIGHT)
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
-        self.f_header = _scaled_font(FONT_HEADER, scale)
+        self.f_title = _scaled_font(FONT_TITLE, scale)
+        self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
         self.anchor_y = self.height * ANCHOR
 
@@ -163,15 +169,47 @@ class Overlay:
             for i, level in enumerate((0x2C, 0x1C, 0x0C)):
                 self.canvas.create_line(inset, 1 + i, self.width - inset, 1 + i,
                                         fill=f"#{level:02x}{level:02x}{level + 4:02x}")
-        self._header_y = self.chrome.px(12)
-        self._header = self.canvas.create_text(
-            self.width // 2, self._header_y, text="", anchor="n",
-            font=self.f_header, fill=self.palette.header)
-        # Lyrics must be gone before they reach the header. Without this the
+        # The card: cover, title beside it, artists under the title. Laid out
+        # left to right but centred as a group, so it stays put while its own
+        # contents change width from song to song.
+        self._card_y = self.chrome.px(14)
+        self._thumb_size = self.chrome.px(THUMB_SIZE)
+        self._thumb_item = self.canvas.create_rectangle(
+            0, 0, 0, 0, outline="", fill="")
+        self._title_item = self.canvas.create_text(
+            0, 0, text="", anchor="w", font=self.f_title, fill=self.palette.sung)
+        self._artist_item = self.canvas.create_text(
+            0, 0, text="", anchor="w", font=self.f_artist, fill=self.palette.header)
+
+        # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
-        # the title, which is the one thing on screen that never moves.
-        self._content_top = self._header_y + tkfont.Font(
-            font=self.f_header).metrics("linespace") + self.chrome.px(10)
+        # it, and the card is the one thing on screen that never moves.
+        self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
+
+    def _lay_out_card(self, title: str, artists: str) -> None:
+        """Place the card's parts and centre the group."""
+        gap = self.chrome.px(10)
+        title_font = tkfont.Font(font=self.f_title)
+        artist_font = tkfont.Font(font=self.f_artist)
+        text_width = max(title_font.measure(title), artist_font.measure(artists))
+        has_cover = self._thumb_photo is not None
+        cover = (self._thumb_size + gap) if has_cover else 0
+        block = cover + text_width
+
+        left = max(self.chrome.px(12), (self.width - block) // 2)
+        top = self._card_y
+
+        if has_cover:
+            self.canvas.coords(self._thumb_item, left, top,
+                               left + self._thumb_size, top + self._thumb_size)
+        text_x = left + cover
+        # Both text rows share the cover's vertical centre, so the pair reads as
+        # one block rather than as two lines that happen to sit near a square.
+        mid = top + self._thumb_size / 2
+        self.canvas.coords(self._title_item, text_x,
+                           mid - artist_font.metrics("linespace") / 2)
+        self.canvas.coords(self._artist_item, text_x,
+                           mid + title_font.metrics("linespace") / 2)
 
     # --- interaction ---
     def _drag_start(self, e):
@@ -210,7 +248,24 @@ class Overlay:
                 # to a line means starting where it starts, so it comes back off.
                 if self.reader.seek(max(0.0, target)):
                     logger.info("seeking to line %d at %.2fs", index, target)
+                    # Move now rather than waiting for the next poll. The reader
+                    # samples twice a second, and half a second of nothing
+                    # happening after a click reads as the click being ignored.
+                    self._go_to_line(index, lyr)
                 return
+
+    def _go_to_line(self, index: int, lyr: Lyrics) -> None:
+        """Make `index` the current line, animating when the move is small."""
+        step = abs(index - self.line_index) if self.line_index >= 0 else None
+        self.line_index = index
+        indices = self._visible_indices(len(lyr.lines))
+        self._ensure_views(indices, lyr)
+        # A move within the visible column animates, in either direction — going
+        # back a line should travel just as the next one does. A longer jump is
+        # a discontinuity, and animating one is how a view ends up chasing
+        # itself across a song.
+        self._retarget(indices, animate=step is not None and 0 < step <= CONTEXT)
+        self._restyle(indices)
 
     def _nudge(self, dt: float):
         self.offset += dt
@@ -231,72 +286,93 @@ class Overlay:
         self._start_artwork(gen)
 
     def _start_artwork(self, gen: int) -> None:
-        """Fetch and prepare the backdrop off the render thread.
+        """Fetch and prepare the cover off the render thread.
 
-        Decoding and blurring an image takes long enough to drop frames if it
-        happened inline, and it only needs doing once a track.
+        Decoding an image takes long enough to drop frames if it happened
+        inline, and it only needs doing once a track.
         """
-        if not self.chrome.additive or not artwork.available():
+        if not artwork.available():
             return
 
         def work():
             data = self.reader.read_artwork()
-            image = artwork.make_backdrop(data, self.width, self.height) if data else None
+            if not data:
+                images = (None, None)
+            else:
+                images = (
+                    artwork.make_thumbnail(data, self._thumb_size),
+                    # The backdrop only makes sense where the surface adds
+                    # light; over a colour key it would be a dark rectangle.
+                    artwork.make_backdrop(data, self.width, self.height)
+                    if self.chrome.additive else None,
+                )
             if gen == self.fetch_gen:
-                # Handing the image over rather than drawing it: Tk objects
+                # Handing the images over rather than drawing them: Tk objects
                 # belong to the thread that owns the widget.
-                self._pending_backdrop = image
+                self._pending_art = images
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_backdrop(self) -> None:
-        """Put a prepared backdrop on the canvas, on the render thread."""
-        image = self._pending_backdrop
-        if image is None:
+    def _apply_art(self) -> None:
+        """Put prepared images on the canvas, on the render thread."""
+        if self._pending_art is None:
             return
-        self._pending_backdrop = None
+        thumb, backdrop = self._pending_art
+        self._pending_art = None
         try:
             from PIL import ImageTk
-            photo = ImageTk.PhotoImage(image)
-        except Exception:
-            logger.debug("could not convert the backdrop", exc_info=True)
+        except ImportError:
             return
-        if self._backdrop_item is not None:
-            self.canvas.delete(self._backdrop_item)
-        self._backdrop_item = self.canvas.create_image(0, 0, image=photo, anchor="nw")
-        # Behind everything, and held: Tk keeps only a weak claim on the image,
-        # so dropping the reference blanks it.
-        self.canvas.tag_lower(self._backdrop_item)
-        self._backdrop_photo = photo
 
-    def _header_for(self, snap: Snapshot) -> str:
+        # Held, not just drawn: Tk keeps only a weak claim on an image, so
+        # dropping the reference blanks it.
+        if backdrop is not None:
+            photo = ImageTk.PhotoImage(backdrop)
+            if self._backdrop_item is not None:
+                self.canvas.delete(self._backdrop_item)
+            self._backdrop_item = self.canvas.create_image(0, 0, image=photo, anchor="nw")
+            self.canvas.tag_lower(self._backdrop_item)
+            self._backdrop_photo = photo
+
+        if thumb is not None:
+            photo = ImageTk.PhotoImage(thumb)
+            if self._thumb_image is not None:
+                self.canvas.delete(self._thumb_image)
+            self._thumb_image = self.canvas.create_image(0, 0, image=photo, anchor="nw")
+            self._thumb_photo = photo
+        else:
+            if self._thumb_image is not None:
+                self.canvas.delete(self._thumb_image)
+            self._thumb_image = None
+            self._thumb_photo = None
+        self._card_text = None      # force a relayout around the new cover
+
+    def _card_for(self, snap: Snapshot) -> tuple[str, str]:
         if not snap.ok:
-            return ""
+            return "", ""
         artist, title = snap.norm_artist_title()
-        text = f"{artist} – {title}" if artist else title
         if self.offset:
-            text += f"   [{self.offset:+.2f}s]"
-        return self._fit_header(text)
+            title += f"   [{self.offset:+.2f}s]"
+        limit = self.wrap - self._thumb_size
+        return self._fit(title, self.f_title, limit), self._fit(artist, self.f_artist, limit)
 
-    def _fit_header(self, text: str) -> str:
-        """Shorten a title that will not fit, rather than letting it overflow.
+    def _fit(self, text: str, font, limit: int) -> str:
+        """Shorten text that will not fit, rather than letting it overflow.
 
-        Truncated, not wrapped: a two-line title would push the lyrics down and
-        change the layout depending on the song, and the title is the one thing
-        on screen that should stay put.
+        Truncated, not wrapped: a second line would change the card's height
+        from song to song, and the card is what everything else is measured
+        from.
         """
         if not text:
             return text
-        font_obj = tkfont.Font(font=self.f_header)
-        limit = self.wrap
+        font_obj = tkfont.Font(font=font)
         if font_obj.measure(text) <= limit:
             return text
-        ellipsis = "…"
-        room = limit - font_obj.measure(ellipsis)
+        room = limit - font_obj.measure("…")
         cut = len(text)
         while cut > 0 and font_obj.measure(text[:cut]) > room:
             cut -= 1
-        return text[:cut].rstrip() + ellipsis
+        return text[:cut].rstrip() + "…"
 
     # --- the line pool ---
     def _clear_views(self):
@@ -390,28 +466,26 @@ class Overlay:
             self.line_index = -1
             self._start_fetch(snap)
 
-        self._apply_backdrop()
+        self._apply_art()
 
-        header = self._header_for(snap)
-        if header != self._header_text:
-            self._header_text = header
-            self.canvas.itemconfigure(self._header, text=header)
+        card = self._card_for(snap)
+        if card != self._card_text:
+            self._card_text = card
+            title, artists = card
+            self.canvas.itemconfigure(self._title_item, text=title)
+            self.canvas.itemconfigure(self._artist_item, text=artists)
+            self._lay_out_card(title, artists)
+            if self._thumb_image is not None:
+                x0, y0, _, _ = self.canvas.coords(self._thumb_item)
+                self.canvas.coords(self._thumb_image, x0, y0)
 
         interval = SLOW_TICK_MS
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines and not self._dragging:
             pos = snap.live_position() + self.offset
             index = lyr.line_index_at(pos + LINE_LEAD_S)
-            stepped = index == self.line_index + 1 and self.line_index >= 0
             if index != self.line_index:
-                self.line_index = index
-                indices = self._visible_indices(len(lyr.lines))
-                self._ensure_views(indices, lyr)
-                # Only a step to the next line animates. A seek or a new track
-                # should simply be there; animating a discontinuity is how a
-                # view ends up chasing itself.
-                self._retarget(indices, animate=stepped)
-                self._restyle(indices)
+                self._go_to_line(index, lyr)
 
             if self._advance_glides():
                 # Brightness follows position, so it has to be recomputed while
@@ -424,8 +498,12 @@ class Overlay:
                 word, fraction = lyr.word_progress_at(self.line_index,
                                                       pos + WORD_LEAD_S)
                 active.show_sweep(word, fraction)
-                if 0 <= word:
+                if word >= 0:
                     interval = FAST_TICK_MS
+            elif active is not None:
+                # No word timing for this line: light all of it. Leaving it dim
+                # would say none of it has been sung, about the line playing.
+                active.show_lit()
 
         self.root.after(interval, self._tick)
 

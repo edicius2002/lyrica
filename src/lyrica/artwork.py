@@ -33,6 +33,32 @@ def available() -> bool:
         return False
 
 
+def make_thumbnail(data: bytes, size: int):
+    """A small square cover for the header, cropped rather than squashed.
+
+    Sharp, unlike the backdrop: this one is meant to be recognised. Cropping to
+    a square keeps the artwork's proportions, where stretching a non-square
+    cover into a box would distort whatever is on it.
+    """
+    if not data or size <= 0:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = source.convert("RGB")
+        side = min(image.width, image.height)
+        left = (image.width - side) // 2
+        top = (image.height - side) // 2
+        square = image.crop((left, top, left + side, top + side))
+        return square.resize((size, size), Image.LANCZOS)
+    except Exception:
+        logger.debug("could not build a thumbnail", exc_info=True)
+        return None
+
+
 def make_backdrop(data: bytes, width: int, height: int):
     """A blurred, darkened, window-sized image, or None if it cannot be made.
 

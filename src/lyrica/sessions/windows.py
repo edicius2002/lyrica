@@ -99,7 +99,11 @@ class WindowsSessionReader(SessionReader):
         buffer = Buffer(size)
         await stream.read_async(buffer, size, InputStreamOptions.READ_AHEAD)
         reader = DataReader.from_buffer(buffer)
-        return bytes(reader.read_bytes(buffer.length))
+        # read_bytes fills a buffer that is handed to it; it does not take a
+        # length and return the data.
+        out = bytearray(buffer.length)
+        reader.read_bytes(out)
+        return bytes(out)
 
     def _run(self):
         asyncio.run(self._loop())
