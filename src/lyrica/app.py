@@ -185,9 +185,19 @@ class Overlay:
         self.root.bind("<minus>", lambda e: self._nudge(-0.25))
 
     def _build_frame(self):
-        """The parts that never move: the top highlight and the card."""
-        if self.chrome.additive:
-            self._draw_sheen()
+        """The parts that never move: the card.
+
+        There is no edge highlight. It was built on the belief that this
+        surface only ever adds light, so a dim grey could not darken anything.
+        Sampling the actual pixels disproved that: against a plate reading 58,
+        the highlight's own rows measured 67, 50 and 35 — the lower two are
+        darker than what they sit on, which is why the top edge looked like a
+        badly drawn black line rather than a soft one.
+
+        Correcting the levels would have kept a decoration that has now caused
+        two visible faults. Removing it is the smaller thing on screen and the
+        smaller thing to explain.
+        """
         # The card: cover, title beside it, artists under the title. Laid out
         # left to right but centred as a group, so it stays put while its own
         # contents change width from song to song.
@@ -204,37 +214,6 @@ class Overlay:
         # outermost line arrives at the top still faintly visible and overlaps
         # it, and the card is the one thing on screen that never moves.
         self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
-
-    def _draw_sheen(self) -> None:
-        """A highlight along the top edge that dissolves before the corners.
-
-        Drawn in segments that fade out at both ends. A single line stopping
-        dead against the curve was the visible seam — a bright edge ending
-        abruptly reads as two different corners rather than one soft one, which
-        is exactly what it looked like.
-
-        It also stays well clear of the curve. The clip region has no
-        antialiasing on this version of Windows, so the corner is a stair-step;
-        putting a bright line beside it only draws the eye to that.
-        """
-        radius = self.chrome.px(CORNER_RADIUS)
-        margin = radius + self.chrome.px(10)
-        span = self.width - margin * 2
-        if span <= 0:
-            return
-        steps = 48
-        fade = 10       # segments over which each end fades away
-        for row, peak in enumerate((0x2E, 0x1D, 0x0D)):
-            for i in range(steps):
-                x0 = margin + span * i / steps
-                x1 = margin + span * (i + 1) / steps + 1
-                edge = min(i, steps - 1 - i)
-                level = round(peak * min(1.0, edge / fade))
-                if level <= 1:
-                    continue
-                self.canvas.create_line(
-                    x0, 1 + row, x1, 1 + row,
-                    fill=f"#{level:02x}{level:02x}{min(255, level + 4):02x}")
 
     def _lay_out_card(self, title: str, artists: str) -> None:
         """Place the card's parts and centre the group."""

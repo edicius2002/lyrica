@@ -1,18 +1,30 @@
 """Colours for each composition mode.
 
-In glass mode the surface adds light, so a level *is* an opacity: drawing a line
-at 0x8a rather than 0xff is exactly 54 % against the plate, with no alpha
+In glass mode the surface adds light, so a level behaves like an opacity:
+drawing at 0x8a rather than 0xff reads as roughly half strength, with no alpha
 channel anywhere. In keyed mode colours replace what is behind them, so the
 values are real colours and legibility comes from an outline instead.
+
+**There is a floor, and it was learned the hard way.** The plate contributes
+about 0x15 under drawn content, not the ~0x3a it shows where nothing is drawn.
+Measured against a plate reading 58: drawing 46 gave 67, 29 gave 50, and 13
+gave 35 — a constant +21. So anything drawn below roughly 0x25 comes out
+*darker than its surroundings*, which is how a decorative edge highlight ended
+up looking like a badly drawn black line. Dim is available; invisible is not.
 
 Levels are precomputed into a ramp at import: the sweep asks for a colour per
 character per frame, and a table lookup keeps that off the hot path.
 """
+
 from dataclasses import dataclass
 
 from lyrica.chrome import Chrome, ChromeMode
 
 RAMP_STEPS = 64
+
+# Below this, a drawn pixel reads darker than the plate around it rather than
+# fainter. Anything meant to recede has to stop here, not at zero.
+VISIBLE_FLOOR = 0x25
 
 
 def _grey(level: int) -> str:
@@ -81,7 +93,12 @@ class Palette:
         if not self.additive:
             return base
         level = int(base[1:3], 16)
-        return _grey(round(level * max(0.0, min(1.0, visibility))))
+        # Fades to the floor, not to zero. At the floor a drawn pixel matches
+        # the plate exactly and vanishes; below it the pixel goes *darker* than
+        # its surroundings, so a line leaving the frame would smear into a dark
+        # band instead of disappearing.
+        v = max(0.0, min(1.0, visibility))
+        return _grey(round(VISIBLE_FLOOR + (level - VISIBLE_FLOOR) * v))
 
 
 # Glass: additive, so these are brightness levels and double as opacity.

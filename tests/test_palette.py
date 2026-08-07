@@ -1,7 +1,7 @@
 """Brightness levels and the edge fade (offline)."""
 import itertools
 
-from lyrica.palette import GLASS, KEYED
+from lyrica.palette import GLASS, KEYED, VISIBLE_FLOOR
 
 
 def level_of(colour: str) -> int:
@@ -37,21 +37,27 @@ def test_full_visibility_leaves_a_line_at_its_normal_level():
     assert GLASS.faded(1, 1.0) == GLASS.by_distance(1)
 
 
-def test_a_line_at_the_edge_fades_to_nothing():
-    # The whole point: by the time the frame would clip a line, there is
-    # nothing left of it to clip.
-    assert level_of(GLASS.faded(1, 0.0)) == 0
+def test_a_line_at_the_edge_fades_to_the_floor():
+    # Not to zero. Measured: the plate contributes ~0x15 under drawn content,
+    # so a pixel below the floor comes out *darker* than its surroundings — a
+    # line leaving the frame would smear into a dark band instead of vanishing.
+    assert level_of(GLASS.faded(1, 0.0)) == VISIBLE_FLOOR
 
 
 def test_the_fade_is_gradual():
     full = level_of(GLASS.faded(1, 1.0))
     half = level_of(GLASS.faded(1, 0.5))
-    assert 0 < half < full
+    assert VISIBLE_FLOOR <= half < full
+
+
+def test_the_fade_never_goes_below_the_floor():
+    for visibility in (0.0, 0.1, 0.5, 1.0):
+        assert level_of(GLASS.faded(1, visibility)) >= VISIBLE_FLOOR
 
 
 def test_visibility_clamps_outside_its_range():
     assert GLASS.faded(1, 5.0) == GLASS.faded(1, 1.0)
-    assert level_of(GLASS.faded(1, -5.0)) == 0
+    assert level_of(GLASS.faded(1, -5.0)) == VISIBLE_FLOOR
 
 
 def test_replacing_composition_does_not_pretend_to_fade():
