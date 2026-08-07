@@ -65,6 +65,11 @@ WORD_LEAD_S = 0.150
 # brightens as it approaches, rather than appearing at full strength.
 CONTEXT = 2
 
+# How far the pointer may travel and still count as a click rather than a drag.
+CLICK_SLACK = 4
+
+logger = logging.getLogger(__name__)
+
 
 def _scaled_font(spec: tuple, scale: float) -> tuple:
     family, size, *rest = spec
@@ -86,6 +91,9 @@ class Overlay:
         self._header_text = None
         self._dragging = False
         self._drag_at = (None, None)
+        self._press_at = (0, 0)
+        self._press_y = 0
+        self._moved = False
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -165,6 +173,9 @@ class Overlay:
     # --- interaction ---
     def _drag_start(self, e):
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
+        self._press_at = (e.x_root, e.y_root)
+        self._press_y = e.y
+        self._moved = False
         self._dragging = True
 
     def _drag_move(self, e):
@@ -172,10 +183,31 @@ class Overlay:
         if (x, y) == self._drag_at:
             return          # motion events repeat; moving to where we already are stutters
         self._drag_at = (x, y)
+        # A hand never holds perfectly still, so a few pixels of travel is still
+        # a click. Without the slack, seeking would almost never fire.
+        px, py = self._press_at
+        if abs(e.x_root - px) > CLICK_SLACK or abs(e.y_root - py) > CLICK_SLACK:
+            self._moved = True
         self.root.geometry(f"+{x}+{y}")
 
     def _drag_end(self, _e):
         self._dragging = False
+        if not self._moved:
+            self._seek_to_line_at(self._press_y)
+
+    def _seek_to_line_at(self, y: int) -> None:
+        """Jump to whichever line was clicked, if the player will allow it."""
+        lyr = self.lyrics
+        if lyr is None or not lyr.synced:
+            return
+        for index, view in self._views.items():
+            if view.y <= y <= view.y + view.height and index < len(lyr.lines):
+                target = lyr.lines[index][0] - self.offset
+                # The lead exists so a line appears before it is sung; seeking
+                # to a line means starting where it starts, so it comes back off.
+                if self.reader.seek(max(0.0, target)):
+                    logger.info("seeking to line %d at %.2fs", index, target)
+                return
 
     def _nudge(self, dt: float):
         self.offset += dt

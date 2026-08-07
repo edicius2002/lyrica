@@ -37,6 +37,32 @@ class WindowsSessionReader(SessionReader):
             return False
         return True
 
+    def seek(self, seconds: float) -> bool:
+        """Ask the current session to jump. Verified working against Spotify.
+
+        Runs on its own loop rather than the reader's: the reader is polling on
+        its thread, and a jump is a one-off the caller is waiting on.
+        """
+        try:
+            return asyncio.run(self._seek(max(0.0, seconds)))
+        except Exception:
+            logger.exception("seek to %.2fs failed", seconds)
+            return False
+
+    async def _seek(self, seconds: float) -> bool:
+        manager_cls = _session_manager_class()
+        mgr = await manager_cls.request_async()
+        session = mgr.get_current_session()
+        if session is None:
+            return False
+        controls = session.get_playback_info().controls
+        if not getattr(controls, "is_playback_position_enabled", False):
+            logger.info("this player does not accept position changes")
+            return False
+        # The API counts in 100-nanosecond ticks, not seconds.
+        return bool(await session.try_change_playback_position_async(
+            int(seconds * 10_000_000)))
+
     def _run(self):
         asyncio.run(self._loop())
 

@@ -183,3 +183,13 @@ class SessionReader(ABC):
     def available() -> bool:
         """Whether this reader can work on the machine it is running on."""
         return False
+
+    def seek(self, seconds: float) -> bool:
+        """Ask the player to jump to a position. False if it will not.
+
+        Watching and controlling are separate permissions here: an overlay
+        outside the player can only ask, and whether the request is honoured is
+        up to the app. So this reports whether it worked rather than assuming,
+        and the caller is expected to carry on unbothered when it did not.
+        """
+        return False
