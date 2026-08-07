@@ -25,6 +25,7 @@ from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
 
+ACCENT_DISABLED = 0
 ACCENT_ENABLE_BLURBEHIND = 3
 ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
 WCA_ACCENT_POLICY = 19
@@ -161,6 +162,27 @@ def move_window(root, x: int, y: int) -> bool:
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS))
     except (AttributeError, OSError, ValueError):
         return False
+
+
+def suspend_glass(root, suspended: bool) -> bool:
+    """Turn the blur off for the duration of a drag, and back on after.
+
+    The compositor recomputes the blur for every position a moving window
+    passes through, and that work happens outside this process where it cannot
+    be measured from here. Everything inside the process measured clean — the
+    move lands in ~2.4 ms, the event loop stalls twice in eight seconds — so
+    this is the remaining candidate rather than a diagnosed cause.
+
+    It costs 0.006 ms to switch either way, measured, which is cheap enough
+    that trying it is more honest than continuing to theorise about it.
+    """
+    try:
+        hwnd = _hwnd_of(root)
+    except (AttributeError, OSError, ValueError):
+        return False
+    if suspended:
+        return _set_accent(hwnd, ACCENT_DISABLED, 0)
+    return _set_accent(hwnd, ACCENT_ENABLE_ACRYLICBLURBEHIND, _abgr(*TINT_RGBA))
 
 
 def apply_glass(root) -> bool:

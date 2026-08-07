@@ -56,6 +56,13 @@ SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 DRAG_TICK_MS = 120  # while the window is being moved, the hand comes first
 
+# Drop the blur while dragging. Everything measurable inside the process came
+# back clean — the move lands in ~2.4 ms, the loop stalls twice in eight
+# seconds — which leaves the compositor's own work, outside this process and
+# not measurable from here. Switching the effect costs 0.006 ms, so this is
+# cheap to try and cheap to turn off if it makes no difference.
+SUSPEND_GLASS_WHILE_DRAGGING = True
+
 # Lyrics feel late when they land exactly on the beat: you read a line as it
 # begins, so it has to be there fractionally before the voice. better-lyrics
 # settled on the same correction, and those numbers are adopted, not guessed.
@@ -230,6 +237,8 @@ class Overlay:
         self._press_y = e.y
         self._moved = False
         self._dragging = True
+        if SUSPEND_GLASS_WHILE_DRAGGING:
+            chrome_mod.suspend_effects(self.root, self.chrome, True)
 
     def _drag_move(self, e):
         x, y = e.x_root - self._dx, e.y_root - self._dy
@@ -245,6 +254,8 @@ class Overlay:
 
     def _drag_end(self, _e):
         self._dragging = False
+        if SUSPEND_GLASS_WHILE_DRAGGING:
+            chrome_mod.suspend_effects(self.root, self.chrome, False)
         if not self._moved:
             self._seek_to_line_at(self._press_y)
 
