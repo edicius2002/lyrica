@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push to a PR makes the run in flight irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Windows, not by preference: the package imports winsdk at module scope,
+    # so a Linux runner cannot import lyrica at all. Windows minutes bill at
+    # double rate on private repositories, which is why this job stays small
+    # and cancels superseded runs.
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # The suite is offline by contract, so a slow or unreachable lyrics API
+        # can never turn this red. Network behaviour lives in research/viability
+        # and is run by hand.
+        run: pytest -q
