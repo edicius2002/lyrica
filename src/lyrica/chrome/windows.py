@@ -35,7 +35,7 @@ WCA_ACCENT_POLICY = 19
 # regardless of what the plate is doing, so thinning the plate costs background
 # separation but not legibility. Measured: 0xCC reads ~(35,35,42) over a
 # saturated backdrop, 0xA0 visibly drifts light over bright video.
-TINT_RGBA = (12, 12, 16, 168)
+TINT_RGBA = (12, 12, 16, 132)
 CORNER_RADIUS = 22
 
 

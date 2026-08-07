@@ -25,24 +25,22 @@ from lyrica.sessions import Snapshot, create_reader
 
 # Logical pixels at 96 dpi; scaled by the chrome's DPI factor at startup.
 #
-# The height is not a taste decision. Three lines have to sit fully lit — the
-# one before, the one being sung, and the one coming — with a fade band above
-# and below for lines arriving and leaving, and the header clear of all of it.
-# Anything shorter and the previous line is already half faded while you are
-# still hearing it.
-WIDTH, HEIGHT = 900, 400
+# Three lines: the one before, the one being sung, and the one coming. The
+# height follows from that plus the card and a fade band at each edge — it is
+# derived, not chosen, and shrinking the count is what shrinks the window.
+WIDTH, HEIGHT = 900, 300
 WRAP = 800
 ROW_GAP = 10
 
-# The band at each edge where a line fades away. Deep enough to read as a fade
-# rather than a cut, shallow enough that three lines still fit lit between the
-# two bands.
-FADE_ZONE = 64
+# The band at each edge where a line fades away. Shallower now that only one
+# line sits either side: deep enough to read as a fade rather than a cut,
+# shallow enough that the neighbours are still properly legible.
+FADE_ZONE = 42
 
-# Where the line being sung sits, as a fraction of the window height. Just
-# above centre: the line coming matters more than the one just gone, so it gets
-# the larger share of the room.
-ANCHOR = 0.45
+# Where the line being sung sits, as a fraction of the window height. Derived
+# rather than chosen: low enough that the line above clears the card and its
+# fade band, high enough that the line below clears the bottom one.
+ANCHOR = 0.55
 
 FONT_TITLE = ("Segoe UI Semibold", -16)
 FONT_ARTIST = ("Segoe UI", -13)
@@ -62,13 +60,18 @@ FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 LINE_LEAD_S = 0.115
 WORD_LEAD_S = 0.150
 
-# How many lines either side of the current one are kept on screen. Two, not
-# one, so the outermost pair can sit dim: a line then arrives already faint and
-# brightens as it approaches, rather than appearing at full strength.
-CONTEXT = 2
+# How many lines either side of the current one are kept on screen. One, so the
+# view is the line before, the line now, and the line next — and nothing else
+# competing for the glance.
+CONTEXT = 1
 
 # How far the pointer may travel and still count as a click rather than a drag.
 CLICK_SLACK = 4
+
+# How close the reported position must come before a seek is considered landed.
+# Generous, because the player moves to roughly where it was asked rather than
+# exactly, and because playback keeps running while the request travels.
+SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +105,7 @@ class Overlay:
         self._thumb_image = None
         self._thumb_photo = None
         self._card_text = None
+        self._awaiting_seek = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -248,9 +252,13 @@ class Overlay:
                 # to a line means starting where it starts, so it comes back off.
                 if self.reader.seek(max(0.0, target)):
                     logger.info("seeking to line %d at %.2fs", index, target)
-                    # Move now rather than waiting for the next poll. The reader
-                    # samples twice a second, and half a second of nothing
-                    # happening after a click reads as the click being ignored.
+                    # Move now rather than waiting for the next poll, and ignore
+                    # the position until it catches up. Without the guard the
+                    # view snapped straight back: the reader is still reporting
+                    # where playback was, so the very next frame recomputed the
+                    # old line and undid the jump, then jumped again half a
+                    # second later. That bounce is the delay, not the seek.
+                    self._awaiting_seek = target
                     self._go_to_line(index, lyr)
                 return
 
@@ -283,9 +291,9 @@ class Overlay:
                 self.lyrics = lyr
 
         threading.Thread(target=work, daemon=True).start()
-        self._start_artwork(gen)
+        self._start_artwork(gen, snap)
 
-    def _start_artwork(self, gen: int) -> None:
+    def _start_artwork(self, gen: int, snap: Snapshot) -> None:
         """Fetch and prepare the cover off the render thread.
 
         Decoding an image takes long enough to drop frames if it happened
@@ -294,22 +302,33 @@ class Overlay:
         if not artwork.available():
             return
 
+        artist, title = snap.norm_artist_title()
+        album = snap.album
+
+        def build(data: bytes):
+            return (
+                artwork.make_thumbnail(data, self._thumb_size),
+                # The backdrop only makes sense where the surface adds light;
+                # over a colour key it would be a dark rectangle.
+                artwork.make_backdrop(data, self.width, self.height)
+                if self.chrome.additive else None,
+            )
+
         def work():
-            data = self.reader.read_artwork()
-            if not data:
-                images = (None, None)
-            else:
-                images = (
-                    artwork.make_thumbnail(data, self._thumb_size),
-                    # The backdrop only makes sense where the surface adds
-                    # light; over a colour key it would be a dark rectangle.
-                    artwork.make_backdrop(data, self.width, self.height)
-                    if self.chrome.additive else None,
-                )
-            if gen == self.fetch_gen:
-                # Handing the images over rather than drawing them: Tk objects
-                # belong to the thread that owns the widget.
-                self._pending_art = images
+            # The player's own thumbnail first: it is already in memory, so
+            # something appears immediately rather than after a round trip.
+            local = self.reader.read_artwork()
+            if local and gen == self.fetch_gen:
+                self._pending_art = build(local)
+            # Then a proper one. Players publish covers as small as 64 pixels,
+            # which is visibly soft at any size worth drawing. Apple's catalogue
+            # first, then the open archive for what a commercial store does not
+            # carry — obscure pressings and independent releases.
+            wanted = max(300, self._thumb_size * 4)
+            better = (artwork.fetch_cover(artist, title, album, size=wanted)
+                      or artwork.fetch_cover_openly(artist, title))
+            if better and gen == self.fetch_gen:
+                self._pending_art = build(better)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -483,6 +502,11 @@ class Overlay:
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines and not self._dragging:
             pos = snap.live_position() + self.offset
+            if self._awaiting_seek is not None:
+                if abs(pos - self._awaiting_seek) <= SEEK_SETTLED_S:
+                    self._awaiting_seek = None      # the player caught up
+                else:
+                    pos = self._awaiting_seek       # trust the jump, not the poll
             index = lyr.line_index_at(pos + LINE_LEAD_S)
             if index != self.line_index:
                 self._go_to_line(index, lyr)
