@@ -20,7 +20,7 @@ from pathlib import Path
 from tkinter import font as tkfont
 from typing import ClassVar
 
-from lyrica import artwork, config, hotkeys, motion, songcolour
+from lyrica import artwork, autostart, config, hotkeys, motion, songcolour, tray
 from lyrica import chrome as chrome_mod
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
@@ -104,6 +104,8 @@ class Overlay:
     def __init__(self):
         self.reader = create_reader(interval=0.5)
         self.hotkeys = hotkeys.create_listener()
+        self.tray = tray.create_tray(autostart=autostart.enabled(),
+                                     can_autostart=autostart.available())
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
@@ -211,25 +213,32 @@ class Overlay:
             self.root.bind(sequence, lambda e: self._resize(-SIZE_STEP))
         self.root.bind("<Control-0>", lambda e: self._resize_to(1.0))
 
-    HOTKEY_ACTIONS: ClassVar[dict] = {
+    ACTIONS: ClassVar[dict] = {
         "toggle": lambda self: self._toggle_visible(),
         "quit": lambda self: self.root.destroy(),
         "bigger": lambda self: self._resize(+SIZE_STEP),
         "smaller": lambda self: self._resize(-SIZE_STEP),
         "reset": lambda self: self._resize_to(1.0),
+        "autostart": lambda self: self._toggle_autostart(),
     }
 
-    def _drain_hotkeys(self) -> None:
-        """Act on global shortcuts pressed while something else had the focus.
+    def _drain_actions(self) -> None:
+        """Act on whatever the shortcuts and the tray icon asked for.
 
-        Drained on the tick rather than delivered from the listener thread:
-        everything a resize touches is a Tk widget, and Tk is only safe on the
-        thread that made it.
+        Both name the same actions, so neither has to be told what the other
+        can do. Drained on the tick rather than delivered from the threads that
+        produced them: everything these touch is a Tk widget, and Tk is only
+        safe on the thread that made it.
         """
-        for action in self.hotkeys.poll():
-            handler = self.HOTKEY_ACTIONS.get(action)
-            if handler:
-                handler(self)
+        for source in (self.hotkeys, self.tray):
+            for action in source.poll():
+                handler = self.ACTIONS.get(action)
+                if handler:
+                    handler(self)
+
+    def _toggle_autostart(self) -> None:
+        state = autostart.set_enabled(not autostart.enabled())
+        self.tray.set_autostart(state)
 
     def _build_frame(self):
         """The parts that never move: the card.
@@ -731,7 +740,7 @@ class Overlay:
 
     # --- render ---
     def _tick(self):
-        self._drain_hotkeys()
+        self._drain_actions()
         if self._hidden:
             # Nothing to draw and nobody watching. The session reader keeps
             # polling on its own thread, so this stays cheap without going
@@ -828,8 +837,10 @@ class Overlay:
     def run(self):
         self.reader.start()
         self.hotkeys.start()
+        self.tray.start()
         self._tick()
         self.root.mainloop()
+        self.tray.stop()
         self.hotkeys.stop()
         self.reader.stop()
 

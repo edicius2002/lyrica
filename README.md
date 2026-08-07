@@ -52,6 +52,19 @@ need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
 
+## Notification area
+
+There is an icon beside the clock. Left click hides and shows the overlay; right
+click opens a menu with the same actions plus **Start with Windows**, which
+writes a per-user registry entry and needs no administrator. That item only does
+anything for the packaged executable — from a source checkout the command would
+have to name an interpreter, a working directory and a module, all of which move
+the moment the checkout does, so it is greyed out instead.
+
+Windows files new tray icons under the notification-area chevron rather than
+showing them, so look behind the `^` and drag it out if you want it visible. The
+log says when it was added.
+
 Hiding puts the overlay away rather than closing it — `Esc` and right click
 destroy the window, which is the right answer for "I am done" and the wrong one
 for "not right now". While hidden it stops drawing entirely and only listens for

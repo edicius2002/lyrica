@@ -14,7 +14,7 @@ from lyrica import hotkeys
 def test_every_binding_names_an_action_the_overlay_handles():
     from lyrica.app import Overlay
     for binding in hotkeys.BINDINGS:
-        assert binding.action in Overlay.HOTKEY_ACTIONS, binding.label
+        assert binding.action in Overlay.ACTIONS, binding.label
 
 
 def test_the_actions_worth_a_global_shortcut_are_bound():
