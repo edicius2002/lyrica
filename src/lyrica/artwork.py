@@ -215,12 +215,20 @@ def available() -> bool:
         return False
 
 
-def make_thumbnail(data: bytes, size: int):
-    """A small square cover for the header, cropped rather than squashed.
+# A cover this far from square is a photograph of a sleeve rather than the
+# sleeve, and cropping it to a square would cut the artwork instead of framing
+# it. Past this, the whole image is fitted and the gap filled instead.
+SQUARE_ENOUGH = 1.08
 
-    Sharp, unlike the backdrop: this one is meant to be recognised. Cropping to
-    a square keeps the artwork's proportions, where stretching a non-square
-    cover into a box would distort whatever is on it.
+
+def make_thumbnail(data: bytes, size: int):
+    """A small square cover for the header, sharp and whole.
+
+    Nearly-square art is cropped, which keeps its proportions and fills the
+    box. Anything further off is fitted inside instead, on a background taken
+    from its own edge — cropping a 500x453 scan to a square loses the sides of
+    the sleeve, and losing part of the artwork is worse than a little padding
+    nobody will notice behind a rounded corner.
     """
     if not data or size <= 0:
         return None
@@ -231,11 +239,21 @@ def make_thumbnail(data: bytes, size: int):
     try:
         with Image.open(io.BytesIO(data)) as source:
             image = source.convert("RGB")
-        side = min(image.width, image.height)
-        left = (image.width - side) // 2
-        top = (image.height - side) // 2
-        square = image.crop((left, top, left + side, top + side))
-        return square.resize((size, size), Image.LANCZOS)
+        ratio = max(image.width, image.height) / max(1, min(image.width, image.height))
+        if ratio <= SQUARE_ENOUGH:
+            side = min(image.width, image.height)
+            left = (image.width - side) // 2
+            top = (image.height - side) // 2
+            square = image.crop((left, top, left + side, top + side))
+            return square.resize((size, size), Image.LANCZOS)
+
+        fitted = image.copy()
+        fitted.thumbnail((size, size), Image.LANCZOS)
+        # The corner pixel, so the padding reads as part of the sleeve rather
+        # than as a black bar around it.
+        canvas = Image.new("RGB", (size, size), image.getpixel((0, 0)))
+        canvas.paste(fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2))
+        return canvas
     except Exception:
         logger.debug("could not build a thumbnail", exc_info=True)
         return None

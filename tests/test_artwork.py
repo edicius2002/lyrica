@@ -67,3 +67,42 @@ def test_a_tiny_cover_does_not_collapse_to_nothing():
 
 def test_a_zero_sized_window_does_not_crash():
     assert artwork.make_backdrop(encoded(300, 300), 0, 0).size == (1, 1)
+
+
+# --- thumbnails -------------------------------------------------------------
+
+def test_a_square_cover_fills_the_box():
+    assert artwork.make_thumbnail(encoded(300, 300), 58).size == (58, 58)
+
+
+def test_a_nearly_square_cover_is_cropped_to_fill():
+    # Trimming a few pixels off the sides frames it; it does not lose artwork.
+    thumb = artwork.make_thumbnail(encoded(300, 292), 58)
+    assert thumb.size == (58, 58)
+
+
+def test_a_clearly_non_square_cover_keeps_all_of_itself():
+    # A 500x453 scan cropped square loses the sides of the sleeve. Padding is
+    # the lesser loss, and it hides behind a rounded corner.
+    wide = artwork.make_thumbnail(encoded(500, 300, (10, 200, 40)), 60)
+    assert wide.size == (60, 60)
+    # The full width survived, so the artwork was fitted rather than cut.
+    assert wide.getpixel((1, 30))[1] > 100 or wide.getpixel((58, 30))[1] > 100
+
+
+def test_the_padding_is_taken_from_the_artwork_not_left_black():
+    tall = artwork.make_thumbnail(encoded(300, 600, (200, 30, 30)), 60)
+    r, g, b = tall.getpixel((2, 2))
+    assert r > g and r > b, "a black bar would read as a border round the cover"
+
+
+def test_no_data_makes_no_thumbnail():
+    assert artwork.make_thumbnail(b"", 58) is None
+
+
+def test_a_zero_sized_thumbnail_is_refused():
+    assert artwork.make_thumbnail(encoded(300, 300), 0) is None
+
+
+def test_undecodable_data_makes_no_thumbnail():
+    assert artwork.make_thumbnail(b"not an image", 58) is None
