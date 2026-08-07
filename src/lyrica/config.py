@@ -61,6 +61,36 @@ def _parse_size(raw: str, source: str) -> float | None:
     return clamp_size(value)
 
 
+# How solid the panel is. Below the lower bound the desktop reads through the
+# text; at 1.0 it is an opaque slab and stops being glass at all.
+OPACITY_MIN, OPACITY_MAX = 0.60, 1.0
+OPACITY_DEFAULT = 0.90
+
+
+def opacity() -> float:
+    """How solid the panel should be, 0.6 to 1.0.
+
+    A taste setting with a floor rather than a free one: the panel's whole job
+    is to be legible over whatever is behind it, and past a point the desktop
+    starts competing with the words. Bad values are ignored with a warning for
+    the same reason sizes are — this is read at startup on a machine with no
+    console.
+    """
+    raw = os.environ.get("LYRICA_OPACITY", "").strip()
+    if not raw:
+        return OPACITY_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_OPACITY=%r is not a number; using %s",
+                       raw, OPACITY_DEFAULT)
+        return OPACITY_DEFAULT
+    if not OPACITY_MIN <= value <= OPACITY_MAX:
+        logger.warning("LYRICA_OPACITY=%s is outside %s-%s; clamping",
+                       value, OPACITY_MIN, OPACITY_MAX)
+    return max(OPACITY_MIN, min(OPACITY_MAX, value))
+
+
 def size_path() -> Path:
     """Where a size chosen with the keyboard is remembered."""
     return cache_root() / "size"

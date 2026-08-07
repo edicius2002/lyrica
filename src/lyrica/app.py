@@ -432,7 +432,12 @@ class Overlay:
     def _retarget_size(self, animate: bool = True) -> None:
         """Start moving toward the size the current state calls for."""
         want = self._want_compact()
-        if want == self._compact and self._collapse is None:
+        if want == self._compact:
+            # Nothing to decide. A collapse already in flight is advanced by
+            # `_advance_collapse`, never restarted here — an earlier version
+            # fell through this guard while one was running and rebuilt it with
+            # a fresh start time on every tick, which pinned the animation at
+            # its first frame and left the window exactly where it began.
             return
         self._compact = want
         target = self._target_size()

@@ -61,18 +61,18 @@ RAMP_STEPS = 64
 # The greyscale levels the palette used before colour. Luminance anchors now,
 # not outputs — what a role keeps of them is RETAIN's business.
 ANCHOR = {"sung": 255, "unsung": 138, "side": 98, "far": 48,
-          "title": 138, "artist": 84, "sheen": 44}
+          "title": 208, "artist": 156, "sheen": 44}
 
 # How much of that anchor's luminance each role keeps once coloured. Below 1.0
 # is the price of colour, charged where it costs least to pay.
 RETAIN = {"sung": 0.98, "unsung": 0.78, "side": 0.72, "far": 0.60,
-          "title": 0.78, "artist": 0.66, "sheen": 0.60}
+          "title": 0.94, "artist": 0.86, "sheen": 0.60}
 
 # The chroma each role aims at, at full song strength — screen units, largest
 # channel minus smallest, which is exactly what reaches the glass while the
 # level stays under the ceiling.
 CHROMA = {"sung": 8, "unsung": 46, "side": 58, "far": 34,
-          "title": 44, "artist": 56, "sheen": 26}
+          "title": 20, "artist": 30, "sheen": 26}
 
 # A role may not fall below this fraction of its anchor luminance to buy colour.
 FLOOR = 0.55
@@ -85,6 +85,14 @@ FLOOR = 0.55
 # let the unsung line rise until the ladder flattened.
 UNSUNG_CEILING = ANCHOR["unsung"]        # 138
 SUNG_CEILING = 255
+
+# The card is not on the lyric ladder and was wrongly sharing its ceiling. That
+# cap exists to keep a step between the line being sung and the lines around
+# it; the title and the artist are not in that relationship with anything, and
+# holding them at 138 was the reason they read as dim next to the words. They
+# get the composition's own limit instead — the point above which chroma starts
+# being clamped away, which on a blended panel is no limit at all.
+CARD_ROLES = ("title", "artist")
 
 # The sweep has to survive the worst desktop there is.
 WORST_DESKTOP = (245, 245, 245)
@@ -292,10 +300,17 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
         if role in out:
             continue
         shared = comp ** LADDER_COMP_EXP
-        want = luminance((ANCHOR[role],) * 3) * RETAIN[role] * shared
-        floor = luminance((ANCHOR[role],) * 3) * FLOOR * shared
-        out[role] = solve(hue, max(want, floor), CHROMA[role] * strength,
-                          ceiling)
+        # Never ask for more light than the composition can actually deliver.
+        # The card aims above acrylic's clamp ceiling, and a target out of
+        # reach makes `solve` trade away every last unit of chroma still
+        # falling short — measured, a flat grey card under frosting. Capping
+        # the ask at what a grey at the ceiling gives leaves room to keep a
+        # tint, and costs the blended panel nothing since its ceiling is 255.
+        top = law.headroom if role in CARD_ROLES else ceiling
+        anchor = min(ANCHOR[role], top)
+        want = luminance((anchor,) * 3) * RETAIN[role] * shared
+        floor = luminance((anchor,) * 3) * FLOOR * shared
+        out[role] = solve(hue, max(want, floor), CHROMA[role] * strength, top)
     return out | {"_meta": (hue, strength, comp,
                             delta_e(law.compose(WORST_DESKTOP, sung),
                                     law.compose(WORST_DESKTOP, unsung)))}

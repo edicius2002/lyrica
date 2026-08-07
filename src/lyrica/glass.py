@@ -81,16 +81,17 @@ class Composition:
 # Measured on this machine; the numbers in the docstring above.
 ACRYLIC = Composition("acrylic", 1.0, PLATE_FLOOR, PLATE_GAIN, additive=True)
 
-# The most translucent panel that still keeps unsung text clear of 3:1 over its
-# own backdrop, with margin. Solved rather than chosen: at 0.75 the worst case
-# lands on 3.05:1 with nothing to spare, and both the text level and the
-# backdrop cap are themselves derived, so sitting on the floor is fragile. 0.82
-# measures 3.55:1 and still puts only 46 of a white desktop through the panel.
+# 0.75 is the most translucent value that clears 3:1 at all, and 0.82 the most
+# translucent one that clears it with margin — but "as translucent as legibility
+# allows" turned out to be more translucent than anyone wanted to look at, with
+# the desktop reading clearly through the panel. 0.90 measures 4.14:1 and puts
+# 25 of a white desktop through instead of 46. `LYRICA_OPACITY` moves it, since
+# where in that range to sit is taste rather than measurement.
 #
 # Unlike acrylic this barely clamps — the pedestal tops out at 46, so a surface
 # has 255 of room — which is why the sung word and the unsung tail keep their
 # separation over a white desktop here without having to buy it back.
-PANEL_ALPHA = 0.82
+PANEL_ALPHA = 0.90
 
 
 def alpha_panel(alpha: float = PANEL_ALPHA) -> Composition:
