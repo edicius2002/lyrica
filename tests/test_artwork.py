@@ -25,25 +25,36 @@ def test_pillow_is_reported_present():
 def test_a_backdrop_fills_the_window_exactly():
     # It has to cover, not fit: letterboxing would put hard edges into the one
     # thing on screen whose job is to have none.
-    image = artwork.make_backdrop(encoded(600, 600), 400, 200)
-    assert image.size == (400, 200)
+    assert artwork.make_backdrop(encoded(600, 600), 400, 200).image.size == (400, 200)
 
 
 def test_a_non_square_cover_still_fills_the_window():
-    assert artwork.make_backdrop(encoded(1000, 300), 400, 200).size == (400, 200)
+    assert artwork.make_backdrop(encoded(1000, 300), 400, 200).image.size == (400, 200)
 
 
-def test_the_backdrop_is_darkened_well_below_the_original():
-    bright = (255, 255, 255)
-    image = artwork.make_backdrop(encoded(300, 300, bright), 200, 100)
-    r, g, b = image.getpixel((100, 50))
-    assert max(r, g, b) < 128, "artwork at full strength would compete with the words"
+def test_even_a_white_cover_is_pulled_down_to_the_cap():
+    # The case a fixed brightness factor cannot serve: whatever it is set to,
+    # some sleeve is brighter. Scaling to a measured level has no such sleeve.
+    back = artwork.make_backdrop(encoded(300, 300, (255, 255, 255)), 200, 100)
+    assert back.peak <= artwork.BACKDROP_CAP
+
+
+def test_a_dark_cover_is_left_where_it_is():
+    # Lifting it would amplify shadow noise to buy contrast it already has.
+    dark = (10, 10, 12)
+    back = artwork.make_backdrop(encoded(300, 300, dark), 200, 100)
+    assert back.peak <= max(dark) + 2
+
+
+def test_the_backdrop_reports_the_wash_a_line_fades_into():
+    back = artwork.make_backdrop(encoded(300, 300, (255, 255, 255)), 200, 100)
+    assert max(back.colour) <= artwork.BACKDROP_CAP
 
 
 def test_the_backdrop_keeps_the_hue_it_came_from():
     # The point is colour, not the picture: a red cover should still read red.
-    image = artwork.make_backdrop(encoded(300, 300, (220, 30, 30)), 200, 100)
-    r, g, b = image.getpixel((100, 50))
+    back = artwork.make_backdrop(encoded(300, 300, (220, 30, 30)), 200, 100)
+    r, g, b = back.image.getpixel((100, 50))
     assert r > g and r > b
 
 
@@ -62,11 +73,11 @@ def test_undecodable_data_is_none_rather_than_an_exception():
 
 def test_a_tiny_cover_does_not_collapse_to_nothing():
     # Downscaling before blurring must never round a dimension to zero.
-    assert artwork.make_backdrop(encoded(4, 4), 400, 200).size == (400, 200)
+    assert artwork.make_backdrop(encoded(4, 4), 400, 200).image.size == (400, 200)
 
 
 def test_a_zero_sized_window_does_not_crash():
-    assert artwork.make_backdrop(encoded(300, 300), 0, 0).size == (1, 1)
+    assert artwork.make_backdrop(encoded(300, 300), 0, 0).image.size == (1, 1)
 
 
 # --- thumbnails -------------------------------------------------------------

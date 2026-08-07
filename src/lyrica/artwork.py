@@ -13,6 +13,7 @@ import hashlib
 import io
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import requests
@@ -36,9 +37,12 @@ DISCOGS_URL = "https://api.discogs.com/database/search"
 SAMPLE_WIDTH = 32
 BLUR_RADIUS = 8
 
-# How much of the artwork's light reaches the plate. High enough to tint, low
-# enough that no edge or face is ever recoverable.
-BRIGHTNESS = 0.30
+# Where the wash is scaled to land: the 95th-percentile channel of every
+# backdrop, whatever the cover started at. High enough to read as the song
+# having a hue, low enough that unsung text at 138 keeps better than 3:1 over
+# it — which a fixed brightness factor could not promise, because it has to be
+# picked for the brightest sleeve and is then wrong for all the others.
+BACKDROP_CAP = 30
 
 
 def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
@@ -285,11 +289,54 @@ def make_thumbnail(data: bytes, size: int):
         return None
 
 
-def make_backdrop(data: bytes, width: int, height: int):
-    """A blurred, darkened, window-sized image, or None if it cannot be made.
+def _peak(sample) -> int:
+    """The 95th percentile of the largest channel across the wash.
 
-    Returns a PIL image rather than a Tk one: converting to a Tk image has to
-    happen on the thread that owns the widget, and this is called off it.
+    The 95th rather than the maximum, because one blown highlight in a corner
+    should not darken the whole window, and rather than the mean because the
+    mean is dragged down by the dark half of any cover and says nothing about
+    where text will actually struggle.
+    """
+    raw = sample.tobytes()
+    if not raw:
+        return 0
+    peaks = sorted(max(raw[i], raw[i + 1], raw[i + 2])
+                   for i in range(0, len(raw) - 2, 3))
+    return peaks[min(len(peaks) - 1, int(len(peaks) * 0.95))]
+
+
+def _mean(sample) -> tuple:
+    raw = sample.tobytes()
+    count = len(raw) // 3
+    if not count:
+        return (0, 0, 0)
+    return tuple(round(sum(raw[c::3]) / count) for c in range(3))
+
+
+@dataclass(frozen=True)
+class Backdrop:
+    """The cover wash, plus what it measures out to."""
+    image: object       # PIL, window-sized; converted to Tk on the render thread
+    colour: tuple       # the mean wash — what a line fading out dissolves into
+    peak: int           # B95 after capping, for the log
+
+
+def make_backdrop(data: bytes, width: int, height: int) -> "Backdrop | None":
+    """A blurred, darkened, window-sized wash, or None if it cannot be made.
+
+    The darkening is measured per cover, not fixed. A single brightness factor
+    has to be chosen for the brightest sleeve there is, which leaves every dark
+    one needlessly dimmer than it could be, and still fails whenever a cover is
+    brighter than the one the factor was picked against. Scaling each cover so
+    its 95th-percentile channel lands on `BACKDROP_CAP` puts every backdrop at
+    the same measured level instead, whatever it started at — which is what the
+    text contrast is actually a function of.
+
+    Only ever darkens. A cover already below the cap is left alone: lifting it
+    would amplify JPEG noise in the shadows to buy contrast it already has.
+
+    Returns PIL rather than Tk images because converting has to happen on the
+    thread owning the widget, and this is called off it.
     """
     if not data:
         return None
@@ -310,13 +357,18 @@ def make_backdrop(data: bytes, width: int, height: int):
         # edges into something whose whole job is to have none.
         ratio = max(width / image.width, height / image.height)
         sample = image.resize(
-            (max(1, int(image.width * ratio / SAMPLE_WIDTH)) or 1,
-             max(1, int(image.height * ratio / SAMPLE_WIDTH)) or 1),
+            (max(1, int(image.width * ratio / SAMPLE_WIDTH)),
+             max(1, int(image.height * ratio / SAMPLE_WIDTH))),
             Image.BILINEAR)
         sample = sample.filter(ImageFilter.GaussianBlur(BLUR_RADIUS))
-        sample = ImageEnhance.Brightness(sample).enhance(BRIGHTNESS)
+
+        peak = _peak(sample)
+        if peak > BACKDROP_CAP:
+            sample = ImageEnhance.Brightness(sample).enhance(BACKDROP_CAP / peak)
+            peak = _peak(sample)
+
         stretched = sample.resize((max(1, width), max(1, height)), Image.BICUBIC)
-        return stretched
+        return Backdrop(stretched, _mean(sample), peak)
     except Exception:
         logger.debug("could not build a backdrop", exc_info=True)
         return None

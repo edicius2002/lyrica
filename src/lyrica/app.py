@@ -16,7 +16,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
 
-from lyrica import artwork, config, motion
+from lyrica import artwork, config, motion, songcolour
 from lyrica import chrome as chrome_mod
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
@@ -206,9 +206,9 @@ class Overlay:
         self._thumb_item = self.canvas.create_rectangle(
             0, 0, 0, 0, outline="", fill="")
         self._title_item = self.canvas.create_text(
-            0, 0, text="", anchor="w", font=self.f_title, fill=self.palette.sung)
+            0, 0, text="", anchor="w", font=self.f_title, fill=self.palette.title)
         self._artist_item = self.canvas.create_text(
-            0, 0, text="", anchor="w", font=self.f_artist, fill=self.palette.header)
+            0, 0, text="", anchor="w", font=self.f_artist, fill=self.palette.artist)
 
         # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
@@ -347,6 +347,9 @@ class Overlay:
                 # over a colour key it would be a dark rectangle.
                 artwork.make_backdrop(data, self.width, self.height)
                 if self.chrome.additive else None,
+                # Measured here rather than on the render thread: it costs a
+                # couple of milliseconds, and this thread has them to spare.
+                songcolour.extract(data),
             )
 
         def work():
@@ -370,7 +373,7 @@ class Overlay:
             # loop spends is time mouse events spend queued. It waits until the
             # hand stops; a cover a moment late is not noticed, a stutter is.
             return
-        thumb, backdrop = self._pending_art
+        thumb, backdrop, song = self._pending_art
         self._pending_art = None
         try:
             from PIL import ImageTk
@@ -380,12 +383,18 @@ class Overlay:
         # Held, not just drawn: Tk keeps only a weak claim on an image, so
         # dropping the reference blanks it.
         if backdrop is not None:
-            photo = ImageTk.PhotoImage(backdrop)
+            photo = ImageTk.PhotoImage(backdrop.image)
             if self._backdrop_item is not None:
                 self.canvas.delete(self._backdrop_item)
             self._backdrop_item = self.canvas.create_image(0, 0, image=photo, anchor="nw")
             self.canvas.tag_lower(self._backdrop_item)
             self._backdrop_photo = photo
+
+        # The palette follows the cover, and the fade follows the wash the cover
+        # actually left on the glass — a line dims into what is behind it rather
+        # than toward a level guessed once and applied to every song.
+        self._adopt_palette(palette_mod.for_song(
+            self.chrome, song, backdrop.colour if backdrop else (0, 0, 0)))
 
         if thumb is not None:
             photo = ImageTk.PhotoImage(thumb)
@@ -403,6 +412,26 @@ class Overlay:
         # arrives for the same song — which is most of the time, since the
         # cover is fetched after the title is already on screen.
         self._place_thumb()
+
+    def _adopt_palette(self, pal) -> None:
+        """Switch every coloured thing over to a new palette.
+
+        The glyphs snap rather than cross-fading. A fade would have to run for
+        several hundred milliseconds over every character on screen, and it
+        would land in the middle of a sweep — where a colour drifting under the
+        front is far more noticeable than one that simply changed while the
+        cover was appearing anyway.
+        """
+        if pal is self.palette:
+            return
+        self.palette = pal
+        logger.debug("palette hue=%.0f strength=%.2f sweep dE=%.1f",
+                     pal.hue, pal.strength, pal.sweep_de)
+        self.canvas.itemconfigure(self._title_item, fill=pal.title)
+        self.canvas.itemconfigure(self._artist_item, fill=pal.artist)
+        for view in self._views.values():
+            view.set_palette(pal)
+        self._restyle()
 
     def _place_thumb(self) -> None:
         """Move the cover image onto the slot the layout reserved for it."""
