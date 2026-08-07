@@ -42,6 +42,7 @@ def _blend_ramp(low: str, high: str) -> list[str]:
 class Palette:
     header: str
     side: str
+    far: str
     unsung: str
     sung: str
     outline: int
@@ -53,6 +54,15 @@ class Palette:
         i = int(max(0.0, min(1.0, fraction)) * (RAMP_STEPS - 1))
         return self.ramp[i]
 
+    def by_distance(self, distance: int) -> str:
+        """How bright a line sits, given how far it is from the one being sung.
+
+        The outermost step is what turns entry and exit into a fade: a line
+        arrives already dim, brightens as it approaches, and dims again on its
+        way out, instead of appearing and vanishing at full strength.
+        """
+        return self.side if distance <= 1 else self.far
+
 
 # Glass: additive, so these are brightness levels and double as opacity.
 # Unsung sits high because the overlay is glanced at rather than read — a line
@@ -60,6 +70,7 @@ class Palette:
 GLASS = Palette(
     header=_grey(0x50),
     side=_grey(0x62),
+    far=_grey(0x30),
     unsung=_grey(0x8A),
     sung=_grey(0xFF),
     outline=0,          # black is invisible here; the tinted plate is the contrast
@@ -70,6 +81,7 @@ GLASS = Palette(
 KEYED = Palette(
     header="#c9cfda",
     side="#b6bdc9",
+    far="#78808d",
     unsung="#9aa3b2",
     sung="#ffffff",
     outline=2,          # the only thing keeping text legible over a bright video

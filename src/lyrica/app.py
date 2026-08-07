@@ -48,8 +48,10 @@ FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 LINE_LEAD_S = 0.115
 WORD_LEAD_S = 0.150
 
-# How many lines either side of the current one are kept on screen.
-CONTEXT = 1
+# How many lines either side of the current one are kept on screen. Two, not
+# one, so the outermost pair can sit dim: a line then arrives already faint and
+# brightens as it approaches, rather than appearing at full strength.
+CONTEXT = 2
 
 
 def _scaled_font(spec: tuple, scale: float) -> tuple:
@@ -311,7 +313,8 @@ class Overlay:
             active = index == self.line_index
             view.set_active(active)
             if not active:
-                view.show_inactive(self.palette.side)
+                view.show_inactive(
+                    self.palette.by_distance(abs(index - self.line_index)))
 
     def run(self):
         self.reader.start()
