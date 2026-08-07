@@ -115,11 +115,15 @@ def move(root: tk.Tk, x: int, y: int) -> None:
     root.geometry(f"+{int(x)}+{int(y)}")
 
 
-# Rounded corners are off. The clip region is binary — a pixel is inside it or
-# outside it, with no partial coverage — so the curve can only ever be a
-# stair-step, and the API that would smooth it is Windows 11 only, measured
-# refusing on this build. A clean rectangle is consistent; a jagged curve just
-# looks like a mistake. Set a radius here to bring them back.
+# Rounded corners are off, and the earlier reason given here was wrong. It said
+# the clip region's binary coverage made the curve a stair-step. Photographing
+# the corner showed something simpler: with the frosting on, the corner is not
+# rounded at all. DWM draws the accent plate over the whole window rectangle and
+# ignores the region, so the curve never reaches the screen to be jagged. See
+# `chrome.windows` for the measurement and what was ruled out.
+#
+# Setting a radius here is therefore only meaningful in the modes that have no
+# accent plate.
 CORNER_RADIUS = 0
 
 

@@ -118,6 +118,42 @@ def test_luminance_varies_by_hue_at_a_fixed_level():
     assert luminance(tint(255, 0, 1.0)) < luminance(tint(255, 60, 1.0))
 
 
+# --- the tint worn while dragging -------------------------------------------
+
+def tints():
+    """The resting and dragging tints, or a skip where Windows chrome is absent.
+
+    Guarded because CI runs this suite on macOS too, where `ctypes.wintypes` is
+    not guaranteed to import.
+    """
+    try:
+        from lyrica.chrome.windows import DRAG_TINT_RGBA, TINT_RGBA
+    except (ImportError, ValueError):  # pragma: no cover - not Windows
+        pytest.skip("the Windows chrome is not importable here")
+    return TINT_RGBA, DRAG_TINT_RGBA
+
+
+def test_the_drag_tint_reproduces_acrylics_own_line():
+    # Dragging drops the blur, which is the expensive half, but must not change
+    # the colour — switching the accent off entirely was the first version, and
+    # it snapped the panel to flat black. The gradient state blends plainly,
+    # plate = (1-a)*desktop + a*tint, so the tint is chosen to land on the same
+    # line the acrylic plate was measured on.
+    r, _g, _b, a = tints()[1]
+    alpha = a / 255.0
+    for level in (0, 64, 128, 200, 255):
+        gradient = (1 - alpha) * level + alpha * r
+        assert gradient == pytest.approx(plate((level,) * 3)[0], abs=1.5), \
+            f"the panel would change colour at desktop {level}"
+
+
+def test_the_drag_tint_is_not_the_resting_tint():
+    # They cannot be the same value: one is composited over a blurred backdrop
+    # and the other over a sharp one, at different alphas.
+    resting, dragging = tints()
+    assert resting != dragging
+
+
 def test_hex_and_back_round_trips():
     assert rgb_of(hex_of((18, 200, 7))) == (18, 200, 7)
 
