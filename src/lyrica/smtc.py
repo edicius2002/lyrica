@@ -24,21 +24,55 @@ NOISE = re.compile(
     re.I,
 )
 
+# Bare words re-uploaders append to a title. Only stripped from the end, so a
+# song actually called "Audio" or "Complete" survives anywhere else in the name.
+JUNK_TAIL = re.compile(
+    r"(?:\s|^)(full|complete|completa|hq|hd|4k|audio|lyrics?|letra|sub\s*español)\s*$",
+    re.I,
+)
+
+SEPARATORS = (" - ", " – ", " — ", " | ")
+
 
 def clean_title(title: str) -> str:
     """Strip video-title noise like "(Official Video)" and stray separators."""
     t = NOISE.sub("", title)
     t = re.sub(r"\s{2,}", " ", t)
-    return t.strip(" -–|·")
+    t = t.strip(" -–|·")
+    while True:
+        stripped = JUNK_TAIL.sub("", t).strip(" -–|·")
+        if stripped == t or not stripped:
+            return t
+        t = stripped
 
 
 def split_browser_title(title: str) -> tuple[str, str]:
     """'Artist - Title' -> (artist, title). Empty artist if no separator."""
-    for sep in (" - ", " – ", " — ", " | "):
+    for sep in SEPARATORS:
         if sep in title:
             artist, track = title.split(sep, 1)
             return artist.strip(), track.strip()
     return "", title.strip()
+
+
+def strip_artist_prefix(artist: str, title: str) -> str:
+    """Drop a leading repetition of the artist: YouTube states it in both fields.
+
+    Returns the title unchanged when it does not start with the artist, so a
+    track whose name genuinely opens with the artist's word survives.
+    """
+    if not artist:
+        return title
+    low_t, low_a = title.lower(), artist.lower()
+    if not low_t.startswith(low_a):
+        return title
+    rest = title[len(artist):]
+    for sep in SEPARATORS:
+        if rest.startswith(sep):
+            return rest[len(sep):].strip()
+    if rest.startswith(("-", "–", "—", "|", ":")):
+        return rest[1:].strip()
+    return title
 
 
 @dataclass(frozen=True)
@@ -58,11 +92,49 @@ class Snapshot:
         return any(h in self.app.lower() for h in BROWSER_HINTS)
 
     def norm_artist_title(self) -> tuple[str, str]:
-        """Artist/title normalized for lyrics lookup."""
-        artist, title = self.artist, self.title
+        """Best single guess at artist and title. Used for display and as the
+        first lookup candidate."""
+        artist, title = self.artist.strip(), self.title
         if not artist and self.is_browser:
             artist, title = split_browser_title(title)
-        return artist.strip(), clean_title(title)
+        return artist.strip(), clean_title(strip_artist_prefix(artist, title))
+
+    def lookup_candidates(self) -> list[tuple[str, str]]:
+        """Artist/title pairs to try, best first.
+
+        Browsers disagree about what these fields mean, and each interpretation
+        is right somewhere:
+
+        - YouTube Music and Spotify state both fields correctly.
+        - YouTube states the artist correctly *and* repeats it in the title.
+        - SoundCloud puts the uploader's handle in the artist field, so it may
+          be a stranger's username while the real artist sits in the title.
+
+        Nothing in the payload says which case applies, so the alternatives are
+        ranked rather than guessed between, and the caller stops at the first
+        that resolves.
+        """
+        seen: set[tuple[str, str]] = set()
+        out: list[tuple[str, str]] = []
+
+        def add(artist: str, title: str) -> None:
+            pair = (artist.strip(), clean_title(title))
+            if pair[1] and pair not in seen:
+                seen.add(pair)
+                out.append(pair)
+
+        add(*self.norm_artist_title())
+
+        # The artist field may be an uploader handle rather than a performer.
+        # Only worth trying when the title carries a separator and does not
+        # already contain the stated artist.
+        if self.is_browser:
+            split_artist, split_title = split_browser_title(self.title)
+            if split_artist and self.artist.lower() not in self.title.lower():
+                add(split_artist, split_title)
+
+        add(self.artist, self.title)
+        return out
 
     def track_key(self) -> str:
         return f"{self.app}|{self.artist}|{self.title}"

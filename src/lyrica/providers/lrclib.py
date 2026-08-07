@@ -51,19 +51,28 @@ class LrclibProvider(LyricsProvider):
               album: str = "") -> Optional[Lyrics]:
         if not title:
             return None
-        try:
-            params = {"artist_name": artist, "track_name": title}
-            if album:
-                params["album_name"] = album
-            if duration > 1:
-                params["duration"] = int(round(duration))
-            r = requests.get(f"{API}/get", params=params, headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                result = _from_record(r.json(), "lrclib/get")
-                if result is not None:
-                    return result
-        except requests.RequestException:
-            pass
+
+        # Exact lookup, then the same lookup without the duration. A re-upload
+        # can be padded or concatenated — one SoundCloud copy of a 3-minute
+        # song reported 12 minutes — and LRCLIB matches duration within ±2 s,
+        # so a wrong duration turns a findable track into a miss.
+        attempts: list[dict] = []
+        base = {"artist_name": artist, "track_name": title}
+        if album:
+            base["album_name"] = album
+        if duration > 1:
+            attempts.append({**base, "duration": int(round(duration))})
+        attempts.append(base)
+
+        for params in attempts:
+            try:
+                r = requests.get(f"{API}/get", params=params, headers=HEADERS, timeout=10)
+                if r.status_code == 200:
+                    result = _from_record(r.json(), "lrclib/get")
+                    if result is not None:
+                        return result
+            except requests.RequestException:
+                pass
 
         try:
             q = f"{artist} {title}".strip()
