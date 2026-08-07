@@ -82,3 +82,39 @@ def test_an_unreadable_file_is_not_an_error(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config.Path, "read_text", boom)
     assert load(tmp_path) == {}
+
+
+# --- how big the overlay is drawn -------------------------------------------
+
+def test_the_designed_size_is_the_default(monkeypatch):
+    monkeypatch.delenv("LYRICA_SIZE", raising=False)
+    assert config.size_scale() == 1.0
+
+
+def test_a_size_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("LYRICA_SIZE", "1.35")
+    assert config.size_scale() == 1.35
+
+
+def test_a_size_below_the_range_is_clamped(monkeypatch):
+    # Smaller than this and the lyric font rounds to a size where the sweep
+    # lands on whole characters and stops reading as a sweep.
+    monkeypatch.setenv("LYRICA_SIZE", "0.2")
+    assert config.size_scale() == config.SIZE_MIN
+
+
+def test_a_size_above_the_range_is_clamped(monkeypatch):
+    monkeypatch.setenv("LYRICA_SIZE", "9")
+    assert config.size_scale() == config.SIZE_MAX
+
+
+def test_nonsense_falls_back_rather_than_raising(monkeypatch):
+    # Read at startup on a machine with no console, so raising here would be a
+    # window that never appears and no way to find out why.
+    monkeypatch.setenv("LYRICA_SIZE", "grande")
+    assert config.size_scale() == 1.0
+
+
+def test_an_empty_setting_is_the_designed_size(monkeypatch):
+    monkeypatch.setenv("LYRICA_SIZE", "   ")
+    assert config.size_scale() == 1.0

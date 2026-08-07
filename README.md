@@ -23,6 +23,21 @@ Play something and the overlay appears at the bottom center of the screen.
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s) |
 
+The overlay is drawn at a size that follows the display's own DPI scale. To make
+it bigger or smaller than that, set `LYRICA_SIZE` to a multiple of the designed
+size — `0.8` for a smaller box, `1.4` for a larger one, between `0.6` and `2.0`:
+
+```powershell
+$env:LYRICA_SIZE = "1.4"; lyrica     # or put LYRICA_SIZE=1.4 in .env
+```
+
+It multiplies into the display scale rather than resizing the window on its own,
+so everything moves together and the layout keeps its proportions. Measured
+across 0.6-2.0: the window and the wrap width scale exactly, the rendered text
+within 1.8 % and the cover within 1.2 %. Line height tracks within 8 % because
+Windows quantises font metrics, and the lines stack from their measured heights
+rather than assumed ones, so that absorbs itself.
+
 ## Album covers
 
 The player's own thumbnail appears immediately, then a higher-resolution one

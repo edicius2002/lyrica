@@ -29,6 +29,40 @@ def cache_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica"
 
 
+# How far the overlay may be scaled from its designed size. Bounded rather than
+# free: below the lower limit the lyric font rounds to a size where the sweep
+# lands on whole characters and stops reading as a sweep, and above the upper
+# one three lines and a card no longer fit on a laptop screen.
+SIZE_MIN, SIZE_MAX = 0.6, 2.0
+
+
+def size_scale() -> float:
+    """How much bigger or smaller than designed the overlay should be.
+
+    Multiplies into the display scale, so it reaches every measurement the same
+    way DPI does — window, fonts, cover, gaps and fade bands together. That is
+    what keeps the proportions: nothing is resized against anything else.
+
+    A bad value is ignored rather than fatal. This is read at startup on a
+    machine with no console, so raising here would be a window that never
+    appears and no way to find out why.
+    """
+    raw = os.environ.get("LYRICA_SIZE", "").strip()
+    if not raw:
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_SIZE=%r is not a number; using the designed size", raw)
+        return 1.0
+    if not SIZE_MIN <= value <= SIZE_MAX:
+        clamped = max(SIZE_MIN, min(SIZE_MAX, value))
+        logger.warning("LYRICA_SIZE=%s is outside %s-%s; using %s",
+                       value, SIZE_MIN, SIZE_MAX, clamped)
+        return clamped
+    return value
+
+
 def find_env(start: Path | None = None) -> Path | None:
     """The nearest `.env` at or above `start`, so it works from any directory."""
     here = (start or Path.cwd()).resolve()

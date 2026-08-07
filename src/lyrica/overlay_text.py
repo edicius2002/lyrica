@@ -16,7 +16,9 @@ from tkinter import font as tkfont
 
 OUTLINE_COLOUR = "#000000"
 
-# Nothing is laid out closer than this to the window edge.
+# Nothing is laid out closer than this to the window edge. In designed units:
+# callers multiply by the display scale, or a line at 2x sits twice as close to
+# an edge that moved twice as far away.
 EDGE_MARGIN = 8
 
 _measure_cache: dict[tuple, int] = {}
