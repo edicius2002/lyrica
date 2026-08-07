@@ -107,6 +107,7 @@ class Overlay:
         self._thumb_image = None
         self._thumb_photo = None
         self._card_text = None
+        self._card_raw = None
         self._awaiting_seek = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
@@ -133,6 +134,10 @@ class Overlay:
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
+        # Made once. Creating a Font is a round trip into Tk, and these were
+        # being rebuilt on every tick just to measure a string.
+        self._title_font = tkfont.Font(font=self.f_title)
+        self._artist_font = tkfont.Font(font=self.f_artist)
         self.anchor_y = self.height * ANCHOR
 
         # Clamped rather than computed and trusted: screen metrics and window
@@ -197,8 +202,7 @@ class Overlay:
     def _lay_out_card(self, title: str, artists: str) -> None:
         """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
-        title_font = tkfont.Font(font=self.f_title)
-        artist_font = tkfont.Font(font=self.f_artist)
+        title_font, artist_font = self._title_font, self._artist_font
         text_width = max(title_font.measure(title), artist_font.measure(artists))
         # The cover's space is reserved whether or not it has arrived, so the
         # card does not shuffle sideways the moment it does.
@@ -334,7 +338,10 @@ class Overlay:
 
     def _apply_art(self) -> None:
         """Put prepared images on the canvas, on the render thread."""
-        if self._pending_art is None:
+        if self._pending_art is None or self._dragging:
+            # Converting an image blocks the loop for ~15 ms, and anything the
+            # loop spends is time mouse events spend queued. It waits until the
+            # hand stops; a cover a moment late is not noticed, a stutter is.
             return
         thumb, backdrop = self._pending_art
         self._pending_art = None
@@ -367,15 +374,25 @@ class Overlay:
         self._card_text = None      # force a relayout around the new cover
 
     def _card_for(self, snap: Snapshot) -> tuple[str, str]:
+        # Short-circuited on the raw inputs. Measuring text costs a round trip
+        # into Tk, and this runs on every tick where the song changes a few
+        # times an hour — a millisecond spent re-deriving an unchanged string
+        # is a millisecond mouse events spend queued.
+        raw = (snap.ok, snap.artist, snap.title, round(self.offset, 2))
+        if raw == self._card_raw:
+            return self._card_text or ("", "")
+        self._card_raw = raw
+
         if not snap.ok:
             return "", ""
         artist, title = snap.norm_artist_title()
         if self.offset:
             title += f"   [{self.offset:+.2f}s]"
         limit = self.wrap - self._thumb_size
-        return self._fit(title, self.f_title, limit), self._fit(artist, self.f_artist, limit)
+        return (self._fit(title, self._title_font, limit),
+                self._fit(artist, self._artist_font, limit))
 
-    def _fit(self, text: str, font, limit: int) -> str:
+    def _fit(self, text: str, font_obj: tkfont.Font, limit: int) -> str:
         """Shorten text that will not fit, rather than letting it overflow.
 
         Truncated, not wrapped: a second line would change the card's height
@@ -384,7 +401,6 @@ class Overlay:
         """
         if not text:
             return text
-        font_obj = tkfont.Font(font=font)
         if font_obj.measure(text) <= limit:
             return text
         room = limit - font_obj.measure("…")
