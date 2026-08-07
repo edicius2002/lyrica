@@ -499,6 +499,9 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 | S.14 | "No free source has broad word-level coverage" → two do; the phase 0 finding was a measurement error (decision 8.1). | 2026-08-06 |
 | S.15 | Musixmatch richsync written off as a dead endpoint → it keys on track id, not names.    | 2026-08-06 |
 | S.16 | amll-ttml-db as the word-level source → dropped; two better sources cover it.           | 2026-08-06 |
+| S.17 | Cover Art Archive as a cover source → dropped; patchiest of three and the only one returning non-square scans. | 2026-08-07 |
+| S.18 | Apple leading the cover sources → Discogs leads, on measurement: 5 of 5 tracks against 3 of 5, same resolution. | 2026-08-07 |
+| S.19 | Translated lyrics planned → dropped by agreement, never started.                        | 2026-08-07 |
 
 ---
 
@@ -520,6 +523,7 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 | 2026-08-06 | Answers ranked by precision (#15). The cascade keeps the best result rather than the first one offered.          |
 | 2026-08-06 | NetEase added (#16), and guessed instrumentals no longer end the search — a silent wrong answer caught live.     |
 | 2026-08-06 | Step 6 complete, ordering config deferred to step 8. Next delivery is step 7, word-by-word.                      |
+| 2026-08-07 | Covers reordered on measurement, and translated lyrics dropped rather than left as an open intention.            |
 | 2026-08-06 | Word timings and a TTML parser (#19). The WORD tier becomes reachable after existing unused since step 6.        |
 | 2026-08-06 | Community TTML source and precision ceilings (#21). Caught word timings never reaching the cache.                |
 | 2026-08-06 | The current line renders word by word (#23), rebuilt per line and recoloured per frame.                          |
