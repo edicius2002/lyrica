@@ -246,8 +246,10 @@ class Overlay:
         self._press_y = e.y
         self._moved = False
         self._dragging = True
-        if SUSPEND_GLASS_WHILE_DRAGGING:
-            chrome_mod.suspend_effects(self.root, self.chrome, True)
+        # The blur is *not* dropped here. Doing it on the press meant every
+        # click flashed the panel, including clicks meant only to seek — the
+        # window changed colour for the length of a tap. It waits until the
+        # pointer has actually travelled.
 
     def _drag_move(self, e):
         x, y = e.x_root - self._dx, e.y_root - self._dy
@@ -257,13 +259,18 @@ class Overlay:
         # A hand never holds perfectly still, so a few pixels of travel is still
         # a click. Without the slack, seeking would almost never fire.
         px, py = self._press_at
-        if abs(e.x_root - px) > CLICK_SLACK or abs(e.y_root - py) > CLICK_SLACK:
+        if not self._moved and (abs(e.x_root - px) > CLICK_SLACK
+                                or abs(e.y_root - py) > CLICK_SLACK):
             self._moved = True
+            # Now it is a drag rather than a click, so the blur can go.
+            if SUSPEND_GLASS_WHILE_DRAGGING:
+                chrome_mod.suspend_effects(self.root, self.chrome, True)
         chrome_mod.move(self.root, x, y)
 
     def _drag_end(self, _e):
+        was_dragging = self._moved
         self._dragging = False
-        if SUSPEND_GLASS_WHILE_DRAGGING:
+        if was_dragging and SUSPEND_GLASS_WHILE_DRAGGING:
             chrome_mod.suspend_effects(self.root, self.chrome, False)
         if not self._moved:
             self._seek_to_line_at(self._press_y)
