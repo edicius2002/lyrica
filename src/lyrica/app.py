@@ -369,7 +369,7 @@ class Overlay:
             # screen. Showing the local thumbnail immediately was faster, but
             # the swap to the sharp one was visible — and a cover that changes
             # under you reads worse than one that arrives a moment late.
-            wanted = max(300, self._thumb_size * 4)
+            wanted = max(600, self._thumb_size * 4)
             data = (artwork.best_cover(artist, title, album, size=wanted)
                     or self.reader.read_artwork())
             if data and gen == self.fetch_gen:
