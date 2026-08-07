@@ -1,18 +1,30 @@
 """Where the cache lives, and why folder sync is enough (offline)."""
 import importlib
 
+from lyrica.config import cache_root
 from lyrica.providers import default_cache_dir
 
 
-def test_the_override_wins(monkeypatch, tmp_path):
+def test_the_override_moves_the_whole_store(monkeypatch, tmp_path):
+    # It points at the store, not at one folder inside it, so covers and
+    # lyrics travel together.
     monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path / "synced"))
-    assert default_cache_dir() == tmp_path / "synced"
+    assert default_cache_dir() == tmp_path / "synced" / "cache"
+    assert cache_root() == tmp_path / "synced"
 
 
 def test_without_an_override_it_sits_under_local_appdata(monkeypatch, tmp_path):
     monkeypatch.delenv("LYRICA_CACHE_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert default_cache_dir() == tmp_path / "Lyrica" / "cache"
+
+
+def test_the_lyrics_folder_keeps_its_name(monkeypatch, tmp_path):
+    # Renaming it would orphan everything already looked up, and a cache that
+    # silently starts empty is worse than a name that is merely unspecific.
+    monkeypatch.delenv("LYRICA_CACHE_DIR", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert default_cache_dir().name == "cache"
 
 
 def test_an_empty_override_is_ignored(monkeypatch, tmp_path):
@@ -30,7 +42,7 @@ def test_the_override_is_read_at_import(monkeypatch, tmp_path):
     import lyrica.providers as providers_module
     reloaded = importlib.reload(providers_module)
     try:
-        assert reloaded.CACHE_DIR == tmp_path / "elsewhere"
+        assert reloaded.CACHE_DIR == tmp_path / "elsewhere" / "cache"
         assert reloaded.CACHE_DIR.exists(), "the directory is created on startup"
     finally:
         monkeypatch.delenv("LYRICA_CACHE_DIR", raising=False)

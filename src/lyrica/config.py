@@ -16,6 +16,19 @@ logger = logging.getLogger(__name__)
 FILENAME = ".env"
 
 
+def cache_root() -> Path:
+    """Where everything Lyrica stores locally lives.
+
+    `LYRICA_CACHE_DIR` moves the whole store, which is how it follows you
+    between machines: every file under here is written once and never modified,
+    so plain folder sync has nothing to reconcile.
+    """
+    override = os.environ.get("LYRICA_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica"
+
+
 def find_env(start: Path | None = None) -> Path | None:
     """The nearest `.env` at or above `start`, so it works from any directory."""
     here = (start or Path.cwd()).resolve()
