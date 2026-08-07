@@ -23,6 +23,30 @@ Play something and the overlay appears at the bottom center of the screen.
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s) |
 
+## Album covers
+
+The player's own thumbnail appears immediately, then a higher-resolution one
+replaces it. Sources are tried in order:
+
+| Source | Needs | Best at |
+| --- | --- | --- |
+| Apple catalogue search | nothing | official artwork, clean and consistent |
+| Discogs | a token, optional | obscure pressings, vinyl, special editions |
+| Cover Art Archive | nothing | open catalogue, patchier coverage |
+
+Discogs is off unless you provide a token. It is a long-tail improvement rather
+than a general upgrade — its images are collector scans, so they range from
+excellent to a crooked photograph of a sleeve, which is why it runs after Apple
+rather than instead of it.
+
+```powershell
+setx LYRICA_DISCOGS_TOKEN "your-token-here"
+```
+
+The token is read from the environment and never written to disk by Lyrica, so
+it cannot end up in the repository. It is sent as a request header rather than
+in the URL, since a URL ends up in logs and proxies and a header does not.
+
 ## Sharing the cache between machines
 
 Lookups are cached under `%LOCALAPPDATA%\Lyrica\cache`. Set `LYRICA_CACHE_DIR` to move that
