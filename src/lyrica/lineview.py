@@ -119,6 +119,19 @@ class LineView:
         self._outline.clear()
         self._glow.clear()
 
+    def set_palette(self, palette) -> None:
+        """Adopt a new palette without rebuilding the line.
+
+        The cover arrives a second or two after the lyrics are already on
+        screen, so recreating every glyph to recolour it would show as a flicker
+        in the middle of a song. Dropping the cached state is enough: the next
+        restyle or sweep repaints each character it finds out of date.
+        """
+        if palette is self.palette:
+            return
+        self.palette = palette
+        self._state = None
+
     def set_active(self, active: bool) -> None:
         if active == self._active:
             return
