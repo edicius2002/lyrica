@@ -13,6 +13,8 @@ kick would be guessing.
 """
 import math
 
+from lyrica.glass import hex_of, rgb_of
+
 # Spacing is deliberately uneven, and evenly spacing it is what looked wrong
 # first. The default panel's perimeter is about 2900 px while a corner arc is
 # 28, so at any segment count cheap enough to recolour at 30 Hz a corner gets
@@ -22,17 +24,28 @@ import math
 CORNER_POINTS = 7
 STRAIGHT_SPACING = 34.0
 
-# How long the head takes to go once round, at rest. Slow: this sits at the edge
-# of vision while lyrics are read, and anything quicker competes with them.
-PERIOD_S = 9.0
+# How long the head takes to go once round. Slow enough not to compete with the
+# words being read, quick enough that the movement is the thing you notice.
+PERIOD_S = 6.0
 
-# How much of the ring is lit behind the head, as a fraction of the whole.
-TAIL = 0.22
+# How much of the ring trails behind the head, as a fraction of the whole. Short
+# on purpose: a comet with a tail a quarter of the way round is a lit border
+# with a bright patch, which is not the same thing to look at.
+TAIL = 0.14
 
-# What the level does to the beam. It never goes out entirely — a panel whose
-# border vanishes in every quiet passage reads as broken rather than as calm.
-FLOOR = 0.22
-GAIN = 0.78
+# What the level does to the beam. The floor is high on purpose: the beam has to
+# be plainly there with no audio at all, because there often is none to read.
+# Measured on this machine — Spotify was controlling playback over Connect, so
+# the track advanced while every render endpoint on the box read silence, and a
+# beam that needed sound to be visible was invisible. The level flares it; it
+# does not switch it on.
+FLOOR = 0.62
+GAIN = 0.38
+
+# Where the tail stops being the song's colour and starts becoming the head.
+# Below this the beam fades out to nothing; above it, up to white.
+COLOUR_STOP = 0.55
+GRADIENT_STEPS = 48
 
 
 def _rounded_path(width: int, height: int, radius: int,
@@ -68,6 +81,30 @@ def _rounded_path(width: int, height: int, radius: int,
             + arc(left + r, top + r, math.pi))
 
 
+def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
+    """From invisible, through the song's colour, to the head.
+
+    The first entry is the *backdrop* rather than the palette's dimmest text
+    colour, and that distinction is the whole effect. Lit from the lyric ramp,
+    the unlit part of the ring was drawn at the unsung level — a pale border all
+    the way round, with the head barely brighter than it. A travelling light
+    needs somewhere dark to travel through.
+    """
+    dark = tuple(palette.backdrop)
+    mid = rgb_of(palette.unsung)
+    head = rgb_of(palette.sung)
+    out = []
+    for i in range(steps):
+        t = i / (steps - 1)
+        if t < COLOUR_STOP:
+            k, src, dst = t / COLOUR_STOP, dark, mid
+        else:
+            k, src, dst = (t - COLOUR_STOP) / (1 - COLOUR_STOP), mid, head
+        out.append(hex_of(tuple(s + (d - s) * k
+                                for s, d in zip(src, dst, strict=True))))
+    return out
+
+
 class Beam:
     """The ring of segments, and the state to colour them."""
 
@@ -78,6 +115,8 @@ class Beam:
         self._items: list[int] = []
         self._shades: list[str] = []
         self._thickness = max(1.0, 2.0 * scale)
+        self._gradient: list[str] = []
+        self._palette = None
         self.reshape(width, height, radius)
 
     def reshape(self, width: int, height: int, radius: int) -> None:
@@ -97,23 +136,28 @@ class Beam:
         self._items.clear()
         self._shades.clear()
 
-    def advance(self, dt: float, level: float, ramp: list[str]) -> None:
+    def advance(self, dt: float, level: float, palette) -> None:
         """Move the head and recolour the ring.
 
-        `ramp` is the palette's own sweep gradient, so the border is lit in the
-        same colours as the words rather than in one of its own.
+        The gradient is derived from the palette, so the beam wears the cover's
+        colour, and rebuilt only when the palette itself changes.
         """
         if not self._items:
             return
+        if palette is not self._palette:
+            self._palette = palette
+            self._gradient = _gradient(palette)
+            self._shades = [""] * len(self._items)   # force a full repaint
+
         self._phase = (self._phase + dt / PERIOD_S) % 1.0
         strength = FLOOR + GAIN * max(0.0, min(1.0, level))
-        top = len(ramp) - 1
+        top = len(self._gradient) - 1
 
         for i, item in enumerate(self._items):
             # Distance behind the head, once round the ring.
             behind = (self._phase - i / len(self._items)) % 1.0
             glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
-            shade = ramp[int(top * glow * strength)]
+            shade = self._gradient[int(top * glow * strength)]
             if shade != self._shades[i]:
                 self.canvas.itemconfigure(item, fill=shade)
                 self._shades[i] = shade
