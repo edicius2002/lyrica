@@ -155,6 +155,19 @@ def setup(root: tk.Tk, scale: float = 1.0) -> Chrome:
     return _keyed(root, scale)
 
 
+def hold_timer_resolution(hold: bool) -> None:
+    """Ask the platform for even frame scheduling while the overlay draws.
+
+    Windows hands out timers on a 15.625 ms quantum unless asked otherwise, and
+    everything animated here inherits it. Released when nothing is being drawn,
+    because the finer resolution costs a little power.
+    """
+    if sys.platform != "win32":
+        return
+    from lyrica.chrome import windows as win
+    win.hold_timer_resolution(hold)
+
+
 def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
     """Drop the expensive part of the window effect while it is being moved.
 

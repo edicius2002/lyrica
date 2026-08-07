@@ -65,7 +65,14 @@ no samples reach this process, and there is no extra dependency. A reading costs
 0.21 ms and the loop it keeps awake runs at 30 Hz, measured at 1.1 % of a
 twelve-core machine.
 
-`LYRICA_BEAM=off` turns it off.
+`LYRICA_BEAM=off` turns it off. It costs 0.50 ms a frame at the default size —
+the loop it keeps awake is the expense, not the drawing.
+
+While the overlay is drawing it asks Windows for a finer timer than the 15.625 ms
+one it hands out by default. Without that, a 33 ms request lands on 46 and the
+lyric sweep's frames arrive 7 ms from where they should; with it, 33 ms lands on
+34 and that spread falls to half a millisecond. It is released while hidden,
+since the finer resolution costs a little power.
 
 What it cannot do is follow a beat. The meter reports loudness and has no
 spectrum, so there is nothing in it to find a downbeat with — the head travels
