@@ -2,7 +2,10 @@
 import pytest
 
 from lyrica.glass import (
+    ACRYLIC,
     HEADROOM,
+    PANEL,
+    alpha_panel,
     contrast,
     delta_e,
     hex_of,
@@ -55,6 +58,54 @@ def test_the_headroom_is_where_the_clamp_starts_biting():
     # Above it the colour is flattened toward white and the chroma is gone.
     over = screen(p, (HEADROOM + 40, HEADROOM, HEADROOM))
     assert max(over) - min(over) == 0
+
+
+# --- the law, generalised ---------------------------------------------------
+
+def test_the_acrylic_composition_agrees_with_what_was_measured():
+    for level, expected in MEASURED.items():
+        got = ACRYLIC.compose((level,) * 3, (0, 0, 0))
+        assert all(abs(a - b) <= 1 for a, b in zip(got, expected, strict=True))
+
+
+def test_a_surface_reaches_the_screen_whole_under_acrylic():
+    # Gain 1: what is drawn is added, not scaled.
+    assert ACRYLIC.compose((0, 0, 0), (100, 100, 100)) == (118, 118, 118)
+
+
+def test_a_blended_panel_passes_only_its_share():
+    panel = alpha_panel(0.80)
+    # 80 % of the surface plus 20 % of the desktop, which is the whole law.
+    assert panel.compose((0, 0, 0), (100, 100, 100)) == (80, 80, 80)
+    assert panel.compose((255, 255, 255), (0, 0, 0)) == (51, 51, 51)
+    assert panel.compose((255, 255, 255), (100, 100, 100)) == (131, 131, 131)
+
+
+def test_acrylic_clamps_where_a_blended_panel_does_not():
+    # The whole reason the ladder has to be solved per composition rather than
+    # frozen: acrylic runs out of room at 138, the panel effectively never does.
+    assert ACRYLIC.headroom == pytest.approx(HEADROOM, abs=1)
+    assert alpha_panel(0.82).headroom == pytest.approx(255, abs=1)
+
+
+def test_a_dimmer_panel_leaves_less_room_for_the_desktop_underneath():
+    assert alpha_panel(0.60).pedestal((255,) * 3)[0] > \
+        alpha_panel(0.90).pedestal((255,) * 3)[0]
+
+
+def test_only_the_frosted_surface_claims_to_add_light():
+    assert ACRYLIC.additive
+    assert not PANEL.additive
+
+
+def test_the_chosen_panel_alpha_keeps_unsung_text_clear_of_three_to_one():
+    # Solved rather than picked: 0.75 is the most translucent that clears 3:1
+    # and clears it by nothing, while both the text level and the backdrop cap
+    # are themselves derived. The shipped value has to keep a margin.
+    worst = min(contrast(PANEL.compose((d,) * 3, (138, 138, 132)),
+                         PANEL.compose((d,) * 3, (30, 30, 30)))
+                for d in range(0, 256, 5))
+    assert worst >= 3.3, f"unsung text lands at {worst:.2f}:1 over its backdrop"
 
 
 # --- the two metrics --------------------------------------------------------

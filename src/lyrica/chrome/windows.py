@@ -5,22 +5,20 @@ is the only way to frost what is *behind* a window. Nothing else reaches it: a
 Qt blur effect blurs the widget's own content, and a webview's backdrop filter
 blurs the page. Every toolkit that appears to do this is making this same call.
 
-Two composition modes exist and they are mutually exclusive:
-
-- **Keyed** — a layered window with a transparent colour key. Binary
-  transparency, so black outlines survive, but no frosting.
-- **Glass** — no colour key. The desktop compositor blends the surface
-  *additively*, because GDI leaves the alpha byte at zero.
+This is only the frosted path and the Windows-specific plumbing. The mode the
+app actually wears — a uniformly alpha-blended panel with rounded corners —
+needs nothing undocumented and lives in `chrome/__init__`.
 
 **Rounded corners and frosting cannot both be had on this build**, and the
 reason is not the one it looks like. `SetWindowRgn` is accepted and does clip
 the window — measured, with the accent off the desktop shows through at the
-corner. But DWM draws the accent plate over the whole window *rectangle* and
-ignores the region, under acrylic and under the gradient state alike, whichever
-order the two are applied in and whether or not the frame is invalidated
-afterwards. So the corner is not jagged, it is simply not there: the plate
-squares it off again. The attribute that would fix this,
-`DWMWA_WINDOW_CORNER_PREFERENCE`, needs Windows 11 and is refused here.
+corner, and it clips a layered window and its child widgets just as well. But
+DWM draws the accent plate over the whole window *rectangle* and ignores the
+region, under acrylic and under the gradient state alike, whichever order the
+two are applied in and whether or not the frame is invalidated afterwards. So
+the corner is not jagged, it is simply not there: the plate squares it off
+again. The attribute that would fix this, `DWMWA_WINDOW_CORNER_PREFERENCE`,
+needs Windows 11 and is refused here.
 
 `research/viability/probe_corners.py` photographs the corner under each
 combination, for when this is worth re-testing on another machine.
@@ -150,9 +148,12 @@ def round_corners(root, width: int, height: int, radius: int = CORNER_RADIUS) ->
 
     Succeeding here is not the same as the corner appearing: an accent plate is
     drawn over the full rectangle regardless (see the module docstring), so this
-    only shows with the accent off. Left in place because that is the mode a
-    machine without the accent policy falls back to, and because the answer may
-    differ on Windows 11.
+    shows only where there is no accent — which is the blended panel, the mode
+    that asks for it.
+
+    The clip is binary, so the curve is a stair-step of single pixels. Measured
+    at radius 18 against a bright desktop, that is invisible at 100 % and only
+    resolves into steps past about 4x.
     """
     try:
         hwnd = _hwnd_of(root)

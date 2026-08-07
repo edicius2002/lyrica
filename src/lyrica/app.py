@@ -343,10 +343,10 @@ class Overlay:
         def build(data: bytes):
             return (
                 artwork.make_thumbnail(data, self._thumb_size),
-                # The backdrop only makes sense where the surface adds light;
-                # over a colour key it would be a dark rectangle.
+                # The backdrop only makes sense where the panel has a body to
+                # wash; over a colour key it would be a dark rectangle.
                 artwork.make_backdrop(data, self.width, self.height)
-                if self.chrome.additive else None,
+                if self.chrome.washed else None,
                 # Measured here rather than on the render thread: it costs a
                 # couple of milliseconds, and this thread has them to spare.
                 songcolour.extract(data),

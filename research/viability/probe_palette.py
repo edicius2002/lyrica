@@ -22,12 +22,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from lyrica import artwork, config, songcolour
+from lyrica import artwork, config, glass, songcolour
 from lyrica import palette as pal_mod
 from lyrica.chrome import Chrome, ChromeMode
 from lyrica.glass import contrast, rgb_of
 
-GLASS = Chrome(ChromeMode.GLASS, "#000000")
+GLASS = Chrome(ChromeMode.PANEL, "#000000", glass.PANEL)
 WINDOW = (760, 300)
 
 # Large text at 30 px bold. Below this the line is legible but working for it.
@@ -60,7 +60,13 @@ def main() -> int:
             continue
         song = songcolour.extract(data)
         pal = pal_mod.for_song(GLASS, song, back.colour)
-        ratio = contrast(rgb_of(pal.unsung), back.colour)
+        # As it lands, not as it is drawn. The desktop puts a pedestal under
+        # both the text and its backdrop, which costs contrast, and the amount
+        # depends on how bright the desktop is — so the worst one counts.
+        law = GLASS.composition
+        ratio = min(contrast(law.compose((d,) * 3, rgb_of(pal.unsung)),
+                             law.compose((d,) * 3, back.colour))
+                    for d in range(0, 256, 15))
 
         worst_contrast = min(worst_contrast, ratio)
         worst_de = min(worst_de, pal.sweep_de)

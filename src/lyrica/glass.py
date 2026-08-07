@@ -30,11 +30,74 @@ flattened toward white as the desktop brightens — which is why the sung word
 and the unsung tail can end up identical on a white background.
 """
 import colorsys
+from dataclasses import dataclass
 
 PLATE_FLOOR = 18.0
 PLATE_GAIN = 0.388
 P_BRIGHT = (117, 117, 118)      # what a white desktop puts under everything
 HEADROOM = 255 - 117            # 138: the largest channel that never clamps
+
+
+@dataclass(frozen=True)
+class Composition:
+    """How a drawn surface reaches the screen, for one window mode.
+
+    Both modes this app has are the same shape — a pedestal from the desktop
+    plus a share of what was drawn — and differ only in their constants:
+
+        screen = min(255, gain * surface + floor + slope * desktop)
+
+    Acrylic passes the whole surface through (gain 1) on top of a bright plate.
+    A uniformly alpha-blended panel passes only `a` of it, over a pedestal of
+    `1 - a` of the desktop. Writing it once means the palette solver does not
+    care which one it is running against.
+    """
+    name: str
+    gain: float
+    floor: float
+    slope: float
+    # True where the finished surface *adds* to what is behind it rather than
+    # replacing it — which is what makes pure black invisible, brightness double
+    # as opacity, and an offset copy read as light rather than as a smear.
+    additive: bool = False
+
+    def pedestal(self, desktop: tuple) -> tuple:
+        return tuple(min(255, round(self.floor + self.slope * d)) for d in desktop)
+
+    def compose(self, desktop: tuple, surface: tuple) -> tuple:
+        return tuple(min(255, round(self.gain * s + self.floor + self.slope * d))
+                     for s, d in zip(surface, desktop, strict=True))
+
+    @property
+    def headroom(self) -> float:
+        """The largest channel that still arrives without being flattened.
+
+        This is a physical limit, not a design one: above it the clamp eats
+        chroma. Where it lands at 255 there is effectively no ceiling at all.
+        """
+        return min(255.0, (255 - (self.floor + self.slope * 255)) / self.gain)
+
+
+# Measured on this machine; the numbers in the docstring above.
+ACRYLIC = Composition("acrylic", 1.0, PLATE_FLOOR, PLATE_GAIN, additive=True)
+
+# The most translucent panel that still keeps unsung text clear of 3:1 over its
+# own backdrop, with margin. Solved rather than chosen: at 0.75 the worst case
+# lands on 3.05:1 with nothing to spare, and both the text level and the
+# backdrop cap are themselves derived, so sitting on the floor is fragile. 0.82
+# measures 3.55:1 and still puts only 46 of a white desktop through the panel.
+#
+# Unlike acrylic this barely clamps — the pedestal tops out at 46, so a surface
+# has 255 of room — which is why the sung word and the unsung tail keep their
+# separation over a white desktop here without having to buy it back.
+PANEL_ALPHA = 0.82
+
+
+def alpha_panel(alpha: float = PANEL_ALPHA) -> Composition:
+    return Composition("panel", alpha, 0.0, 1.0 - alpha)
+
+
+PANEL = alpha_panel()
 
 # Blue-yellow separation is the weakest the eye has, and weaker still at the
 # spatial frequency of a glyph. Measured consequence: a yellow tail scoring 20

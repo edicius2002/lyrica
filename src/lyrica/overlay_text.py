@@ -8,9 +8,9 @@ Measurements are memoised. The same words are measured on every rebuild, and
 
 Outlines ring the centre rather than filling a square. A square of radius 2 is
 24 draws per glyph where the ring is 8, and the extra 16 land underneath the
-fill where nothing can see them. They are only used in keyed mode; glass
-composites additively, where black is invisible and the tinted plate supplies
-the contrast instead.
+fill where nothing can see them. They are only used in keyed mode, which is the
+one mode with nothing drawn behind the text; everywhere else the cover wash is
+capped dark enough to be the contrast by itself.
 """
 from tkinter import font as tkfont
 
