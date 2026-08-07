@@ -138,6 +138,16 @@ class LineView:
                 self.canvas.itemconfigure(entry[2], fill=colour)
                 entry[3] = colour
 
+    def show_lit(self) -> None:
+        """The whole line at full strength.
+
+        For an active line with no word timing. Leaving it at the unsung level
+        would be saying "none of this has been sung" about the line you are
+        listening to — the sweep is unavailable, not the knowledge that this is
+        the line.
+        """
+        self.show_inactive(self.palette.sung)
+
     def show_sweep(self, word_index: int, fraction: float) -> None:
         """The active line, swept character by character."""
         front = self._front_at(word_index, fraction)
