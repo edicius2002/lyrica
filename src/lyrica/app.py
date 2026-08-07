@@ -324,8 +324,13 @@ class Overlay:
             # which is visibly soft at any size worth drawing. Apple's catalogue
             # first, then the open archive for what a commercial store does not
             # carry — obscure pressings and independent releases.
+            # Apple first: official artwork, clean and consistent. Then Discogs
+            # if a token was provided, and the open archive last — both cover
+            # the long tail a commercial catalogue skips, at the cost of
+            # collector scans of uneven quality.
             wanted = max(300, self._thumb_size * 4)
             better = (artwork.fetch_cover(artist, title, album, size=wanted)
+                      or artwork.fetch_cover_discogs(artist, title, album)
                       or artwork.fetch_cover_openly(artist, title))
             if better and gen == self.fetch_gen:
                 self._pending_art = build(better)

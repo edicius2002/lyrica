@@ -11,6 +11,7 @@ it. That is why the brightness here can be so low and still be visible at all.
 """
 import io
 import logging
+import os
 
 import requests
 
@@ -23,6 +24,7 @@ HEADERS = {"User-Agent": "lyrica/0.1.0 (personal overlay)"}
 
 # The open fallback. Also keyless, but slower and patchier — good exactly where
 # a commercial catalogue is not.
+DISCOGS_URL = "https://api.discogs.com/database/search"
 MUSICBRAINZ_URL = "https://musicbrainz.org/ws/2/recording"
 COVER_ART_URL = "https://coverartarchive.org/release"
 # MusicBrainz asks callers to identify themselves rather than arrive anonymous.
@@ -108,6 +110,60 @@ def _closest(results: list, artist: str, title: str, album: str):
         if score > best_score:
             best, best_score = item, score
     return best if best_score >= 3 else None
+
+
+def discogs_token() -> str:
+    """The token, if the user set one. Read from the environment, never stored.
+
+    A credential in a config file inside the repository is a credential waiting
+    to be committed, so this one only ever lives in the environment of whoever
+    chose to provide it.
+    """
+    return os.environ.get("LYRICA_DISCOGS_TOKEN", "").strip()
+
+
+def fetch_cover_discogs(artist: str, title: str, album: str = "") -> bytes | None:
+    """A cover from Discogs, if a token is configured.
+
+    Worth having for what a commercial catalogue skips — obscure pressings,
+    vinyl, special editions — and worth being honest about: the images are
+    collector scans, so they range from excellent to a crooked photograph of a
+    sleeve. That is why this runs after Apple rather than instead of it.
+
+    Searches for the release rather than the track: Discogs is organised around
+    physical objects, and a single is a release of its own.
+    """
+    token = discogs_token()
+    if not token:
+        return None
+    query = " ".join(part for part in (artist, album or title) if part).strip()
+    if not query:
+        return None
+    try:
+        r = requests.get(DISCOGS_URL,
+                         params={"q": query, "type": "release", "per_page": 5},
+                         headers={**HEADERS, "Authorization": f"Discogs token={token}"},
+                         timeout=10)
+        r.raise_for_status()
+        results = r.json().get("results") or []
+    except (requests.RequestException, ValueError):
+        # Deliberately quiet about the response: a failed auth reply can carry
+        # the token back, and this goes to a log file.
+        logger.debug("discogs search failed")
+        return None
+
+    for item in results:
+        url = item.get("cover_image") or ""
+        # Discogs serves a generic record icon when a release has no scan.
+        if not url or "spacer.gif" in url:
+            continue
+        try:
+            image = requests.get(url, headers=HEADERS, timeout=10)
+            if image.status_code == 200 and image.content:
+                return image.content
+        except requests.RequestException:
+            continue
+    return None
 
 
 def fetch_cover_openly(artist: str, title: str, size: int = 500) -> bytes | None:
