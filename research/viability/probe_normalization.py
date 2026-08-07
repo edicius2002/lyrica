@@ -10,7 +10,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 from lyrica.providers.lrclib import LrclibProvider
-from lyrica.smtc import Snapshot
+from lyrica.sessions import Snapshot
 
 # (label, app, artist, title, duration) — all captured live on 2026-08-06
 CASES = [
