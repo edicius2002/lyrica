@@ -382,7 +382,19 @@ class Overlay:
                 self.canvas.delete(self._thumb_image)
             self._thumb_image = None
             self._thumb_photo = None
-        self._card_text = None      # force a relayout around the new cover
+        # Put the cover where the layout already says it goes. Waiting for the
+        # card text to change would leave it at the origin whenever a new cover
+        # arrives for the same song — which is most of the time, since the
+        # cover is fetched after the title is already on screen.
+        self._place_thumb()
+
+    def _place_thumb(self) -> None:
+        """Move the cover image onto the slot the layout reserved for it."""
+        if self._thumb_image is None:
+            return
+        box = self.canvas.coords(self._thumb_item)
+        if len(box) >= 2:
+            self.canvas.coords(self._thumb_image, box[0], box[1])
 
     def _card_for(self, snap: Snapshot) -> tuple[str, str]:
         # Short-circuited on the raw inputs. Measuring text costs a round trip
@@ -521,9 +533,7 @@ class Overlay:
             self.canvas.itemconfigure(self._title_item, text=title)
             self.canvas.itemconfigure(self._artist_item, text=artists)
             self._lay_out_card(title, artists)
-            if self._thumb_image is not None:
-                x0, y0, _, _ = self.canvas.coords(self._thumb_item)
-                self.canvas.coords(self._thumb_image, x0, y0)
+            self._place_thumb()
 
         interval = SLOW_TICK_MS
         lyr = self.lyrics
