@@ -18,7 +18,7 @@ from pathlib import Path
 from lyrica.lyrics import Lyrics
 from lyrica.overlay_text import WordLine, draw_outlined
 from lyrica.providers import fetch_for_candidates
-from lyrica.smtc import SmtcReader, Snapshot
+from lyrica.sessions import Snapshot, create_reader
 
 TRANSPARENT = "#010203"
 WIDTH, HEIGHT = 920, 210
@@ -50,7 +50,7 @@ ROW_GAP = 6
 
 class Overlay:
     def __init__(self):
-        self.reader = SmtcReader(interval=0.5)
+        self.reader = create_reader(interval=0.5)
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0

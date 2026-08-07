@@ -6,7 +6,7 @@ asserted that Chrome leaves `artist` empty, which Chrome never does — the test
 passed while describing a payload that does not occur. Cases here are only added
 from something a session actually published.
 """
-from lyrica.smtc import (
+from lyrica.sessions.base import (
     Snapshot,
     clean_title,
     split_browser_title,

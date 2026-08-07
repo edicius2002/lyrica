@@ -1,22 +1,19 @@
-"""Windows global media session (SMTC) reader.
+"""What is playing, and how to make sense of what the platform says about it.
 
-Runs on a background thread with its own asyncio loop and publishes
-immutable state snapshots in `SmtcReader.snapshot`. Position is
-interpolated by callers via `Snapshot.live_position()`.
+Everything here is platform-agnostic: the snapshot the rest of the app reads,
+and the rules for turning a player's idea of "artist" and "title" into something
+a lyrics provider can be asked about. Only the reading itself is per-platform,
+in the sibling modules.
 """
-import asyncio
 import logging
 import re
 import threading
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from winsdk.windows.media.control import (
-    GlobalSystemMediaTransportControlsSessionManager as SessionManager,
-)
-
 # Browser apps may leave `artist` empty and encode "Artist - Title" in the title
-BROWSER_HINTS = ("chrome", "msedge", "firefox", "opera", "brave", "vivaldi")
+BROWSER_HINTS = ("chrome", "msedge", "firefox", "opera", "brave", "vivaldi", "safari")
 
 NOISE = re.compile(
     r"[\(\[][^\)\]]*(official|oficial|video|audio|lyric|letra|visualizer|remaster|hd|4k|mv|m/v)[^\)\]]*[\)\]]",
@@ -103,10 +100,10 @@ class Snapshot:
     def lookup_candidates(self) -> list[tuple[str, str]]:
         """Artist/title pairs to try, best first.
 
-        Browsers disagree about what these fields mean, and each interpretation
+        Players disagree about what these fields mean, and each interpretation
         is right somewhere:
 
-        - YouTube Music and Spotify state both fields correctly.
+        - Music apps and YouTube Music state both fields correctly.
         - YouTube states the artist correctly *and* repeats it in the title.
         - SoundCloud puts the uploader's handle in the artist field, so it may
           be a stranger's username while the real artist sits in the title.
@@ -141,7 +138,13 @@ class Snapshot:
         return f"{self.app}|{self.artist}|{self.title}"
 
     def live_position(self) -> float:
-        """Playback position interpolated to now."""
+        """Playback position interpolated to now.
+
+        Sources report where playback *was* at a stated moment, not where it is.
+        Measured against a browser's own clock the error is flat to a
+        millisecond over a run, so adding the elapsed time is exact rather than
+        an approximation.
+        """
         if not self.ok or self.updated_at is None:
             return 0.0
         pos = self.position
@@ -152,72 +155,31 @@ class Snapshot:
         return max(pos, 0.0)
 
 
-class SmtcReader:
-    """Background thread refreshing `self.snapshot` every `interval` seconds."""
+class SessionReader(ABC):
+    """Polls the platform for what is playing and publishes snapshots.
+
+    The reader owns a thread and rebinds `snapshot` whole. Publishing an
+    immutable value by one assignment is what lets the render loop read without
+    a lock and never see a half-written state.
+    """
 
     def __init__(self, interval: float = 0.5):
         self.interval = interval
         self.snapshot = Snapshot()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="smtc-reader")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="session-reader")
 
-    def start(self):
+    def start(self) -> None:
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         self._stop.set()
 
-    def _run(self):
-        asyncio.run(self._loop())
+    @abstractmethod
+    def _run(self) -> None:
+        """Poll until `self._stop` is set, assigning to `self.snapshot`."""
 
-    async def _loop(self):
-        while not self._stop.is_set():
-            try:
-                self.snapshot = await self._read()
-            except Exception:
-                # Deliberately broad: this thread is the overlay's only source
-                # of truth, and if it dies the window freezes on a stale line
-                # with no indication anything is wrong. The traceback is logged,
-                # so breadth costs diagnosis nothing.
-                logger.exception("media session read failed; reporting no session")
-                self.snapshot = Snapshot()
-            await asyncio.sleep(self.interval)
-
-    async def _read(self) -> Snapshot:
-        mgr = await SessionManager.request_async()
-        sessions = list(mgr.get_sessions())
-        if not sessions:
-            return Snapshot()
-
-        # Priority: playing session > paused > anything else
-        def score(s):
-            try:
-                st = s.get_playback_info().playback_status.name
-            except OSError:
-                # A session can disappear between being listed and being read;
-                # WinRT surfaces that as an OSError. Rank it last and move on.
-                logger.debug("session %s did not report playback status",
-                             s.source_app_user_model_id)
-                st = ""
-            return 2 if st == "PLAYING" else (1 if st == "PAUSED" else 0)
-
-        best = max(sessions, key=score)
-        media = await best.try_get_media_properties_async()
-        tl = best.get_timeline_properties()
-        pb = best.get_playback_info()
-        status = pb.playback_status.name if pb and pb.playback_status else ""
-        updated = tl.last_updated_time
-        if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=UTC)
-
-        return Snapshot(
-            app=best.source_app_user_model_id or "",
-            artist=(media.artist or "").strip(),
-            title=(media.title or "").strip(),
-            album=(media.album_title or "").strip(),
-            duration=tl.end_time.total_seconds(),
-            position=tl.position.total_seconds(),
-            updated_at=updated,
-            playing=(status == "PLAYING"),
-            ok=bool(media.title),
-        )
+    @staticmethod
+    def available() -> bool:
+        """Whether this reader can work on the machine it is running on."""
+        return False
