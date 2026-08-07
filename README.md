@@ -72,6 +72,20 @@ runs 19 to 132 in brightness and leaves the top edge dark once it has passed,
 where the shine holds 36 to 83 everywhere, always. `LYRICA_BEAM=off` turns it
 off.
 
+The shine also reads what the music is *doing*, not only how loud it is. How
+much the level moves sets how far the gradient swings — a compressed wall of
+sound gets an almost even border, something with air between its hits gets a
+border with the same air in it — and how often it rises turns the gradient a
+little faster.
+
+Neither is a tempo, deliberately. Which multiple of the beat an onset rate
+counts cannot be recovered from loudness: a kick with an off-beat hat measured
+265 for a track at 128, and folding that into a plausible range turned a 174 BPM
+track into 91. A border that is merely busier when the music is cannot be wrong
+that way, where one claiming a BPM would be wrong about half the time and
+obviously so. See
+[`research/viability/probe_envelope_tempo.py`](research/viability/probe_envelope_tempo.py).
+
 It costs about a millisecond a frame at the default size — the loop it keeps
 awake is the expense, not the drawing.
 

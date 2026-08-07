@@ -991,8 +991,7 @@ class Overlay:
         now = time.monotonic()
         dt = min(0.25, now - (self._beam_at or now))
         self._beam_at = now
-        level = self.meter.level(dt or 1 / 30)
-        self.beam.advance(dt, level, self.palette)
+        self.beam.advance(dt, self.meter.character(dt or 1 / 60), self.palette)
         return True
 
     def _visibility(self, view: LineView) -> float:
