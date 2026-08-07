@@ -15,37 +15,40 @@ import threading
 import tkinter as tk
 from pathlib import Path
 
+from lyrica import chrome as chrome_mod
+from lyrica import palette as palette_mod
 from lyrica.lyrics import Lyrics
-from lyrica.overlay_text import WordLine, draw_outlined
+from lyrica.overlay_text import SweepLine, WordLine, draw_outlined
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
-TRANSPARENT = "#010203"
-WIDTH, HEIGHT = 920, 210
-WRAP = 860
-OUTLINE = 2
+# Logical pixels at 96 dpi; scaled by the chrome's DPI factor at startup.
+# Tall enough that a line which wraps to two rows still fits with its
+# neighbours: a clipped bottom row is the same failure as a clipped right edge.
+WIDTH, HEIGHT = 900, 280
+WRAP = 800
+ROW_GAP = 6
 
-FONT_HEADER = ("Segoe UI", 10)
-FONT_SIDE = ("Segoe UI", 14)
-FONT_CURRENT = ("Segoe UI", 24, "bold")
-
-COLOUR_HEADER = "#c9cfda"
-COLOUR_SIDE = "#b6bdc9"
-COLOUR_CURRENT = "#ffffff"
-
-# Word states on the current line. Unsung stays legible rather than faint: it is
-# the line you are about to sing, and the outline already separates it from the
-# background, so brightness carries the timing instead of visibility.
-COLOUR_SUNG = "#ffffff"
-COLOUR_UNSUNG = "#9aa3b2"
+# Negative sizes are device pixels rather than points. Points re-quantise under
+# DPI scaling, which is what makes text drift a pixel between machines.
+FONT_HEADER = ("Segoe UI", -15)
+FONT_SIDE = ("Segoe UI Semibold", -22)
+FONT_CURRENT = ("Segoe UI", -38, "bold")
 
 SLOW_TICK_MS = 100
-SWEEP_TICK_MS = 33
+SWEEP_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 
-# Muted grey reads as "dimmed" on a dark background and as "nearly invisible"
-# on a bright one. The side lines are therefore only lightly dimmed and lean on
-# the outline for separation instead.
-ROW_GAP = 6
+# Lyrics feel late when they land exactly on the beat: you read a line as it
+# begins, so it has to be there fractionally before the voice. better-lyrics
+# settled on the same correction — 0.115 s for lines, 0.150 s where word timing
+# is driving the highlight — and those numbers are adopted rather than guessed.
+LINE_LEAD_S = 0.115
+WORD_LEAD_S = 0.150
+
+
+def _scaled_font(spec: tuple, scale: float) -> tuple:
+    family, size, *rest = spec
+    return (family, round(size * scale), *rest)
 
 
 class Overlay:
@@ -58,25 +61,58 @@ class Overlay:
         self.offset = 0.0
         self.last_render = None
         self.line_index = -1
-        self.word_line: WordLine | None = None
+        self.word_line = None
+        self._dragging = False
+        self._drag_at = (None, None)
+
+        # Before Tk exists: Tk reads the display metrics when the root window is
+        # created, so declaring DPI awareness afterwards leaves it holding
+        # virtualised numbers and every geometry it reports is off by the scale.
+        scale_hint = chrome_mod.prepare()
 
         self.root = tk.Tk()
         self.root.title("Lyrica")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.attributes("-transparentcolor", TRANSPARENT)
-        self.root.configure(bg=TRANSPARENT)
 
+        # Chrome decides how the window composites, and everything visual
+        # follows from that: glass adds light and needs no outline, keyed
+        # replaces colour and cannot survive without one.
+        self.chrome = chrome_mod.setup(self.root, scale_hint)
+        self.palette = palette_mod.for_chrome(self.chrome)
+        scale = self.chrome.scale
+
+        self.width = self.chrome.px(WIDTH)
+        self.height = self.chrome.px(HEIGHT)
+        self.wrap = self.chrome.px(WRAP)
+        self.row_gap = self.chrome.px(ROW_GAP)
+        self.f_header = _scaled_font(FONT_HEADER, scale)
+        self.f_side = _scaled_font(FONT_SIDE, scale)
+        self.f_current = _scaled_font(FONT_CURRENT, scale)
+
+        # Clamped rather than computed and trusted: screen metrics and window
+        # size can disagree about whether they are logical or device pixels, and
+        # the failure mode is the overlay sitting half off the bottom of the
+        # screen. Clamping is right under either reading.
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{WIDTH}x{HEIGHT}+{(sw - WIDTH) // 2}+{sh - HEIGHT - 80}")
+        x = max(0, (sw - self.width) // 2)
+        y = max(0, min(sh - self.height - self.chrome.px(80), sh - self.height))
+        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
 
-        self.canvas = tk.Canvas(self.root, width=WIDTH, height=HEIGHT, bg=TRANSPARENT,
+        self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
+                                bg=self.chrome.background,
                                 highlightthickness=0, borderwidth=0)
         self.canvas.pack(fill="both", expand=True)
+
+        # Only now that the window is its final size: the region is in device
+        # pixels and clips whatever it was applied to.
+        self.root.update_idletasks()
+        chrome_mod.shape(self.root, self.chrome, self.width, self.height)
 
         for widget in (self.root, self.canvas):
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
+            widget.bind("<ButtonRelease-1>", self._drag_end)
             widget.bind("<Button-3>", lambda e: self.root.destroy())
         self.root.bind("<Escape>", lambda e: self.root.destroy())
         self.root.bind("<plus>", lambda e: self._nudge(+0.25))
@@ -85,9 +121,17 @@ class Overlay:
     # --- interaction ---
     def _drag_start(self, e):
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
+        self._dragging = True
 
     def _drag_move(self, e):
-        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
+        x, y = e.x_root - self._dx, e.y_root - self._dy
+        if (x, y) == self._drag_at:
+            return          # motion events repeat; moving to where we already are stutters
+        self._drag_at = (x, y)
+        self.root.geometry(f"+{x}+{y}")
+
+    def _drag_end(self, _e):
+        self._dragging = False
 
     def _nudge(self, dt: float):
         self.offset += dt
@@ -97,8 +141,10 @@ class Overlay:
         self.fetch_gen += 1
         gen = self.fetch_gen
         self.lyrics = None
-        artist, title = snap.norm_artist_title()
-        self.status_msg = f"Searching lyrics: {artist} – {title}"
+        # No "searching" text: a status message where a lyric belongs reads as
+        # part of the song for the half second before the real line replaces it.
+        # Silence is a truer answer than a progress report.
+        self.status_msg = ""
 
         def work():
             lyr = fetch_for_candidates(snap.lookup_candidates(), snap.duration, snap.album)
@@ -121,11 +167,11 @@ class Overlay:
         if not snap.ok:
             curr_t = "♪"
         elif lyr is None:
-            curr_t = self.status_msg or "…"
+            curr_t = self.status_msg or "♪"
         elif lyr.instrumental:
-            curr_t = "♪ Instrumental ♪"
+            curr_t = "♪"
         elif lyr.synced:
-            pos = snap.live_position() + self.offset
+            pos = snap.live_position() + self.offset + LINE_LEAD_S
             i = lyr.line_index_at(pos)
             n = len(lyr.lines)
             self.line_index = i
@@ -152,33 +198,57 @@ class Overlay:
             return []
         return lyr.words_at(self.line_index)
 
+    def _draw_sheen(self) -> None:
+        """A one-pixel highlight along the top edge of the glass.
+
+        Additive, so three fading lines read as light catching an edge. In keyed
+        mode there is no plate for it to catch on, so it is skipped.
+        """
+        if not self.chrome.additive:
+            return
+        inset = self.chrome.px(22)
+        for i, level in enumerate((0x2C, 0x1C, 0x0C)):
+            self.canvas.create_line(inset, 1 + i, self.width - inset, 1 + i,
+                                    fill=f"#{level:02x}{level:02x}{level + 4:02x}")
+
     # --- render ---
     def _repaint(self, rows: tuple[str, str, str, str], words: list) -> None:
         header, prev_t, curr_t, next_t = rows
         self.canvas.delete("all")
         self.word_line = None
-        x, y = WIDTH // 2, 4
+        self._draw_sheen()
 
-        for text, font, colour in ((header, FONT_HEADER, COLOUR_HEADER),
-                                   (prev_t, FONT_SIDE, COLOUR_SIDE)):
+        p = self.palette
+        x, y = self.width // 2, self.chrome.px(14)
+
+        for text, font, colour in ((header, self.f_header, p.header),
+                                   (prev_t, self.f_side, p.side)):
             used = draw_outlined(self.canvas, x, y, text, font=font, fill=colour,
-                                 wrap=WRAP, outline=OUTLINE)
+                                 wrap=self.wrap, outline=p.outline)
             if used:
-                y += used + ROW_GAP
+                y += used + self.row_gap
 
         if words:
-            self.word_line = WordLine(self.canvas, x, y, words, font=FONT_CURRENT,
-                                      wrap=WRAP, sung=COLOUR_SUNG,
-                                      active=COLOUR_CURRENT, unsung=COLOUR_UNSUNG)
-            y += self.word_line.height + ROW_GAP
+            if self.chrome.additive:
+                self.word_line = SweepLine(self.canvas, x, y, words,
+                                           font=self.f_current, wrap=self.wrap,
+                                           palette=p, scale=self.chrome.scale)
+            else:
+                # Without additive light a per-character ramp would need an
+                # outline per character, which is far too many canvas items.
+                self.word_line = WordLine(self.canvas, x, y, words,
+                                          font=self.f_current, wrap=self.wrap,
+                                          sung=p.sung, active=p.sung,
+                                          unsung=p.unsung, outline=p.outline)
+            y += self.word_line.height + self.row_gap
         else:
-            used = draw_outlined(self.canvas, x, y, curr_t, font=FONT_CURRENT,
-                                 fill=COLOUR_CURRENT, wrap=WRAP, outline=OUTLINE)
+            used = draw_outlined(self.canvas, x, y, curr_t, font=self.f_current,
+                                 fill=p.sung, wrap=self.wrap, outline=p.outline)
             if used:
-                y += used + ROW_GAP
+                y += used + self.row_gap
 
-        draw_outlined(self.canvas, x, y, next_t, font=FONT_SIDE, fill=COLOUR_SIDE,
-                      wrap=WRAP, outline=OUTLINE)
+        draw_outlined(self.canvas, x, y, next_t, font=self.f_side, fill=p.side,
+                      wrap=self.wrap, outline=p.outline)
 
     def _tick(self):
         snap = self.reader.snapshot
@@ -191,13 +261,16 @@ class Overlay:
         # The line itself is the layout; its word colours are not. Rebuilding on
         # a colour change would tear the line down mid-sweep.
         layout = (rows, len(words))
-        if layout != self.last_render:
+        if layout != self.last_render and not self._dragging:
+            # Rebuilding the canvas mid-drag competes with the window moving,
+            # and the drag is the thing the hand is watching. It repaints on
+            # release, a fraction of a second later.
             self.last_render = layout
             self._repaint(rows, words)
 
         interval = SLOW_TICK_MS
         if self.word_line is not None:
-            pos = snap.live_position() + self.offset
+            pos = snap.live_position() + self.offset + WORD_LEAD_S
             index, fraction = self.lyrics.word_progress_at(self.line_index, pos)
             self.word_line.update(index, fraction)
             # A faster tick only while a word is actually lit; the rest of the
