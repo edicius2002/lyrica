@@ -3,6 +3,8 @@
 Fake providers stand in for real sources so the ordering rules can be tested
 without a network. Placeholder text only — nothing here is a real lyric.
 """
+import time
+
 import pytest
 
 from lyrica import providers
@@ -25,14 +27,17 @@ class Fake:
     """A provider that answers with whatever it was handed, and counts calls."""
 
     def __init__(self, name: str, result: Lyrics | None,
-                 ceiling: Precision = Precision.LINE):
+                 ceiling: Precision = Precision.LINE, delay: float = 0.0):
         self.name = name
         self.result = result
         self.max_precision = ceiling
+        self.delay = delay
         self.calls = 0
 
     def fetch(self, artist, title, duration=0.0, album=""):
         self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
         return self.result
 
 
@@ -99,20 +104,41 @@ def test_a_later_synced_answer_beats_an_earlier_plain_one(monkeypatch):
     assert first.calls == 1 and second.calls == 1
 
 
-def test_a_definitive_answer_stops_the_search(monkeypatch):
-    first, second = use(monkeypatch, Fake("syncy", synced()), Fake("never", synced()))
-    providers.fetch_lyrics("A", "B")
+def test_a_definitive_answer_ends_the_wait(monkeypatch):
+    # Sources are asked together, so the early exit stops the search *waiting*
+    # rather than stops it asking — the requests are already out. What it
+    # guarantees is that a track with a word-level answer does not sit behind
+    # a slower source that could not have improved on it.
+    first, _slow = use(monkeypatch, Fake("syncy", synced()),
+                       Fake("slow", synced(), delay=2.0))
+    started = time.perf_counter()
+    result = providers.fetch_lyrics("A", "B")
+    elapsed = time.perf_counter() - started
+    assert result.precision is Precision.LINE
     assert first.calls == 1
-    assert second.calls == 0, "no request should be spent once the answer is definitive"
+    assert elapsed < 1.0, f"waited {elapsed:.1f}s for a source it did not need"
 
 
-def test_an_exact_instrumental_stops_the_search(monkeypatch):
-    # The track having no lyrics is a complete answer; asking on would only
+def test_an_exact_instrumental_ends_the_wait(monkeypatch):
+    # The track having no lyrics is a complete answer; waiting on would only
     # invite a weaker source to supply some.
-    _, second = use(monkeypatch, Fake("inst", instrumental()), Fake("never", synced()))
+    use(monkeypatch, Fake("inst", instrumental()),
+        Fake("slow", synced(), delay=2.0))
+    started = time.perf_counter()
     result = providers.fetch_lyrics("A", "B")
     assert result.instrumental
-    assert second.calls == 0
+    assert time.perf_counter() - started < 1.0
+
+
+def test_sources_are_asked_at_the_same_time(monkeypatch):
+    # The whole point: two slow sources cost one wait, not two. Asked in turn
+    # these measured 1508 ms and then 3208 ms more for one real track.
+    use(monkeypatch, Fake("slow-a", None, delay=0.6),
+        Fake("slow-b", synced(), delay=0.6))
+    started = time.perf_counter()
+    providers.fetch_lyrics("A", "B")
+    elapsed = time.perf_counter() - started
+    assert elapsed < 1.0, f"{elapsed:.2f}s looks sequential"
 
 
 def test_a_fuzzy_instrumental_does_not_stop_the_search(monkeypatch):

@@ -4,6 +4,8 @@ Before providers declared a ceiling, a line-level answer either ended the search
 while a word-level source went unasked, or every source had to be queried on
 every track to find that out. These tests pin the middle.
 """
+import time
+
 import pytest
 
 from lyrica import providers
@@ -23,14 +25,17 @@ def plain(source="fake"):
 
 
 class Fake:
-    def __init__(self, name, result, ceiling=Precision.LINE):
+    def __init__(self, name, result, ceiling=Precision.LINE, delay=0.0):
         self.name = name
         self.result = result
         self.max_precision = ceiling
+        self.delay = delay
         self.calls = 0
 
     def fetch(self, artist, title, duration=0.0, album=""):
         self.calls += 1
+        if self.delay:
+            time.sleep(self.delay)
         return self.result
 
 
@@ -53,20 +58,28 @@ def test_a_line_answer_does_not_end_the_search_while_a_word_source_waits(monkeyp
     assert result.precision is Precision.WORD
 
 
-def test_a_line_answer_ends_the_search_when_nothing_better_remains(monkeypatch):
-    first, second = use(monkeypatch,
-                        Fake("liner", synced(), Precision.LINE),
-                        Fake("other", synced(), Precision.LINE))
-    providers.fetch_lyrics("A", "B")
-    assert first.calls == 1 and second.calls == 0
+def test_a_line_answer_ends_the_wait_when_nothing_better_remains(monkeypatch):
+    # Nothing outstanding could improve on it, so there is nothing to wait for.
+    use(monkeypatch,
+        Fake("liner", synced(), Precision.LINE),
+        Fake("slow", synced(), Precision.LINE, delay=2.0))
+    started = time.perf_counter()
+    result = providers.fetch_lyrics("A", "B")
+    assert result.precision is Precision.LINE
+    assert time.perf_counter() - started < 1.0
 
 
-def test_a_word_answer_ends_the_search_immediately(monkeypatch):
-    _, second = use(monkeypatch,
-                    Fake("worder", worded(), Precision.WORD),
-                    Fake("never", worded(), Precision.WORD))
-    providers.fetch_lyrics("A", "B")
-    assert second.calls == 0
+def test_a_word_answer_ends_the_wait_immediately(monkeypatch):
+    # Sources are asked together now, so this stops the search waiting rather
+    # than stops it asking. Nothing can beat a word-level answer, so the track
+    # must not sit behind a slower source that could only have matched it.
+    use(monkeypatch,
+        Fake("worder", worded(), Precision.WORD),
+        Fake("slow", worded(), Precision.WORD, delay=2.0))
+    started = time.perf_counter()
+    result = providers.fetch_lyrics("A", "B")
+    assert result.precision is Precision.WORD
+    assert time.perf_counter() - started < 1.0
 
 
 def test_a_word_source_that_misses_falls_back_to_the_line_source(monkeypatch):

@@ -11,6 +11,8 @@ so the extra request is only ever spent when the answer in hand is weak.
 import hashlib
 import json
 import logging
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -61,6 +63,11 @@ PROVIDERS: list[LyricsProvider] = [
     LrclibProvider(),
     NeteaseProvider(),
 ]
+
+# Nothing may hold a track's lyrics hostage. Every provider has its own request
+# timeout, but a stalled connection that never returns would otherwise leave the
+# search waiting on a name that is never coming.
+OVERALL_TIMEOUT_S = 12.0
 
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact")
 
@@ -129,31 +136,78 @@ def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) 
     return best.precision >= ceiling
 
 
+def _ask_one(provider: LyricsProvider, artist: str, title: str,
+             duration: float, album: str):
+    started = time.perf_counter()
+    try:
+        result = provider.fetch(artist, title, duration, album)
+    except Exception:
+        # One broken source must not deny the track lyrics that another source
+        # has. Logged with its traceback, then treated as a miss.
+        logger.exception("provider %s failed for %r - %r",
+                         provider.name, artist, title)
+        result = None
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    logger.info("%s answered %s in %.0f ms for %r - %r", provider.name,
+                result.precision.name if result else "MISS", elapsed_ms,
+                artist, title)
+    return provider, result
+
+
 def _ask_providers(artist: str, title: str, duration: float,
                    album: str) -> tuple[Lyrics | None, list[str]]:
-    """Walk the cascade keeping the best answer. Returns it and who was asked."""
+    """Ask every provider at once, keeping the best. Returns it and who answered.
+
+    Asked together rather than in turn. The order still decides *what wins* —
+    a word-level answer beats a line-level one wherever it came from — but it
+    no longer decides how long the track waits, and that was costing whole
+    seconds. Measured over seven tracks: a source that misses is a full round
+    trip before the next one starts, so a track whose words live in the second
+    provider waited 1508 ms for the first to miss and then 3208 ms more, where
+    asking both together answers in 3208 ms.
+
+    The early exit survives, and is what keeps this from being merely faster:
+    the moment an answer arrives that nothing outstanding could beat, the rest
+    are abandoned and the track has its lyrics.
+
+    The cost is that every provider is now asked on every uncached track rather
+    than only until one satisfies the ceiling. Acceptable because the result is
+    cached — this is once per track ever, not once per play.
+    """
     best: Lyrics | None = None
     asked: list[str] = []
-    for index, provider in enumerate(PROVIDERS):
-        started = time.perf_counter()
+    pending = {p.name: p for p in PROVIDERS}
+    answers: queue.Queue = queue.Queue()
+
+    for provider in PROVIDERS:
+        # Daemon threads and a queue rather than a pool. A pool's shutdown
+        # waits for every worker, which would undo the early exit entirely —
+        # the answer would be in hand and the call would still sit there until
+        # the slowest source finished. These are abandoned instead, and being
+        # daemons they cannot hold up the process on the way out.
+        threading.Thread(
+            target=lambda p=provider, a=artist, ti=title, d=duration, al=album:
+                answers.put(_ask_one(p, a, ti, d, al)),
+            name=f"lyrics-{provider.name}", daemon=True).start()
+
+    deadline = time.monotonic() + OVERALL_TIMEOUT_S
+    while pending:
         try:
-            result = provider.fetch(artist, title, duration, album)
-        except Exception:
-            # One broken source must not deny the track lyrics that another
-            # source has. Logged with its traceback, then skipped.
-            logger.exception("provider %s failed for %r - %r", provider.name, artist, title)
-            result = None
-        elapsed_ms = (time.perf_counter() - started) * 1000
+            provider, result = answers.get(
+                timeout=max(0.05, deadline - time.monotonic()))
+        except queue.Empty:
+            logger.info("gave up waiting on %s for %r - %r",
+                        sorted(pending), artist, title)
+            break
         asked.append(provider.name)
-
-        tier = result.precision.name if result else "MISS"
-        logger.info("%s answered %s in %.0f ms for %r - %r",
-                    provider.name, tier, elapsed_ms, artist, title)
-
+        pending.pop(provider.name, None)
         if _better(result, best):
             best = result
-        if _nothing_left_to_beat(best, PROVIDERS[index + 1:]):
+        if _nothing_left_to_beat(best, list(pending.values())):
+            # Nothing still in flight could improve on this, so the track has
+            # its lyrics now. The rest finish into a queue nobody reads.
             break
+
     return best, asked
 
 
