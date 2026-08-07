@@ -7,6 +7,7 @@ Nothing here overwrites a variable already set in the environment. A value
 exported in a shell is a deliberate act for that session, and a file on disk
 should not quietly override it.
 """
+import json
 import logging
 import os
 from pathlib import Path
@@ -63,6 +64,9 @@ def _parse_size(raw: str, source: str) -> float | None:
 
 # How solid the panel is. Below the lower bound the desktop reads through the
 # text; at 1.0 it is an opaque slab and stops being glass at all.
+# How far the sync nudge may be remembered. A correction, not a seek.
+OFFSET_LIMIT_S = 10.0
+
 OPACITY_MIN, OPACITY_MAX = 0.60, 1.0
 OPACITY_DEFAULT = 0.90
 
@@ -115,12 +119,54 @@ def beam_style() -> str:
     return "comet"
 
 
+def settings_path() -> Path:
+    """Where choices made with the mouse and keyboard are remembered."""
+    return cache_root() / "settings.json"
+
+
 def size_path() -> Path:
-    """Where a size chosen with the keyboard is remembered."""
+    """The older single-value file, still read so an upgrade loses nothing."""
     return cache_root() / "size"
 
 
+def settings() -> dict:
+    """Everything remembered, or an empty mapping.
+
+    Never raises and never returns anything but a mapping. This is read before
+    the window exists, on a machine with no console, so a file someone edited
+    into nonsense has to degrade into defaults rather than into no overlay.
+    """
+    try:
+        loaded = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def save_setting(key: str, value) -> None:
+    """Remember one thing. Failing to is not fatal.
+
+    Read-modify-write of the whole file rather than an append: there are a
+    handful of values, they are written when a hand stops moving rather than in
+    a loop, and one small object is easier to reason about than a log to replay.
+    """
+    current = settings()
+    if current.get(key) == value:
+        return                      # nothing changed; do not touch the disk
+    current[key] = value
+    try:
+        path = settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current), encoding="utf-8")
+    except OSError:
+        logger.debug("could not save %s", key, exc_info=True)
+
+
 def saved_size() -> float | None:
+    value = settings().get("size")
+    if value is not None:
+        return _parse_size(str(value), "the saved size")
+    # The file this used to live in, before there were several things to keep.
     try:
         return _parse_size(size_path().read_text(encoding="utf-8"), "the saved size")
     except OSError:
@@ -128,13 +174,53 @@ def saved_size() -> float | None:
 
 
 def save_size(value: float) -> None:
-    """Remember a size chosen with the keyboard. Failing to is not fatal."""
-    try:
-        path = size_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"{clamp_size(value):.2f}", encoding="utf-8")
-    except OSError:
-        logger.debug("could not save the overlay size", exc_info=True)
+    """Remember a size chosen with the keyboard."""
+    save_setting("size", round(clamp_size(value), 2))
+
+
+def saved_centre() -> tuple[int, int] | None:
+    """Where the middle of the window was left, or None.
+
+    The middle rather than the corner, because the window is not one width. It
+    collapses to the card when a track has no lyrics and grows again for the
+    next one that has some, and both hold the horizontal middle while the corner
+    moves under it — so a corner saved while compact describes a place the
+    full-size window was never at. Measured: left at 527, collapsed, saved as
+    927, and reopened 400 px right of where it had been put.
+
+    Vertically the two differ — a collapse holds the top edge so the card does
+    not move, a keyboard resize holds the middle — which is why only a drag
+    writes here. A drag is the one moment the position is a decision rather
+    than something derived from a size change.
+
+    Not trusted on the way back either. A position saved on a second monitor
+    since unplugged is a window nobody can see and nobody can drag back, so the
+    caller clamps it to whatever screen exists now.
+    """
+    value = settings().get("centre")
+    if (isinstance(value, list) and len(value) == 2
+            and all(isinstance(v, (int, float)) for v in value)):
+        return int(value[0]), int(value[1])
+    return None
+
+
+def save_centre(x: int, y: int) -> None:
+    save_setting("centre", [int(x), int(y)])
+
+
+def saved_offset() -> float:
+    """The sync nudge, in seconds. Zero if there is none or it is unusable."""
+    value = settings().get("offset")
+    if not isinstance(value, (int, float)):
+        return 0.0
+    # Bounded, because a nudge is a correction and not a seek: anything past a
+    # few seconds is a mis-saved file rather than a preference, and restoring it
+    # would show the wrong line with no obvious cause.
+    return max(-OFFSET_LIMIT_S, min(OFFSET_LIMIT_S, float(value)))
+
+
+def save_offset(seconds: float) -> None:
+    save_setting("offset", round(seconds, 2))
 
 
 def size_scale() -> float:

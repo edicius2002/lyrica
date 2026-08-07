@@ -170,7 +170,7 @@ class Overlay:
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
-        self.offset = 0.0
+        self.offset = config.saved_offset()
         self.line_index = -1
 
         self._views: dict[int, LineView] = {}
@@ -239,6 +239,15 @@ class Overlay:
         self._start_x = max(0, (sw - self.width) // 2)
         self._start_y = max(0, min(sh - self.height - self.chrome.px(80),
                                    sh - self.height))
+        # Where it was left, if it was left anywhere reachable. Clamped rather
+        # than trusted: a position saved on a monitor since unplugged is a
+        # window nobody can see and nobody can drag back.
+        remembered = config.saved_centre()
+        if remembered is not None:
+            self._start_x = max(0, min(remembered[0] - self.width // 2,
+                                       sw - self.width))
+            self._start_y = max(0, min(remembered[1] - self.height // 2,
+                                       sh - self.height))
         self.root.geometry(
             f"{self.width}x{self.height}+{self._start_x}+{self._start_y}")
 
@@ -395,6 +404,15 @@ class Overlay:
                 chrome_mod.suspend_effects(self.root, self.chrome, True)
         chrome_mod.move(self.root, x, y)
 
+    def _remember_where(self) -> None:
+        """Keep the middle of the window, not its corner.
+
+        A collapse and a resize both hold the middle and derive a new corner
+        from it, so a corner is only true for the width it was taken at.
+        """
+        config.save_centre(self.root.winfo_x() + self.width // 2,
+                           self.root.winfo_y() + self.height // 2)
+
     def _drag_end(self, _e):
         was_dragging = self._moved
         self._dragging = False
@@ -402,6 +420,10 @@ class Overlay:
             chrome_mod.suspend_effects(self.root, self.chrome, False)
         if not self._moved:
             self._seek_to_line_at(self._press_y)
+            return
+        # Written when the hand stops, not while it moves: a drag issues
+        # hundreds of positions and only the last one is a decision.
+        self._remember_where()
 
     def _seek_to_line_at(self, y: int) -> None:
         """Jump to whichever line was clicked, if the player will allow it."""
@@ -439,7 +461,9 @@ class Overlay:
         self._restyle(indices)
 
     def _nudge(self, dt: float):
-        self.offset += dt
+        self.offset = max(-config.OFFSET_LIMIT_S,
+                          min(config.OFFSET_LIMIT_S, self.offset + dt))
+        config.save_offset(self.offset)
 
     # --- collapsing to the card ---
     def _card_span(self) -> int:

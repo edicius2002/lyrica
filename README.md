@@ -55,7 +55,9 @@ has the keyboard, which is the only way they are any use — focusing the overla
 means clicking it, and clicking it seeks to a line. `Esc` and `+` / `-` still
 need it focused. On other platforms the size keys need the focus too.
 
-A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
+A size chosen this way is remembered, and takes over from `LYRICA_SIZE`. So are
+the place you drag the window to and any sync offset you nudge in — all of it in
+`settings.json` beside the cache.
 
 ## The border reacts to the music
 
@@ -237,8 +239,6 @@ Research notes and source-viability scripts live in `research/`.
 Everything this once listed has shipped — NetEase, the word-by-word layer, the
 outline, the packaging — so what is left is what is actually left:
 
-- **Remember where the window was, and the sync offset.** The size is
-  remembered and these are not, which is the inconsistency you notice.
 - **A configurable provider order.** Fixed in code today. The current order is
   measured rather than assumed, so this is a preference rather than a fix.
 - **A release workflow.** CI tests on both platforms but does not build or
