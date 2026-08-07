@@ -15,6 +15,24 @@ pip install -e .
 lyrica          # or: python -m lyrica
 ```
 
+### On a machine without Python
+
+Build a standalone executable and copy that instead:
+
+```powershell
+pip install -e .[dev]
+pyinstaller lyrica.spec
+```
+
+`dist/Lyrica.exe` is one file, about 30 MB, and needs nothing installed on the
+machine it is copied to — no Python, no packages. It reads and writes the same
+cache under `%LOCALAPPDATA%\Lyrica`.
+
+The Discogs token is deliberately **not** bundled: it would put a credential
+inside a file meant to be handed around. The executable reads one from a `.env`
+beside itself or from the environment, and works without one — Apple is the
+primary cover source and needs no key.
+
 Play something and the overlay appears at the bottom center of the screen.
 
 | Action | Control |
