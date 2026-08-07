@@ -95,6 +95,18 @@ class MacSessionReader(SessionReader):
                 self.snapshot = Snapshot()
             self._stop.wait(self.interval)
 
+    def seek(self, seconds: float) -> bool:
+        """Ask the player to jump. **Unverified**, like the rest of this reader."""
+        try:
+            result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+                [CLI, "seek", f"{max(0.0, seconds):.3f}"],
+                capture_output=True, text=True, timeout=CALL_TIMEOUT_S, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.debug("could not ask %s to seek", CLI, exc_info=True)
+            return False
+        return result.returncode == 0
+
     def _read(self) -> Snapshot:
         try:
             result = subprocess.run(  # noqa: S603 — fixed argv, no shell
