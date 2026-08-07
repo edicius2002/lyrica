@@ -14,6 +14,11 @@ build/
 mvp/cache/
 *.log
 
+# Secrets. The example file is committed; the real one never is.
+.env
+.env.*
+!.env.example
+
 # Editor / SO
 .vscode/
 .idea/
