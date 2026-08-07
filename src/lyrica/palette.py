@@ -48,6 +48,7 @@ class Palette:
     outline: int
     ramp: list[str]
     glow: bool
+    additive: bool
 
     def at(self, fraction: float) -> str:
         """The sweep colour at 0..1 through a character."""
@@ -63,6 +64,25 @@ class Palette:
         """
         return self.side if distance <= 1 else self.far
 
+    def faded(self, distance: int, visibility: float) -> str:
+        """Brightness for a line, dimmed by how near the edge it has drifted.
+
+        Additive composition makes this a true fade rather than a tint:
+        brightness *is* opacity, so scaling a level toward zero scales the line
+        toward invisible. That is what stops a line ever being seen cut off by
+        the edge of the window — by the time it reaches one, there is nothing
+        left of it to clip.
+
+        Replacing composition has no equivalent: dimming a colour there just
+        makes it a darker colour, which over a bright background is more
+        visible rather than less. So keyed mode keeps its flat step.
+        """
+        base = self.by_distance(distance)
+        if not self.additive:
+            return base
+        level = int(base[1:3], 16)
+        return _grey(round(level * max(0.0, min(1.0, visibility))))
+
 
 # Glass: additive, so these are brightness levels and double as opacity.
 # Unsung sits high because the overlay is glanced at rather than read — a line
@@ -75,7 +95,8 @@ GLASS = Palette(
     sung=_grey(0xFF),
     outline=0,          # black is invisible here; the tinted plate is the contrast
     ramp=_ramp(0x8A, 0xFF),
-    glow=True,          # offset copies genuinely add light rather than faking it
+    glow=True,   # offset copies genuinely add light rather than faking it
+    additive=True,
 )
 
 KEYED = Palette(
@@ -86,7 +107,8 @@ KEYED = Palette(
     sung="#ffffff",
     outline=2,          # the only thing keeping text legible over a bright video
     ramp=_blend_ramp("#9aa3b2", "#ffffff"),
-    glow=False,         # an offset copy would just smear, with nothing to add to
+    glow=False,  # an offset copy would just smear, with nothing to add to
+    additive=False,
 )
 
 GLOW_LEVELS = [f"#{g:02x}{g:02x}{g:02x}" for g in range(RAMP_STEPS)]
