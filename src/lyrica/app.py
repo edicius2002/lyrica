@@ -6,7 +6,8 @@ lyrics over everything else, swept word by word.
 Run:      python -m lyrica   (or the `lyrica` console script)
 Keys:     Esc = quit | right click = quit | drag with mouse = move
           +/- = nudge sync offset by ±0.25 s  (needs the overlay focused)
-Global:   Ctrl+Alt+plus / Ctrl+Alt+minus = resize | Ctrl+Alt+0 = designed size
+Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
+          Ctrl+Alt+plus / Ctrl+Alt+minus = resize | Ctrl+Alt+0 = designed size
 """
 import logging
 import logging.handlers
@@ -127,6 +128,7 @@ class Overlay:
         self._card_text = None
         self._card_raw = None
         self._awaiting_seek = None
+        self._hidden = False
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -210,6 +212,8 @@ class Overlay:
         self.root.bind("<Control-0>", lambda e: self._resize_to(1.0))
 
     HOTKEY_ACTIONS: ClassVar[dict] = {
+        "toggle": lambda self: self._toggle_visible(),
+        "quit": lambda self: self.root.destroy(),
         "bigger": lambda self: self._resize(+SIZE_STEP),
         "smaller": lambda self: self._resize(-SIZE_STEP),
         "reset": lambda self: self._resize_to(1.0),
@@ -355,6 +359,35 @@ class Overlay:
 
     def _nudge(self, dt: float):
         self.offset += dt
+
+    # --- showing and hiding ---
+    def _toggle_visible(self) -> None:
+        """Put the overlay away, or bring it back.
+
+        Hidden rather than closed. `Esc` and right click destroy the window,
+        which is the right answer for "I am done" and the wrong one for "not
+        during this call" — there is no way back from it but relaunching.
+        """
+        self._hidden = not self._hidden
+        if self._hidden:
+            self.root.withdraw()
+            logger.info("overlay hidden")
+            return
+
+        self.root.deiconify()
+        # Re-asserted rather than assumed. Mapping a window again puts it back
+        # in the z-order as an ordinary one, so without this it returns *behind*
+        # whatever was in front — which looks exactly like the shortcut having
+        # done nothing at all.
+        self.root.attributes("-topmost", True)
+        self.root.update_idletasks()
+        chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+        # Nothing was drawn while it was away, so whatever line is playing now
+        # is not the one on screen. Forgetting which it was makes the next tick
+        # place them without animating, rather than gliding through however many
+        # lines went past while nobody was looking.
+        self.line_index = -1
+        logger.info("overlay shown")
 
     # --- size ---
     def _resize(self, delta: float) -> None:
@@ -699,6 +732,13 @@ class Overlay:
     # --- render ---
     def _tick(self):
         self._drain_hotkeys()
+        if self._hidden:
+            # Nothing to draw and nobody watching. The session reader keeps
+            # polling on its own thread, so this stays cheap without going
+            # stale: bringing it back resyncs on the very next tick.
+            self.root.after(SLOW_TICK_MS, self._tick)
+            return
+
         snap = self.reader.snapshot
         if snap.ok and snap.track_key() != self.track_key:
             self.track_key = snap.track_key()
