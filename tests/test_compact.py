@@ -45,3 +45,32 @@ def test_a_finished_search_never_reports_unknown():
     for result in (None, Lyrics(lines=[], synced=True), synced(),
                    Lyrics(lines=[(0.0, "x")], synced=False)):
         assert lyrics_state(result) != LYRICS_UNKNOWN
+
+
+# --- what a search still in flight must not do ------------------------------
+
+from lyrica.app import compact_target  # noqa: E402
+
+
+def test_an_unfinished_search_leaves_the_panel_where_it_is():
+    # Both directions. Reading UNKNOWN as "not absent" made a track with no
+    # lyrics followed by another with none expand for the second the search
+    # takes and then collapse again.
+    assert compact_target(LYRICS_UNKNOWN, currently_compact=True) is True
+    assert compact_target(LYRICS_UNKNOWN, currently_compact=False) is False
+
+
+def test_two_songs_with_no_lyrics_in_a_row_never_expand():
+    compact = False
+    for _track in range(3):
+        compact = compact_target(LYRICS_UNKNOWN, compact)   # search goes out
+        was = compact
+        compact = compact_target(LYRICS_ABSENT, compact)    # nothing found
+        assert compact is True
+        if _track:
+            assert was is True, "it expanded between two silent tracks"
+
+
+def test_a_definite_answer_still_decides():
+    assert compact_target(LYRICS_ABSENT, currently_compact=False) is True
+    assert compact_target(LYRICS_PRESENT, currently_compact=True) is False
