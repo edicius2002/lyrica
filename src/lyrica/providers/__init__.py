@@ -11,10 +11,10 @@ so the extra request is only ever spent when the answer in hand is weak.
 import hashlib
 import json
 import logging
-import os
 import time
 from pathlib import Path
 
+from lyrica import config
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider
 from lyrica.providers.community import CommunityTtmlProvider
@@ -26,19 +26,19 @@ logger = logging.getLogger(__name__)
 
 
 def default_cache_dir() -> Path:
-    """Where lookups are cached.
+    """Where lyric lookups are cached.
 
-    `LYRICA_CACHE_DIR` points this at a folder synchronised between machines,
-    which is all the cache needs to follow you: every entry is written once,
-    named by a hash of the track, and never modified. Two machines can add
-    different files but can never disagree about one — so plain folder sync is
-    enough, and a database here would be worse, not better, since a shared
-    SQLite file is exactly what concurrent writers corrupt.
+    Under the store `LYRICA_CACHE_DIR` points at, which is all the cache needs
+    to follow you between machines: every entry is written once, named by a
+    hash of the track, and never modified. Two machines can add different files
+    but can never disagree about one — so plain folder sync is enough, and a
+    database here would be worse, not better, since a shared SQLite file is
+    exactly what concurrent writers corrupt.
     """
-    override = os.environ.get("LYRICA_CACHE_DIR")
-    if override:
-        return Path(override)
-    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica" / "cache"
+    # Deliberately still "cache": renaming it would orphan everything already
+    # looked up, and a cache that silently starts empty is worse than a name
+    # that is merely unspecific.
+    return config.cache_root() / "cache"
 
 
 CACHE_DIR = default_cache_dir()

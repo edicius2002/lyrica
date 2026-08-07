@@ -9,11 +9,15 @@ Additive composition does most of the work: a heavily darkened image adds a
 faint wash of its own colour through the frosted plate instead of painting over
 it. That is why the brightness here can be so low and still be visible at all.
 """
+import hashlib
 import io
 import logging
 import os
+from pathlib import Path
 
 import requests
+
+from lyrica import config
 
 logger = logging.getLogger(__name__)
 
@@ -162,14 +166,64 @@ def fetch_cover_discogs(artist: str, title: str, album: str = "") -> bytes | Non
     return None
 
 
+def cover_dir() -> Path:
+    path = config.cache_root() / "covers"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cover_path(artist: str, title: str, album: str) -> Path:
+    key = f"{artist.lower()}|{title.lower()}|{album.lower()}"
+    digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()
+    return cover_dir() / f"{digest}.img"
+
+
+def cached_cover(artist: str, title: str, album: str = "") -> bytes | None:
+    """A cover already on disk, or None. A miss is stored as an empty file."""
+    path = _cover_path(artist, title, album)
+    try:
+        if not path.exists():
+            return None
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return data or None
+
+
+def store_cover(artist: str, title: str, album: str, data: bytes | None) -> None:
+    """Keep a cover for next time. Misses are kept too.
+
+    A track whose cover no source has is the expensive case: without recording
+    the miss, every replay would ask every source again and wait for all of
+    them to fail.
+    """
+    try:
+        _cover_path(artist, title, album).write_bytes(data or b"")
+    except OSError:
+        logger.debug("could not cache the cover", exc_info=True)
+
+
 def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
     """The best cover any configured source has, or None.
 
-    Apple first: official artwork, square, consistent. Discogs second and only
-    with a token, for the pressings a commercial catalogue skips.
+    Disk first, so a track played before appears instantly rather than after
+    two network round trips. Then Apple — official artwork, square, consistent
+    — and Discogs only with a token, for the pressings a commercial catalogue
+    skips.
     """
-    return (fetch_cover(artist, title, album, size=size)
+    if not (artist or title):
+        return None
+    cached = cached_cover(artist, title, album)
+    if cached is not None:
+        return cached
+    path = _cover_path(artist, title, album)
+    if path.exists():
+        return None     # a recorded miss; do not ask again
+
+    data = (fetch_cover(artist, title, album, size=size)
             or fetch_cover_discogs(artist, title, album))
+    store_cover(artist, title, album, data)
+    return data
 
 
 def available() -> bool:
