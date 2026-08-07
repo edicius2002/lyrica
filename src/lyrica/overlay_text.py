@@ -163,21 +163,33 @@ class SweepLine:
 
         self.height = len(rows) * line_height
 
-    def _front_at(self, word_index: int, fraction: float) -> float | None:
-        """Where the gradient front sits, in canvas x, or None before the start.
+    def _front_at(self, word_index: int, fraction: float) -> tuple[int, float] | None:
+        """The row being sung and where the gradient front sits along it.
 
-        The front advances from the active word's first character towards the
-        next word's, so it tracks the voice word by word rather than sweeping
-        the whole line at one constant rate.
+        Returns None before the first word. The front advances from the active
+        word's first character towards the next word's, so it tracks the voice
+        word by word rather than sweeping at one constant rate.
+
+        A word whose successor sits on the next row aims at the end of its own
+        row instead. Aiming at the successor's position would send the front
+        travelling backwards across the line, since the next row restarts at the
+        left margin.
         """
         if word_index < 0 or word_index >= len(self._word_starts):
             return None
-        here = self._char_centre(self._word_starts[word_index])
+        index = self._word_starts[word_index]
+        row = self._chars[max(0, min(index, len(self._chars) - 1))][1]
+        here = self._char_centre(index)
+
         after = word_index + 1
-        target = (self._char_centre(self._word_starts[after])
-                  if after < len(self._word_starts)
-                  else self._line_end + self.feather)
-        return here + (target - here) * fraction - self.feather * 0.5
+        if after < len(self._word_starts):
+            next_index = self._word_starts[after]
+            next_row = self._chars[max(0, min(next_index, len(self._chars) - 1))][1]
+            target = (self._char_centre(next_index) if next_row == row
+                      else self._row_spans[row][1] + self.feather)
+        else:
+            target = self._row_spans[row][1] + self.feather
+        return row, here + (target - here) * fraction - self.feather * 0.5
 
     def _char_centre(self, index: int) -> float:
         index = max(0, min(index, len(self._chars) - 1))
@@ -189,13 +201,19 @@ class SweepLine:
             return
         self._front = front
         canvas, palette = self.canvas, self.palette
+        active_row, front_x = front or (-1, 0.0)
 
         for entry in self._chars:
-            centre, _row, item, glow, last, glowing = entry
-            if front is None:
+            centre, row, item, glow, last, glowing = entry
+            # Rows share the same horizontal range, so position alone cannot say
+            # whether a character has been sung — without the row test a wrapped
+            # line lights both of its rows at once.
+            if front is None or row > active_row:
                 t = 0.0
+            elif row < active_row:
+                t = 1.0
             else:
-                t = (front - centre) / self.feather + 0.5
+                t = (front_x - centre) / self.feather + 0.5
                 t = max(0.0, min(1.0, t))
             colour = palette.at(t)
             if colour != last:

@@ -114,3 +114,50 @@ def test_the_active_word_flips_at_its_midpoint():
 
 def test_before_the_first_word_nothing_is_sung():
     assert [colour_for(i, -1, 0.0) for i in range(3)] == ["unsung"] * 3
+
+
+# --- the wrapped-line sweep -------------------------------------------------
+
+def sweep_t(char_row: int, active_row: int, char_centre: float,
+            front_x: float, feather: float = 40.0) -> float:
+    """The rule SweepLine.update applies, isolated from the canvas.
+
+    Rows share the same horizontal range, so an x position alone cannot say
+    whether a character has been sung.
+    """
+    if active_row < 0 or char_row > active_row:
+        return 0.0
+    if char_row < active_row:
+        return 1.0
+    return max(0.0, min(1.0, (front_x - char_centre) / feather + 0.5))
+
+
+def test_a_wrapped_line_does_not_light_both_rows_at_once():
+    # The reported bug. Two characters at the same x on different rows must not
+    # share a state just because they share a column.
+    on_active = sweep_t(char_row=0, active_row=0, char_centre=300, front_x=400)
+    on_next = sweep_t(char_row=1, active_row=0, char_centre=300, front_x=400)
+    assert on_active == 1.0
+    assert on_next == 0.0
+
+
+def test_a_finished_row_stays_lit_when_the_sweep_moves_on():
+    # Otherwise the first row would appear to un-sing itself as the front
+    # restarts at the left margin of the second.
+    assert sweep_t(char_row=0, active_row=1, char_centre=900, front_x=100) == 1.0
+
+
+def test_within_the_active_row_position_still_decides():
+    behind = sweep_t(char_row=1, active_row=1, char_centre=100, front_x=400)
+    ahead = sweep_t(char_row=1, active_row=1, char_centre=800, front_x=400)
+    assert behind == 1.0
+    assert ahead == 0.0
+
+
+def test_the_feather_ramps_rather_than_stepping():
+    # A hard step at the front edge is what makes a sweep read as clicking
+    # between characters instead of flowing.
+    at_front = sweep_t(char_row=0, active_row=0, char_centre=400, front_x=400)
+    just_past = sweep_t(char_row=0, active_row=0, char_centre=390, front_x=400)
+    assert 0.0 < at_front < 1.0
+    assert just_past > at_front

@@ -16,6 +16,7 @@ import tkinter as tk
 from pathlib import Path
 
 from lyrica import chrome as chrome_mod
+from lyrica import motion
 from lyrica import palette as palette_mod
 from lyrica.lyrics import Lyrics
 from lyrica.overlay_text import SweepLine, WordLine, draw_outlined
@@ -45,6 +46,11 @@ SWEEP_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 LINE_LEAD_S = 0.115
 WORD_LEAD_S = 0.150
 
+# How far the rows are displaced backwards when a new line arrives. Roughly the
+# height of a side line, so the movement reads as the column advancing by one
+# rather than as the text sliding an arbitrary distance.
+GLIDE_TRAVEL = 46
+
 
 def _scaled_font(spec: tuple, scale: float) -> tuple:
     family, size, *rest = spec
@@ -64,6 +70,9 @@ class Overlay:
         self.word_line = None
         self._dragging = False
         self._drag_at = (None, None)
+        self._last_line_index = -1
+        self._glides: dict = {}
+        self._applied: dict = {}
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -89,6 +98,7 @@ class Overlay:
         self.f_header = _scaled_font(FONT_HEADER, scale)
         self.f_side = _scaled_font(FONT_SIDE, scale)
         self.f_current = _scaled_font(FONT_CURRENT, scale)
+        self._glide_travel = self.chrome.px(GLIDE_TRAVEL)
 
         # Clamped rather than computed and trusted: screen metrics and window
         # size can disagree about whether they are logical or device pixels, and
@@ -211,20 +221,33 @@ class Overlay:
             self.canvas.create_line(inset, 1 + i, self.width - inset, 1 + i,
                                     fill=f"#{level:02x}{level:02x}{level + 4:02x}")
 
+    def _tag_since(self, mark: set, tag: str) -> set:
+        """Tag everything drawn since `mark`, so the row can be moved as one."""
+        now = set(self.canvas.find_all())
+        for item in now - mark:
+            self.canvas.addtag_withtag(tag, item)
+        return now
+
     # --- render ---
-    def _repaint(self, rows: tuple[str, str, str, str], words: list) -> None:
+    def _repaint(self, rows: tuple[str, str, str, str], words: list,
+                 travel: float = 0.0) -> None:
         header, prev_t, curr_t, next_t = rows
         self.canvas.delete("all")
         self.word_line = None
+        self._glides = {}
+        self._applied = {}
         self._draw_sheen()
+        mark = set(self.canvas.find_all())
 
         p = self.palette
         x, y = self.width // 2, self.chrome.px(14)
 
-        for text, font, colour in ((header, self.f_header, p.header),
-                                   (prev_t, self.f_side, p.side)):
+        for row, (text, font, colour) in enumerate(
+                ((header, self.f_header, p.header),
+                 (prev_t, self.f_side, p.side))):
             used = draw_outlined(self.canvas, x, y, text, font=font, fill=colour,
                                  wrap=self.wrap, outline=p.outline)
+            mark = self._tag_since(mark, f"row{row}")
             if used:
                 y += used + self.row_gap
 
@@ -246,9 +269,53 @@ class Overlay:
                                  fill=p.sung, wrap=self.wrap, outline=p.outline)
             if used:
                 y += used + self.row_gap
+        mark = self._tag_since(mark, "row2")
 
         draw_outlined(self.canvas, x, y, next_t, font=self.f_side, fill=p.side,
                       wrap=self.wrap, outline=p.outline)
+        self._tag_since(mark, "row3")
+
+        if travel:
+            self._start_glide(travel)
+
+    def _start_glide(self, travel: float) -> None:
+        """Send every row on its way from where the old line left it.
+
+        Rows are drawn where they belong and then displaced backwards, so the
+        animation is the displacement decaying rather than a position being
+        driven — which means a line change landing mid-glide adds to the
+        journey instead of restarting it.
+        """
+        for row in range(4):
+            self._glides[f"row{row}"] = motion.Glide(
+                travel, motion.row_duration(row, active_row=2))
+            self._applied[f"row{row}"] = 0.0
+        self._advance_glides()
+
+    def _advance_glides(self) -> bool:
+        """Move each row to where it should be now. True while any still moves."""
+        if not self._glides:
+            return False
+        moving = False
+        for tag, glide in list(self._glides.items()):
+            want = glide.offset()
+            delta = want - self._applied.get(tag, 0.0)
+            # Canvas coordinates are integers, so sub-pixel steps would be
+            # dropped; the applied total tracks what actually moved.
+            step = round(delta)
+            if step:
+                self.canvas.move(tag, 0, step)
+                self._applied[tag] = self._applied.get(tag, 0.0) + step
+            if glide.done and abs(want) < 0.5:
+                # Settle exactly, so rounding cannot leave a row a pixel adrift.
+                residual = -round(self._applied.get(tag, 0.0))
+                if residual:
+                    self.canvas.move(tag, 0, residual)
+                del self._glides[tag]
+                self._applied.pop(tag, None)
+            else:
+                moving = True
+        return moving
 
     def _tick(self):
         snap = self.reader.snapshot
@@ -265,8 +332,16 @@ class Overlay:
             # Rebuilding the canvas mid-drag competes with the window moving,
             # and the drag is the thing the hand is watching. It repaints on
             # release, a fraction of a second later.
+            advanced = (self.last_render is not None
+                        and self.line_index == self._last_line_index + 1)
             self.last_render = layout
-            self._repaint(rows, words)
+            # Only a step to the next line glides. A jump — a seek, a new track,
+            # lyrics arriving — should simply be there, because animating a
+            # discontinuity is how a view ends up chasing itself.
+            self._repaint(rows, words, travel=self._glide_travel if advanced else 0.0)
+            self._last_line_index = self.line_index
+
+        moving = self._advance_glides()
 
         interval = SLOW_TICK_MS
         if self.word_line is not None:
@@ -277,6 +352,8 @@ class Overlay:
             # time the overlay costs nothing.
             if 0 <= index < len(words):
                 interval = SWEEP_TICK_MS
+        if moving:
+            interval = SWEEP_TICK_MS
 
         self.root.after(interval, self._tick)
 
