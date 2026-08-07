@@ -47,7 +47,7 @@ class LineView:
         self.y = float(y)
         self._items: list = []      # [centre_x, row, item, colour]
         self._outline: list = []
-        self._word_starts: list[int] = []
+        self._word_chars: list[int] = []   # timed token -> its first character
         self._glow: dict = {}       # char index -> [items], built only while active
         self._active = False
         self._state = None
@@ -58,10 +58,15 @@ class LineView:
         self.line_height = font_obj.metrics("linespace")
         self._font = font
 
-        # A line with no word timing is still laid out per character, so it can
-        # be reused unchanged if word timings arrive for it later.
-        layout = words or [(0.0, 0.0, w) for w in text.split()]
-        rows = wrap_words(layout, font_obj, key, space, wrap)
+        # The line is laid out from its own text, never from the word tokens.
+        # Sources tokenise below the word — richsync in particular splits on
+        # syllables — so joining tokens with spaces would render a split word as
+        # two. Timings are mapped onto the text afterwards instead, which makes
+        # what appears on screen exactly what the line says.
+        self.text = text or " ".join(w[2] for w in words)
+        tokens = [(0.0, 0.0, part) for part in self.text.split()]
+        self._word_chars = self._map_words_to_text(words)
+        rows = wrap_words(tokens, font_obj, key, space, wrap)
         self._row_spans: list[tuple[float, float]] = []
 
         for r, row in enumerate(rows):
@@ -71,9 +76,7 @@ class LineView:
             x = max(EDGE_MARGIN, cx - total / 2)
             self._row_spans.append((x, x + total))
             row_y = y + r * self.line_height
-            for word_index, word_text, _ in row:
-                while len(self._word_starts) <= word_index:
-                    self._word_starts.append(len(self._items))
+            for _token_index, word_text, _ in row:
                 for ch in word_text:
                     adv = measure(font_obj, key, ch)
                     # Only in keyed mode, where colour replaces what is behind
@@ -193,6 +196,32 @@ class LineView:
                 self.canvas.delete(item)
         self._glow.clear()
 
+    # --- mapping timings onto the text ---
+    def _map_words_to_text(self, words: list) -> list[int]:
+        """Where each timed token begins in the laid-out characters.
+
+        Sources tokenise inconsistently — richsync splits on syllables, and
+        tokens carry their own spacing — so a token is matched into the line's
+        own text rather than trusted to be a word. When a token cannot be found
+        at all, which means the source disagrees with the text it supplied, the
+        cursor simply advances: a slightly wrong highlight beats a crash or a
+        line rendered as gibberish.
+        """
+        flat = "".join(self.text.split())
+        starts: list[int] = []
+        cursor = 0
+        for entry in words:
+            needle = "".join(str(entry[2]).split())
+            if not needle:
+                starts.append(min(cursor, max(0, len(flat) - 1)))
+                continue
+            found = flat.find(needle, cursor)
+            if found < 0:
+                found = cursor
+            starts.append(found)
+            cursor = found + len(needle)
+        return starts
+
     # --- geometry ---
     def _front_at(self, word_index: int, fraction: float) -> tuple[int, float] | None:
         """The row being sung and where the front sits along it.
@@ -201,15 +230,15 @@ class LineView:
         Aiming at the successor would send the front back across the line,
         since the next row restarts at the left margin.
         """
-        if not self.words or word_index < 0 or word_index >= len(self._word_starts):
+        if not self.words or word_index < 0 or word_index >= len(self._word_chars):
             return None
-        index = self._word_starts[word_index]
+        index = self._word_chars[word_index]
         row = self._items[max(0, min(index, len(self._items) - 1))][1]
         here = self._centre(index)
 
         after = word_index + 1
-        if after < len(self._word_starts):
-            next_index = self._word_starts[after]
+        if after < len(self._word_chars):
+            next_index = self._word_chars[after]
             next_row = self._items[max(0, min(next_index, len(self._items) - 1))][1]
             target = (self._centre(next_index) if next_row == row
                       else self._row_spans[row][1] + self.feather)
