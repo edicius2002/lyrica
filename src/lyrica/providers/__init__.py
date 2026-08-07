@@ -19,21 +19,11 @@ from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider
 from lyrica.providers.community import CommunityTtmlProvider
 from lyrica.providers.lrclib import LrclibProvider
+from lyrica.providers.musixmatch import MusixmatchProvider
 from lyrica.providers.netease import NeteaseProvider
 
 logger = logging.getLogger(__name__)
 
-# Ordered by expected precision first, then by measured latency.
-#
-# The community source goes first because it is the only one here that returns
-# word-level timing, and it needs no token or key at all. LRCLIB follows: it has
-# no word timing but answers in ~0.7 s with near-total line-level coverage.
-# NetEase last, at ~2.6 s, reached only when both came up short.
-PROVIDERS: list[LyricsProvider] = [
-    CommunityTtmlProvider(),
-    LrclibProvider(),
-    NeteaseProvider(),
-]
 
 def default_cache_dir() -> Path:
     """Where lookups are cached.
@@ -53,6 +43,24 @@ def default_cache_dir() -> Path:
 
 CACHE_DIR = default_cache_dir()
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Ordered by expected precision first, then by everything else the sources cost.
+#
+# The community source leads: word-level, and no token, key or captcha anywhere.
+# Musixmatch follows because it carries word-level for far more tracks (13/16
+# against 6/10) but throttles and is undocumented, so it is only reached when
+# the free word source came up short. LRCLIB then covers line level in ~0.7 s
+# with near-total coverage, and NetEase last at ~2.6 s.
+#
+# The Musixmatch token is stored beside the cache so it survives a restart:
+# re-requesting one on every launch is both needless traffic and a good way to
+# look like abuse.
+PROVIDERS: list[LyricsProvider] = [
+    CommunityTtmlProvider(),
+    MusixmatchProvider(token_path=CACHE_DIR.parent / "musixmatch-token.json"),
+    LrclibProvider(),
+    NeteaseProvider(),
+]
 
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact")
 
