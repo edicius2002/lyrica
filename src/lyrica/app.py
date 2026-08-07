@@ -127,6 +127,20 @@ SEEK_SETTLED_S = 2.5
 logger = logging.getLogger(__name__)
 
 
+def compact_target(state: str, currently_compact: bool) -> bool:
+    """Whether the panel should be compact, given what is known about the words.
+
+    Three states, and the third has to stay a third all the way here. Collapsing
+    reads `UNKNOWN` as "not absent" the moment it is a bool, so a track with no
+    lyrics followed by another track with no lyrics would expand for the second
+    or so the search takes and then collapse again — the panel bouncing between
+    two songs that both had nothing to show.
+    """
+    if state == LYRICS_UNKNOWN:
+        return currently_compact        # no opinion; keep whatever it is
+    return state == LYRICS_ABSENT
+
+
 def lyrics_state(lyr: Lyrics | None) -> str:
     """What a finished search means for the panel.
 
@@ -458,8 +472,9 @@ class Overlay:
     def _want_compact(self) -> bool:
         # Only on a definite answer. While a fetch is still out the panel keeps
         # whatever size it has, so a track change does not flicker through a
-        # collapse on its way to lyrics that were coming all along.
-        return self._lyrics_state == LYRICS_ABSENT
+        # collapse on its way to lyrics that were coming all along — nor back
+        # out of one on its way to another track that has none either.
+        return compact_target(self._lyrics_state, self._compact)
 
     def _retarget_size(self, animate: bool = True) -> None:
         """Start moving toward the size the current state calls for."""
