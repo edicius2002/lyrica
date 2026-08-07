@@ -65,8 +65,15 @@ no samples reach this process, and there is no extra dependency. A reading costs
 0.21 ms and the loop it keeps awake runs at 30 Hz, measured at 1.1 % of a
 twelve-core machine.
 
-`LYRICA_BEAM=off` turns it off. It costs 0.50 ms a frame at the default size —
-the loop it keeps awake is the expense, not the drawing.
+Two styles. `LYRICA_BEAM=comet` (the default) sends a bright head round a dark
+ring; `LYRICA_BEAM=shine` lights the whole border and rotates a gradient through
+it, so every edge stays lit and what moves is the colour — measured, the comet
+runs 19 to 132 in brightness and leaves the top edge dark once it has passed,
+where the shine holds 36 to 83 everywhere, always. `LYRICA_BEAM=off` turns it
+off.
+
+It costs about a millisecond a frame at the default size — the loop it keeps
+awake is the expense, not the drawing.
 
 While the overlay is drawing it asks Windows for a finer timer than the 15.625 ms
 one it hands out by default. Without that, a 33 ms request lands on 46 and the

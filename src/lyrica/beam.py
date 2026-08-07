@@ -24,9 +24,28 @@ from lyrica.glass import hex_of, rgb_of
 CORNER_POINTS = 7
 STRAIGHT_SPACING = 34.0
 
-# How long the head takes to go once round. Slow enough not to compete with the
-# words being read, quick enough that the movement is the thing you notice.
+# Two ways to light the edge.
+#
+# COMET is a short bright head travelling a dark ring — movement you follow.
+# SHINE lights the whole border at once and rotates a gradient through it, so
+# every edge is lit all the time and what moves is the colour rather than a
+# spot. The second is the quieter of the two to sit beside while reading.
+COMET, SHINE = "comet", "shine"
+
+# How long a circuit takes. The shine turns more slowly: a gradient sweeping the
+# whole border at the comet's rate reads as a wash sloshing about, where the
+# comet at the shine's rate barely appears to move at all.
 PERIOD_S = 6.0
+SHINE_PERIOD_S = 11.0
+
+# How far apart the two ends of the shine's gradient sit, in whole cycles round
+# the ring. One, so opposite edges are opposite colours and the seam where the
+# gradient closes is exactly where it began.
+SHINE_CYCLES = 1.0
+
+# The shine never drops to the backdrop — that is the point of it — so its floor
+# is what keeps the dimmest part of the border plainly lit.
+SHINE_FLOOR = 0.34
 
 # How much of the ring trails behind the head, as a fraction of the whole. Short
 # on purpose: a comet with a tail a quarter of the way round is a lit border
@@ -109,8 +128,9 @@ class Beam:
     """The ring of segments, and the state to colour them."""
 
     def __init__(self, canvas, width: int, height: int, radius: int,
-                 scale: float = 1.0):
+                 scale: float = 1.0, style: str = COMET):
         self.canvas = canvas
+        self.style = style
         self._phase = 0.0
         self._items: list[int] = []
         self._shades: list[str] = []
@@ -149,13 +169,30 @@ class Beam:
             self._gradient = _gradient(palette)
             self._shades = [""] * len(self._items)   # force a full repaint
 
-        self._phase = (self._phase + dt / PERIOD_S) % 1.0
-        strength = FLOOR + GAIN * max(0.0, min(1.0, level))
+        period = SHINE_PERIOD_S if self.style == SHINE else PERIOD_S
+        self._phase = (self._phase + dt / period) % 1.0
+        level = max(0.0, min(1.0, level))
         top = len(self._gradient) - 1
+        count = len(self._items)
 
+        if self.style == SHINE:
+            strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
+            for i, item in enumerate(self._items):
+                # A cosine rather than a sawtooth: the ring closes on itself, so
+                # a gradient that ran end to end would show a seam where it
+                # wrapped. This one has no ends.
+                turn = (i / count) * SHINE_CYCLES + self._phase
+                wave = 0.5 + 0.5 * math.cos(2 * math.pi * turn)
+                shade = self._gradient[int(top * (0.35 + 0.65 * wave) * strength)]
+                if shade != self._shades[i]:
+                    self.canvas.itemconfigure(item, fill=shade)
+                    self._shades[i] = shade
+            return
+
+        strength = FLOOR + GAIN * level
         for i, item in enumerate(self._items):
             # Distance behind the head, once round the ring.
-            behind = (self._phase - i / len(self._items)) % 1.0
+            behind = (self._phase - i / count) % 1.0
             glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
             shade = self._gradient[int(top * glow * strength)]
             if shade != self._shades[i]:
