@@ -5,13 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lyrica"
 version = "0.1.0"
-description = "Real-time synced lyrics overlay for Windows (Spotify, YouTube, YT Music, SoundCloud)"
+description = "Real-time synced lyrics overlay (Spotify, YouTube, YT Music, SoundCloud)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
     "requests>=2.31",
-    "winsdk>=1.0.0b10",
+    # Windows only: it has no wheels elsewhere, and installing it unconditionally
+    # is what would stop the package installing on a Mac at all.
+    "winsdk>=1.0.0b10; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
