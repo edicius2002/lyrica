@@ -115,6 +115,14 @@ def move(root: tk.Tk, x: int, y: int) -> None:
     root.geometry(f"+{int(x)}+{int(y)}")
 
 
+# Rounded corners are off. The clip region is binary — a pixel is inside it or
+# outside it, with no partial coverage — so the curve can only ever be a
+# stair-step, and the API that would smooth it is Windows 11 only, measured
+# refusing on this build. A clean rectangle is consistent; a jagged curve just
+# looks like a mistake. Set a radius here to bring them back.
+CORNER_RADIUS = 0
+
+
 def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:
     """Clip the window to rounded corners. **Call after the geometry is set.**
 
@@ -124,12 +132,13 @@ def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:
     as a missing corner. It has to be reapplied on every resize for the same
     reason.
     """
-    if chrome.mode is not ChromeMode.GLASS or sys.platform != "win32":
+    if (chrome.mode is not ChromeMode.GLASS or sys.platform != "win32"
+            or CORNER_RADIUS <= 0):
         # A layered window ignores the region entirely, so in keyed mode this
         # would silently do nothing.
         return False
     from lyrica.chrome import windows as win
-    return win.round_corners(root, width, height, chrome.px(win.CORNER_RADIUS))
+    return win.round_corners(root, width, height, chrome.px(CORNER_RADIUS))
 
 
 __all__ = ["GLASS_BACKGROUND", "KEY_COLOUR", "Chrome", "ChromeMode", "setup"]
