@@ -57,6 +57,20 @@ need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
 
+## How solid the panel is
+
+`LYRICA_OPACITY` sets it, between `0.6` and `1.0`, defaulting to `0.90`:
+
+```powershell
+$env:LYRICA_OPACITY = "0.95"   # or LYRICA_OPACITY=0.95 in .env
+```
+
+Where in that range to sit is taste rather than measurement. For reference,
+0.75 is the most translucent value that clears WCAG's 3:1 for large text at
+all, and 0.82 the most translucent that clears it with margin — both turned out
+to be more see-through than anyone wanted to look at. The default puts 25 of a
+white desktop through the panel where 0.82 put 46.
+
 ## Songs with no lyrics
 
 When a search comes back empty the panel shrinks to just the cover, the title

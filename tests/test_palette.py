@@ -96,16 +96,32 @@ def test_a_panel_that_does_not_clamp_pays_nothing_for_its_sweep():
 
 
 @pytest.mark.parametrize("chrome", LAWS)
-def test_no_role_but_the_sung_word_exceeds_the_ladder_ceiling(chrome):
+def test_no_lyric_role_but_the_sung_word_exceeds_the_ladder_ceiling(chrome):
     # Two separate caps that were the same number under acrylic: the
     # composition's clamp ceiling, and the ladder's own. The sung word is the
     # one role whose job is light rather than colour.
     for song in COLOURED:
         p = pal_mod.for_song(chrome, song)
         for role in ROLES:
-            if role == "sung":
+            if role == "sung" or role in pal_mod.CARD_ROLES:
                 continue
             assert max(rgb_of(getattr(p, role))) <= UNSUNG_CEILING + 1, role
+
+
+def test_the_card_is_not_held_to_the_lyric_ladder():
+    # It is not in that relationship with anything. Sharing the cap was why the
+    # title read as dim beside the words it sits above.
+    p = pal_mod.for_song(PANEL_CHROME, TEAL)
+    assert max(rgb_of(p.title)) > UNSUNG_CEILING
+    assert max(rgb_of(p.title)) > max(rgb_of(p.artist)) > max(rgb_of(p.side))
+
+
+def test_the_card_never_asks_for_more_light_than_the_mode_can_give():
+    # A target past the clamp ceiling makes the solver trade away every unit of
+    # chroma and still fall short — measured under frosting as a flat grey card.
+    p = pal_mod.for_song(FROSTED_CHROME, TEAL)
+    assert chroma(p.title) > 0, "the card went grey rather than dimmer"
+    assert chroma(p.artist) > 0
 
 
 WASHES = ((30, 30, 30), (29, 24, 18), (12, 20, 30), (26, 12, 12))
@@ -169,10 +185,14 @@ def test_the_unsung_line_never_dims_past_legibility(chrome):
 # --- colour follows the cover -----------------------------------------------
 
 @pytest.mark.parametrize("chrome", LAWS)
-def test_a_coloured_cover_tints_the_words_the_title_and_the_artist(chrome):
+def test_a_coloured_cover_tints_the_words_and_the_card(chrome):
     p = pal_mod.for_song(chrome, TEAL)
-    for role in ("unsung", "side", "title", "artist"):
+    for role in ("unsung", "side"):
         assert chroma(getattr(p, role)) >= 10, f"{role} came out grey"
+    # The card carries a tint too, but a quieter one: it is read as a label
+    # rather than as the song's colour, so it sits closer to white.
+    for role in pal_mod.CARD_ROLES:
+        assert 4 <= chroma(getattr(p, role)) < chroma(p.unsung), role
 
 
 @pytest.mark.parametrize("chrome", LAWS)

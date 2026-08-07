@@ -165,3 +165,35 @@ def test_nonsense_falls_back_rather_than_raising(clean_size, monkeypatch):
 def test_an_empty_setting_is_the_designed_size(clean_size, monkeypatch):
     monkeypatch.setenv("LYRICA_SIZE", "   ")
     assert config.size_scale() == 1.0
+
+
+# --- how solid the panel is -------------------------------------------------
+
+def test_the_default_opacity_is_used_when_nothing_is_set(monkeypatch):
+    monkeypatch.delenv("LYRICA_OPACITY", raising=False)
+    assert config.opacity() == config.OPACITY_DEFAULT
+
+
+def test_an_opacity_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("LYRICA_OPACITY", "0.75")
+    assert config.opacity() == 0.75
+
+
+def test_opacity_is_clamped_to_a_range_that_stays_legible(monkeypatch):
+    # The panel's whole job is to be legible over whatever is behind it, and
+    # past a point the desktop starts competing with the words.
+    monkeypatch.setenv("LYRICA_OPACITY", "0.1")
+    assert config.opacity() == config.OPACITY_MIN
+    monkeypatch.setenv("LYRICA_OPACITY", "5")
+    assert config.opacity() == config.OPACITY_MAX
+
+
+def test_nonsense_opacity_falls_back_rather_than_raising(monkeypatch):
+    monkeypatch.setenv("LYRICA_OPACITY", "opaco")
+    assert config.opacity() == config.OPACITY_DEFAULT
+
+
+def test_a_more_solid_panel_lets_less_of_the_desktop_through():
+    from lyrica.glass import alpha_panel
+    assert (alpha_panel(0.90).pedestal((255,) * 3)[0]
+            < alpha_panel(0.82).pedestal((255,) * 3)[0])

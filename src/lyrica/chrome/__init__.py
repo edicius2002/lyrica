@@ -27,7 +27,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from enum import Enum
 
-from lyrica import glass
+from lyrica import config, glass
 
 logger = logging.getLogger(__name__)
 
@@ -110,12 +110,17 @@ def _panel(root: tk.Tk, scale: float) -> Chrome | None:
     after it.
     """
     root.configure(bg=DARK_BACKGROUND)
+    alpha = config.opacity()
     try:
-        root.attributes("-alpha", glass.PANEL_ALPHA)
+        root.attributes("-alpha", alpha)
     except tk.TclError:
         logger.info("the display does not support window alpha")
         return None
-    return Chrome(ChromeMode.PANEL, DARK_BACKGROUND, glass.PANEL, scale)
+    # Built from the same number the window wears, not from the default. The
+    # palette solves against this composition, so the two drifting apart would
+    # mean colours derived for a panel that is not the one on screen.
+    return Chrome(ChromeMode.PANEL, DARK_BACKGROUND, glass.alpha_panel(alpha),
+                  scale)
 
 
 def _frosted(root: tk.Tk, scale: float) -> Chrome | None:
