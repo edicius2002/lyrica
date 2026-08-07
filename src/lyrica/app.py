@@ -988,7 +988,7 @@ class Overlay:
         dt = min(0.25, now - (self._beam_at or now))
         self._beam_at = now
         level = self.meter.level(dt or 1 / 30)
-        self.beam.advance(dt, level, self.palette.ramp)
+        self.beam.advance(dt, level, self.palette)
         return True
 
     def _visibility(self, view: LineView) -> float:
