@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 license = { text = "GPL-3.0-or-later" }
 dependencies = [
     "requests>=2.31",
+    # Decoding and blurring the album art. tkinter reads neither JPEG nor a
+    # blur, and the backdrop needs both.
+    "pillow>=10",
     # Windows only: it has no wheels elsewhere, and installing it unconditionally
     # is what would stop the package installing on a Mac at all.
     "winsdk>=1.0.0b10; sys_platform == 'win32'",

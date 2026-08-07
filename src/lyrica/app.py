@@ -15,8 +15,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
 
+from lyrica import artwork, motion
 from lyrica import chrome as chrome_mod
-from lyrica import motion
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
 from lyrica.lyrics import Lyrics
@@ -94,6 +94,9 @@ class Overlay:
         self._press_at = (0, 0)
         self._press_y = 0
         self._moved = False
+        self._pending_backdrop = None
+        self._backdrop_item = None
+        self._backdrop_photo = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -225,6 +228,46 @@ class Overlay:
                 self.lyrics = lyr
 
         threading.Thread(target=work, daemon=True).start()
+        self._start_artwork(gen)
+
+    def _start_artwork(self, gen: int) -> None:
+        """Fetch and prepare the backdrop off the render thread.
+
+        Decoding and blurring an image takes long enough to drop frames if it
+        happened inline, and it only needs doing once a track.
+        """
+        if not self.chrome.additive or not artwork.available():
+            return
+
+        def work():
+            data = self.reader.read_artwork()
+            image = artwork.make_backdrop(data, self.width, self.height) if data else None
+            if gen == self.fetch_gen:
+                # Handing the image over rather than drawing it: Tk objects
+                # belong to the thread that owns the widget.
+                self._pending_backdrop = image
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_backdrop(self) -> None:
+        """Put a prepared backdrop on the canvas, on the render thread."""
+        image = self._pending_backdrop
+        if image is None:
+            return
+        self._pending_backdrop = None
+        try:
+            from PIL import ImageTk
+            photo = ImageTk.PhotoImage(image)
+        except Exception:
+            logger.debug("could not convert the backdrop", exc_info=True)
+            return
+        if self._backdrop_item is not None:
+            self.canvas.delete(self._backdrop_item)
+        self._backdrop_item = self.canvas.create_image(0, 0, image=photo, anchor="nw")
+        # Behind everything, and held: Tk keeps only a weak claim on the image,
+        # so dropping the reference blanks it.
+        self.canvas.tag_lower(self._backdrop_item)
+        self._backdrop_photo = photo
 
     def _header_for(self, snap: Snapshot) -> str:
         if not snap.ok:
@@ -346,6 +389,8 @@ class Overlay:
             self.track_key = snap.track_key()
             self.line_index = -1
             self._start_fetch(snap)
+
+        self._apply_backdrop()
 
         header = self._header_for(snap)
         if header != self._header_text:
