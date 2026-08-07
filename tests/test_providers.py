@@ -17,8 +17,8 @@ def plain(source: str = "fake") -> Lyrics:
     return Lyrics(plain="first\nsecond", synced=False, source=source)
 
 
-def instrumental(source: str = "fake") -> Lyrics:
-    return Lyrics(instrumental=True, source=source)
+def instrumental(source: str = "fake", *, exact: bool = True) -> Lyrics:
+    return Lyrics(instrumental=True, source=source, exact=exact)
 
 
 class Fake:
@@ -72,11 +72,18 @@ def test_synced_flag_without_lines_is_not_line_precision():
     assert Lyrics(synced=True, lines=[]).precision is Precision.NONE
 
 
-def test_only_synced_and_instrumental_are_definitive():
+def test_only_synced_and_exact_instrumentals_are_definitive():
     assert synced().is_definitive
     assert instrumental().is_definitive
     assert not plain().is_definitive
     assert not Lyrics().is_definitive
+
+
+def test_a_fuzzy_instrumental_is_not_definitive():
+    # A loose search reaches for the nearest thing it can find, and karaoke
+    # uploads sit next to the songs they came from. Ending the search on one
+    # would report a song as instrumental while another source had its lyrics.
+    assert not instrumental(exact=False).is_definitive
 
 
 # --- ranking ----------------------------------------------------------------
@@ -96,13 +103,24 @@ def test_a_definitive_answer_stops_the_search(monkeypatch):
     assert second.calls == 0, "no request should be spent once the answer is definitive"
 
 
-def test_an_instrumental_stops_the_search(monkeypatch):
+def test_an_exact_instrumental_stops_the_search(monkeypatch):
     # The track having no lyrics is a complete answer; asking on would only
     # invite a weaker source to supply some.
     _, second = use(monkeypatch, Fake("inst", instrumental()), Fake("never", synced()))
     result = providers.fetch_lyrics("A", "B")
     assert result.instrumental
     assert second.calls == 0
+
+
+def test_a_fuzzy_instrumental_does_not_stop_the_search(monkeypatch):
+    # Found live: LRCLIB's fuzzy search returned an instrumental record for a
+    # song that plainly has lyrics, which silently ended the cascade.
+    _, second = use(monkeypatch,
+                    Fake("guessy", instrumental(exact=False)),
+                    Fake("better", synced()))
+    result = providers.fetch_lyrics("A", "B")
+    assert second.calls == 1, "a guessed instrumental must not end the search"
+    assert result.precision is Precision.LINE
 
 
 def test_plain_is_kept_when_nothing_better_exists(monkeypatch):

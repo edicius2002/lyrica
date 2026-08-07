@@ -18,18 +18,23 @@ from pathlib import Path
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider
 from lyrica.providers.lrclib import LrclibProvider
+from lyrica.providers.netease import NeteaseProvider
 
 logger = logging.getLogger(__name__)
 
-# Ordered by expected precision, best first.
+# Ordered by expected precision first, then by measured latency. Neither source
+# offers word-level timing today, so the tiebreak is speed: LRCLIB answers in
+# roughly 0.7 s against NetEase's 2.6 s, and NetEase is only reached when
+# LRCLIB's answer was weak or absent.
 PROVIDERS: list[LyricsProvider] = [
     LrclibProvider(),
+    NeteaseProvider(),
 ]
 
 CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica" / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-_CACHE_FIELDS = ("plain", "synced", "source", "instrumental")
+_CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact")
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -55,7 +60,9 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     asked = d.get("asked", [])
     if d.get("miss"):
         return None, asked
-    lyr = Lyrics(**{k: d[k] for k in _CACHE_FIELDS})
+    # Tolerate fields added after an entry was written: a missing one takes the
+    # dataclass default rather than discarding an otherwise good answer.
+    lyr = Lyrics(**{k: d[k] for k in _CACHE_FIELDS if k in d})
     lyr.lines = [tuple(x) for x in d["lines"]]
     return lyr, asked
 
@@ -64,11 +71,8 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
     if result is None:
         payload = {"miss": True, "asked": asked}
     else:
-        payload = {
-            "lines": result.lines, "plain": result.plain, "synced": result.synced,
-            "source": result.source, "instrumental": result.instrumental,
-            "asked": asked,
-        }
+        payload = {"lines": result.lines, "asked": asked}
+        payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
