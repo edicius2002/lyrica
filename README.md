@@ -12,8 +12,13 @@ player that responds to media keys works out of the box.
 
 ```powershell
 pip install -e .
-lyrica          # or: python -m lyrica
+lyrica
 ```
+
+`lyrica` opens no console window. `python -m lyrica` does — use `pythonw -m
+lyrica` if you start it that way. Everything it has to say goes to
+`%LOCALAPPDATA%\Lyrica\lyrica.log` either way, which is also where to look if a
+shortcut seems dead or the overlay never appears.
 
 ### On a machine without Python
 
