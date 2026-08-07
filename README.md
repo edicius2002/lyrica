@@ -22,6 +22,8 @@ Play something and the overlay appears at the bottom center of the screen.
 | Move the overlay | Drag with the mouse |
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s) |
+| Hide / show | `Ctrl`+`Alt`+`K` |
+| Quit | `Ctrl`+`Alt`+`Q` |
 | Make it bigger / smaller | `Ctrl`+`Alt`+`+` / `Ctrl`+`Alt`+`-` |
 | Back to the designed size | `Ctrl`+`Alt`+`0` |
 
@@ -31,6 +33,18 @@ means clicking it, and clicking it seeks to a line. `Esc` and `+` / `-` still
 need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`.
+
+Hiding puts the overlay away rather than closing it — `Esc` and right click
+destroy the window, which is the right answer for "I am done" and the wrong one
+for "not right now". While hidden it stops drawing entirely and only listens for
+the shortcut that brings it back.
+
+**If a shortcut does nothing**, another application is almost certainly eating
+it. Anything with a low-level keyboard hook — remote desktop tools especially —
+can swallow a combination before Windows dispatches it, and `RegisterHotKey`
+still reports success, so the overlay cannot tell. Measured here: of twelve
+`Ctrl`+`Alt`+letter combinations, ten arrive and `L` and `M` never do. The log
+records which shortcuts were claimed at startup.
 
 The overlay is drawn at a size that follows the display's own DPI scale. The
 keyboard is the quickest way to change that, and `LYRICA_SIZE` sets where a

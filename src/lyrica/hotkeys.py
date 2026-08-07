@@ -41,6 +41,8 @@ VK_ADD = 0x6B
 VK_SUBTRACT = 0x6D
 VK_0 = 0x30
 VK_NUMPAD0 = 0x60
+VK_K = 0x4B
+VK_Q = 0x51
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,14 @@ class Hotkey:
 # for as long as the overlay is running — a shortcut that works everywhere has
 # to be one nothing else wants.
 BINDINGS = (
+    # K rather than the obvious L. Measured on the development machine: of
+    # twelve Ctrl+Alt+letter combinations, ten reach the dispatcher and L and M
+    # do not — something installs a low-level keyboard hook and eats them before
+    # Windows gets that far. `RegisterHotKey` still *succeeds* for those, which
+    # is why the warning below cannot catch it and why the claimed shortcuts are
+    # logged: a key that does nothing is otherwise indistinguishable from a bug.
+    Hotkey("toggle", MOD_CONTROL | MOD_ALT, VK_K, "Ctrl+Alt+K"),
+    Hotkey("quit", MOD_CONTROL | MOD_ALT, VK_Q, "Ctrl+Alt+Q"),
     Hotkey("bigger", MOD_CONTROL | MOD_ALT, VK_OEM_PLUS, "Ctrl+Alt++"),
     Hotkey("bigger", MOD_CONTROL | MOD_ALT, VK_ADD, "Ctrl+Alt+Num+"),
     Hotkey("smaller", MOD_CONTROL | MOD_ALT, VK_OEM_MINUS, "Ctrl+Alt+-"),
@@ -63,6 +73,12 @@ BINDINGS = (
     Hotkey("reset", MOD_CONTROL | MOD_ALT, VK_0, "Ctrl+Alt+0"),
     Hotkey("reset", MOD_CONTROL | MOD_ALT, VK_NUMPAD0, "Ctrl+Alt+Num0"),
 )
+
+# `quit` exists because `toggle` does. A hidden overlay has no window to right
+# click and no `Esc` to reach, so without a shortcut of its own the only way to
+# close one would be the task manager. When a tray icon lands this becomes a
+# convenience rather than the only exit.
+
 
 
 class NullListener:
@@ -140,6 +156,13 @@ class WindowsListener:
         self._ready.set()
         if not registered:
             return
+        # Logged because succeeding here is not the same as the key working:
+        # anything with a low-level keyboard hook can swallow a combination
+        # before Windows dispatches it, and registration still reports success.
+        # This at least says what the overlay believes it holds.
+        logger.info("shortcuts: %s", ", ".join(
+            sorted({b.label for b in self.bindings
+                    if b.action in registered.values()})))
 
         message = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:

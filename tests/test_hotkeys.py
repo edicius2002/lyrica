@@ -17,8 +17,15 @@ def test_every_binding_names_an_action_the_overlay_handles():
         assert binding.action in Overlay.HOTKEY_ACTIONS, binding.label
 
 
-def test_both_directions_and_a_reset_are_bound():
-    assert {b.action for b in hotkeys.BINDINGS} == {"bigger", "smaller", "reset"}
+def test_the_actions_worth_a_global_shortcut_are_bound():
+    assert {b.action for b in hotkeys.BINDINGS} == {
+        "toggle", "quit", "bigger", "smaller", "reset"}
+
+
+def test_a_hidden_overlay_can_still_be_closed():
+    # It has no window to right click and no Esc to reach, so without this the
+    # only way to close one would be the task manager.
+    assert "quit" in {b.action for b in hotkeys.BINDINGS}
 
 
 def test_nothing_is_claimed_on_control_alone():
@@ -29,14 +36,15 @@ def test_nothing_is_claimed_on_control_alone():
         assert binding.modifiers & hotkeys.MOD_CONTROL, binding.label
 
 
-def test_every_action_has_a_numeric_pad_spelling():
-    # Which key code arrives depends on the keyboard, and a shortcut that works
-    # only on the top row is half a shortcut.
+def test_the_size_actions_are_bound_on_the_numeric_pad_too():
+    # Only these three: which code a keyboard sends for + - and 0 depends on
+    # which of the two places you press them, and a shortcut that works on only
+    # one of them is half a shortcut. A letter has no such twin.
     by_action = {}
     for binding in hotkeys.BINDINGS:
         by_action.setdefault(binding.action, []).append(binding.key)
-    for action, keys in by_action.items():
-        assert len(keys) >= 2, f"{action} has only one spelling"
+    for action in ("bigger", "smaller", "reset"):
+        assert len(by_action[action]) >= 2, f"{action} has only one spelling"
 
 
 def test_a_platform_without_global_shortcuts_says_so():
