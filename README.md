@@ -23,6 +23,19 @@ Play something and the overlay appears at the bottom center of the screen.
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s) |
 
+## Sharing the cache between machines
+
+Lookups are cached under `%LOCALAPPDATA%\Lyrica\cache`. Set `LYRICA_CACHE_DIR` to move that
+somewhere synchronised and the cache follows you:
+
+```powershell
+setx LYRICA_CACHE_DIR "$env:OneDrive\Lyrica\cache"
+```
+
+Plain folder sync is enough. Every entry is written once, named by a hash of the track, and never
+modified — two machines can add different files but can never disagree about one. A shared
+database would be worse here, not better, since concurrent writers are what corrupt one.
+
 ## Architecture
 
 ```

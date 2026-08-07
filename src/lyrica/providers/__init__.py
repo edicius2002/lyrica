@@ -35,7 +35,23 @@ PROVIDERS: list[LyricsProvider] = [
     NeteaseProvider(),
 ]
 
-CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica" / "cache"
+def default_cache_dir() -> Path:
+    """Where lookups are cached.
+
+    `LYRICA_CACHE_DIR` points this at a folder synchronised between machines,
+    which is all the cache needs to follow you: every entry is written once,
+    named by a hash of the track, and never modified. Two machines can add
+    different files but can never disagree about one — so plain folder sync is
+    enough, and a database here would be worse, not better, since a shared
+    SQLite file is exactly what concurrent writers corrupt.
+    """
+    override = os.environ.get("LYRICA_CACHE_DIR")
+    if override:
+        return Path(override)
+    return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Lyrica" / "cache"
+
+
+CACHE_DIR = default_cache_dir()
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact")
