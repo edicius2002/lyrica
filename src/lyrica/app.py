@@ -54,6 +54,7 @@ FONT_LINE = ("Segoe UI", -30, "bold")
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
+DRAG_TICK_MS = 120  # while the window is being moved, the hand comes first
 
 # Lyrics feel late when they land exactly on the beat: you read a line as it
 # begins, so it has to be there fractionally before the voice. better-lyrics
@@ -138,9 +139,11 @@ class Overlay:
         # size can disagree about whether they are logical or device pixels, and
         # the failure is the overlay sitting half off the bottom of the screen.
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x = max(0, (sw - self.width) // 2)
-        y = max(0, min(sh - self.height - self.chrome.px(80), sh - self.height))
-        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+        self._start_x = max(0, (sw - self.width) // 2)
+        self._start_y = max(0, min(sh - self.height - self.chrome.px(80),
+                                   sh - self.height))
+        self.root.geometry(
+            f"{self.width}x{self.height}+{self._start_x}+{self._start_y}")
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                 bg=self.chrome.background,
@@ -234,7 +237,7 @@ class Overlay:
         px, py = self._press_at
         if abs(e.x_root - px) > CLICK_SLACK or abs(e.y_root - py) > CLICK_SLACK:
             self._moved = True
-        self.root.geometry(f"+{x}+{y}")
+        chrome_mod.move(self.root, x, y)
 
     def _drag_end(self, _e):
         self._dragging = False
@@ -520,6 +523,12 @@ class Overlay:
                 # of the frame at full strength and be clipped rather than fade.
                 self._restyle()
                 interval = FAST_TICK_MS
+            if self._dragging:
+                # Nobody reads the lyrics while dragging the window they are on.
+                # Measured: repainting at 60 Hz pushes a move's worst case from
+                # 2.6 ms to 14.7 ms, which is most of a frame — the animation
+                # costs the drag far more than the drag costs the animation.
+                interval = DRAG_TICK_MS
             active = self._views.get(self.line_index)
             if active is not None and active.words:
                 word, fraction = lyr.word_progress_at(self.line_index,
