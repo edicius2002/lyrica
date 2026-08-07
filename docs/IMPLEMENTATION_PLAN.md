@@ -1,15 +1,14 @@
 # Implementation Plan and Decision Log
 
-> **Status:** Foundation, browsers and hygiene all done. The overlay resolves tracks from Spotify,
+> **Status:** Two ranked sources behind one cascade. The overlay resolves tracks from Spotify,
 > YouTube, YouTube Music and SoundCloud, and every pull request is linted and tested.
 > **Last updated:** 2026-08-06
-> **Review status:** Phase 4 merged across [#11](https://github.com/edicius2002/lyrica/pull/11),
-> [#12](https://github.com/edicius2002/lyrica/pull/12) and [#13](https://github.com/edicius2002/lyrica/pull/13).
-> **Phase closure:** Steps 0–5 complete. One check deferred: the overlay outline has not been
-> eyeballed over a genuinely bright background.
-> **Next delivery:** Step 6, providers — starting with ranking them by precision
-> ([#10](https://github.com/edicius2002/lyrica/issues/10)). One issue per slice, written before
-> its work.
+> **Review status:** Phase 6 merged across [#15](https://github.com/edicius2002/lyrica/pull/15)
+> and [#16](https://github.com/edicius2002/lyrica/pull/16).
+> **Phase closure:** Steps 0–6 complete. Two things deferred by agreement: the overlay outline has
+> not been eyeballed over a genuinely bright background, and configurable provider ordering waits
+> for the settings work in step 8.
+> **Next delivery:** Step 7, word-by-word. One issue per slice, written before its work.
 
 ---
 
@@ -313,22 +312,28 @@ read instead. Low priority, since the interpolation being measured is the same c
 
 ### 6 — Providers
 
-**Status:** Next. Ranking by precision comes first
-([#10](https://github.com/edicius2002/lyrica/issues/10)), because adding a second provider before
-it would make the cascade worse rather than better.
+**Status:** Complete. Delivered in [#15](https://github.com/edicius2002/lyrica/pull/15) and
+[#16](https://github.com/edicius2002/lyrica/pull/16).
 
-`fetch_lyrics()` returns the first provider that answers **at all**, which treats every answer as
-equally good. They are not: word-synced beats line-synced beats plain text. So a plain hit from
-an early provider currently beats a synced hit from a later one, and the overlay falls back to
-paging text by percentage — which looks synchronised while being a guess. This is already
-reachable: 2 of the first 7 real plays landed on plain lyrics.
+Ranking came first, before adding a source, because a second provider on the old cascade would
+have made it worse rather than better: `fetch_lyrics()` returned the first provider that answered
+**at all**, so a plain hit shadowed a synced one.
 
-- [ ] Rank result tiers explicitly, stop at the first *synced* answer rather than the first answer
-- [ ] Keep asking while the best in hand is plain, and return the best once everyone has answered
-- [ ] NetEase as a second synced provider behind the same interface
-- [ ] Configurable provider order, defaulting to precision
-- [ ] Per-provider diagnostics: which source answered, and how long it took
-- [ ] Cache entries record their tier so a better provider can supersede a weaker hit
+- [x] Rank result tiers explicitly and keep the best answer (decision 7.1)
+- [x] Stop early only on a definitive answer, so a request is spent only when the answer is weak
+- [x] NetEase as a second synced provider behind the same interface (decision 7.3)
+- [x] Per-provider diagnostics: which source answered, at what tier, and how long it took
+- [x] Cache entries record which providers produced them, so a new source supersedes a weak hit
+- [x] A broken provider no longer denies the track lyrics another source has (decision 7.6)
+
+**Deferred to step 8:** configurable provider order. The default ordering is now principled —
+precision, then measured latency — and inventing a settings format here would only be replaced by
+the settings persistence step 8 already owns.
+
+**Found by verifying rather than assuming:** LRCLIB's fuzzy search returned an *instrumental*
+record for a song that plainly has lyrics. Instrumentals counted as definitive, so the cascade
+stopped and never asked anyone else — a silent wrong answer that the tests could not see and that
+would otherwise have shipped. Fixed by decision 7.2.
 
 ### 7 — Word-by-word
 
@@ -427,6 +432,18 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | 6.5 | Browser metadata tests are only written from captured payloads.                   | The previous test asserted that Chrome leaves `artist` empty. Chrome never does, so it passed while describing a payload that does not exist, and the bug it was meant to guard shipped anyway.                                                                  |
 | 6.6 | Text is outlined rather than shadowed, with symmetric offsets.                     | A shadow is directional and reads as depth; an outline reads as separation, which is what arbitrary backgrounds need. Ringing the centre rather than filling a square is 8 draws per line instead of 24, with the difference hidden under the fill anyway.        |
 
+### 7. Providers
+
+| ID  | Decision                                                                        | Rationale                                                                                                                                                                                                                                                            |
+| --- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 7.1 | The best answer wins, not the first. Search stops only on a definitive one.       | Answers are not interchangeable: plain text has no timing, and the overlay can only page it by playback progress, which looks synchronised while being a guess. Stopping only when the answer is good enough spends an extra request precisely when it is warranted. |
+| 7.2 | An instrumental is definitive only when the provider matched the track exactly.   | Found live: a fuzzy search returned an instrumental record for a song that plainly has lyrics, ending the cascade. Karaoke and backing-track uploads sit right beside the songs they came from, so a loose match lands on them easily and reports a silent falsehood. |
+| 7.3 | NetEase is queried directly, not through `syncedlyrics`.                          | That package would pull beautifulsoup4, rapidfuzz and their trees into the runtime to reach one source. The two endpoints it wraps are two plain HTTP calls.                                                                                                        |
+| 7.4 | Providers are ordered by precision, then by measured latency.                     | Neither source offers word-level timing today, so speed is the live tiebreak: LRCLIB answers in ~0.7 s against NetEase's ~2.6 s, and the ranking means the slower one is only reached when the faster one came up short.                                            |
+| 7.5 | A search result is verified before it is trusted, and discarded when it is not.   | NetEase's search has no notion of failure — it returns the nearest thing it can find. One probe track came back as a different artist's song of the same name, with a duration close enough to pass a duration check on its own.                                     |
+| 7.6 | A provider that raises does not deny the track lyrics another source has.         | One source being broken or blocked is not evidence the song has no lyrics. The traceback is logged and the cascade continues.                                                                                                                                       |
+| 7.7 | Configurable provider ordering waits for the settings work in step 8.             | The default ordering is principled rather than arbitrary, so a config format invented here would buy nothing and be replaced by the persistence step 8 already owns.                                                                                                |
+
 ### Superseded decisions
 
 | ID  | Change                                                                                  | When       |
@@ -442,6 +459,8 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | S.9 | Overlay rendered with tkinter `Label`s → a `Canvas`, which is the only way to outline text (decision 6.6). | 2026-08-06 |
 | S.10 | Lint rules inherited from ruff's defaults → selected explicitly (decision 5.6).         | 2026-08-06 |
 | S.11 | Failures swallowed silently → logged to a file the user can actually read (decisions 3.10, 5.7). | 2026-08-06 |
+| S.12 | The cascade returning the first answer → the best answer (decision 7.1).                | 2026-08-06 |
+| S.13 | Any instrumental ending the search → only an exactly matched one (decision 7.2).        | 2026-08-06 |
 
 ---
 
@@ -460,3 +479,6 @@ Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BR
 | 2026-08-06 | Licence added and probes renamed (#11). The declared licence now has a file behind it.                           |
 | 2026-08-06 | Lint pinned and failures logged (#12). The reader thread keeps its broad catch, but no longer hides why.         |
 | 2026-08-06 | CI on every pull request (#13), verified by its own run. Step 4 complete; next delivery is step 6, providers.    |
+| 2026-08-06 | Answers ranked by precision (#15). The cascade keeps the best result rather than the first one offered.          |
+| 2026-08-06 | NetEase added (#16), and guessed instrumentals no longer end the search — a silent wrong answer caught live.     |
+| 2026-08-06 | Step 6 complete, ordering config deferred to step 8. Next delivery is step 7, word-by-word.                      |
