@@ -1,10 +1,13 @@
 # Implementation Plan and Decision Log
 
-> **Status:** Foundation complete. The overlay runs and is verified against Spotify desktop.
+> **Status:** Browsers measured and handled. The overlay resolves tracks from Spotify, YouTube,
+> YouTube Music and SoundCloud.
 > **Last updated:** 2026-08-06
-> **Review status:** Docs PR open — this file, plus the viability report translated to English.
-> **Phase closure:** Steps 0–2 complete, nothing deferred.
-> **Next delivery:** Step 4, hygiene and CI. One issue per step, written before its work.
+> **Review status:** Phase 5 merged across [#4](https://github.com/edicius2002/lyrica/pull/4),
+> [#6](https://github.com/edicius2002/lyrica/pull/6) and [#8](https://github.com/edicius2002/lyrica/pull/8).
+> **Phase closure:** Steps 0–3 and 5 complete. One check deferred: the overlay outline has not
+> been eyeballed over a genuinely bright background.
+> **Next delivery:** Step 4, hygiene and CI. One issue per slice, written before its work.
 
 ---
 
@@ -280,18 +283,27 @@ reported playback position.
 
 ### 5 — Browser validation
 
-**Status:** Not started. **The largest open risk in the plan.**
+**Status:** Complete. Measurements in [`research/BROWSER_SESSIONS.md`](../research/BROWSER_SESSIONS.md).
+Delivered in [#4](https://github.com/edicius2002/lyrica/pull/4),
+[#6](https://github.com/edicius2002/lyrica/pull/6) and
+[#8](https://github.com/edicius2002/lyrica/pull/8).
 
-Half the target platforms are browser-based and none of them has been exercised end to end. The
-normalization logic is unit-tested offline against strings that were written from expectation
-rather than observation, and the position a browser reports has never been compared against what
-is actually playing.
+This was the largest open risk in the plan, and measuring it removed rather than confirmed it.
 
-- [ ] Capture real media-session payloads from Chrome on YouTube, YT Music and SoundCloud
-- [ ] Correct the normalization rules against those payloads, not against assumptions
-- [ ] Measure position drift over a full track and decide whether interpolation alone suffices
-- [ ] Decide on a companion browser extension only if drift proves interpolation insufficient
-- [ ] Text outline or shadow, since browser use means arbitrary backgrounds behind the overlay
+- [x] Capture real media-session payloads from Chrome on YouTube, YT Music and SoundCloud
+- [x] Measure position drift against the page's own clock — 0.001 s of spread (decision 6.1)
+- [x] Companion browser extension **dropped**: interpolation needs no help (decision 6.1)
+- [x] Correct the normalization rules against captured payloads (decisions 6.2, 6.3)
+- [x] Rewrite the browser metadata tests from those payloads (decision 6.5)
+- [x] Text outline, since browser use means arbitrary backgrounds behind the overlay
+
+**Deferred:** the outline has been seen rendering, but not over a genuinely bright background —
+a white test window could not be placed behind a topmost overlay without covering it. Worth one
+eyeball over a light page.
+
+**Not captured:** SoundCloud position drift. It exposes no `<audio>` element in the DOM, so the
+page-clock comparison used for YouTube does not apply; its own player clock would have to be
+read instead. Low priority, since the interpolation being measured is the same code path.
 
 ### 6 — Providers
 
@@ -382,6 +394,19 @@ Measurements behind these decisions are recorded in [`research/VIABILITY.md`](..
 | 5.4 | CI runs on a Windows runner.                                                      | The package imports `winsdk` at module scope, so a Linux runner cannot even import it.                                                                                            |
 | 5.5 | GPL-3.0-or-later.                                                                 | A deliberate choice, not an inherited obligation: no third-party code was copied, so any licence was available. GPL matches the ecosystem this tool grew out of.                  |
 
+### 6. Browsers
+
+Measurements behind these are in [`research/BROWSER_SESSIONS.md`](../research/BROWSER_SESSIONS.md).
+
+| ID  | Decision                                                                        | Rationale                                                                                                                                                                                                                                                        |
+| --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 6.1 | No companion browser extension. Interpolation stands alone.                      | Scored against the page's own clock, the error was flat: 0.001 s of spread across a 27 s run, before and after a seek. Chrome states its position once and re-anchors on discontinuities, which is exactly when interpolation needs one. There is nothing to fix. |
+| 6.2 | The artist field is never trusted on its own; readings are ranked.                | Each site means something different by it. YouTube states it correctly *and* repeats it in the title; SoundCloud puts the uploader's handle there while the real artist sits in the title. Nothing in the payload says which case applies, so ranking beats guessing. |
+| 6.3 | A leading repetition of the artist is stripped, but only across a separator.      | "Dua Lipa - Levitating" with artist "Dua Lipa" is a repetition; "Madonna Of The Wasps" is a song. Requiring the separator is what tells them apart.                                                                                                              |
+| 6.4 | Duration is retried as absent when an exact lookup misses.                        | LRCLIB matches within ±2 s, and a re-upload can be padded — one copy of a 3-minute song reported 12 minutes. A wrong duration turns a findable track into a miss.                                                                                                |
+| 6.5 | Browser metadata tests are only written from captured payloads.                   | The previous test asserted that Chrome leaves `artist` empty. Chrome never does, so it passed while describing a payload that does not exist, and the bug it was meant to guard shipped anyway.                                                                  |
+| 6.6 | Text is outlined rather than shadowed, with symmetric offsets.                     | A shadow is directional and reads as depth; an outline reads as separation, which is what arbitrary backgrounds need. Ringing the centre rather than filling a square is 8 draws per line instead of 24, with the difference hidden under the fill anyway.        |
+
 ### Superseded decisions
 
 | ID  | Change                                                                                  | When       |
@@ -392,6 +417,9 @@ Measurements behind these decisions are recorded in [`research/VIABILITY.md`](..
 | S.4 | A browser extension in the style of better-lyrics → a desktop overlay (decision 2.1).    | 2026-08-06 |
 | S.5 | Local-only git → GitHub remote with the issue/PR workflow.                               | 2026-08-06 |
 | S.6 | `research/INFORME.md` in Spanish → `research/VIABILITY.md` in English.                   | 2026-08-06 |
+| S.7 | A companion extension "if drift proves interpolation insufficient" → dropped outright, since it did not (decision 6.1). | 2026-08-06 |
+| S.8 | Title split only when `artist` is empty → ranked readings, since Chrome never leaves it empty (decision 6.2). | 2026-08-06 |
+| S.9 | Overlay rendered with tkinter `Label`s → a `Canvas`, which is the only way to outline text (decision 6.6). | 2026-08-06 |
 
 ---
 
@@ -404,3 +432,6 @@ Measurements behind these decisions are recorded in [`research/VIABILITY.md`](..
 | 2026-08-06 | Repository initialized; flat MVP migrated to src-layout with a provider interface and offline tests.             |
 | 2026-08-06 | GitHub remote created; workflow set to issue → branch → PR → merge.                                              |
 | 2026-08-06 | Formal plan established. Delivery sequence agreed through step 8, including word-by-word and packaging.          |
+| 2026-08-06 | Browsers measured (#4). Interpolation holds to 0.001 s of spread, so the companion extension is dropped.         |
+| 2026-08-06 | Browser metadata handled (#6). YouTube and SoundCloud now resolve on the exact endpoint instead of missing.      |
+| 2026-08-06 | Overlay text outlined (#8). Step 5 complete; only the bright-background eyeball is deferred.                     |
