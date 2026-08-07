@@ -13,6 +13,7 @@ import os
 import threading
 import tkinter as tk
 from pathlib import Path
+from tkinter import font as tkfont
 
 from lyrica import chrome as chrome_mod
 from lyrica import motion
@@ -23,19 +24,25 @@ from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
 # Logical pixels at 96 dpi; scaled by the chrome's DPI factor at startup.
-WIDTH, HEIGHT = 900, 340
+#
+# The height is not a taste decision. Three lines have to sit fully lit — the
+# one before, the one being sung, and the one coming — with a fade band above
+# and below for lines arriving and leaving, and the header clear of all of it.
+# Anything shorter and the previous line is already half faded while you are
+# still hearing it.
+WIDTH, HEIGHT = 900, 400
 WRAP = 800
 ROW_GAP = 10
 
-# The band at the top and bottom where a line fades away. It has to be deep
-# enough that a line is fully gone before the edge would cut it, which means
-# roughly the height of a wrapped line.
-FADE_ZONE = 96
+# The band at each edge where a line fades away. Deep enough to read as a fade
+# rather than a cut, shallow enough that three lines still fit lit between the
+# two bands.
+FADE_ZONE = 64
 
-# Where the line being sung sits, as a fraction of the window height. Above
-# centre, because the line you are about to sing matters more than the one
-# just gone.
-ANCHOR = 0.42
+# Where the line being sung sits, as a fraction of the window height. Just
+# above centre: the line coming matters more than the one just gone, so it gets
+# the larger share of the room.
+ANCHOR = 0.45
 
 FONT_HEADER = ("Segoe UI", -15)
 # One size for every lyric line. A role change that also changed size would
@@ -145,9 +152,15 @@ class Overlay:
             for i, level in enumerate((0x2C, 0x1C, 0x0C)):
                 self.canvas.create_line(inset, 1 + i, self.width - inset, 1 + i,
                                         fill=f"#{level:02x}{level:02x}{level + 4:02x}")
+        self._header_y = self.chrome.px(12)
         self._header = self.canvas.create_text(
-            self.width // 2, self.chrome.px(12), text="", anchor="n",
+            self.width // 2, self._header_y, text="", anchor="n",
             font=self.f_header, fill=self.palette.header)
+        # Lyrics must be gone before they reach the header. Without this the
+        # outermost line arrives at the top still faintly visible and overlaps
+        # the title, which is the one thing on screen that never moves.
+        self._content_top = self._header_y + tkfont.Font(
+            font=self.f_header).metrics("linespace") + self.chrome.px(10)
 
     # --- interaction ---
     def _drag_start(self, e):
@@ -188,7 +201,27 @@ class Overlay:
         text = f"{artist} – {title}" if artist else title
         if self.offset:
             text += f"   [{self.offset:+.2f}s]"
-        return text
+        return self._fit_header(text)
+
+    def _fit_header(self, text: str) -> str:
+        """Shorten a title that will not fit, rather than letting it overflow.
+
+        Truncated, not wrapped: a two-line title would push the lyrics down and
+        change the layout depending on the song, and the title is the one thing
+        on screen that should stay put.
+        """
+        if not text:
+            return text
+        font_obj = tkfont.Font(font=self.f_header)
+        limit = self.wrap
+        if font_obj.measure(text) <= limit:
+            return text
+        ellipsis = "…"
+        room = limit - font_obj.measure(ellipsis)
+        cut = len(text)
+        while cut > 0 and font_obj.measure(text[:cut]) > room:
+            cut -= 1
+        return text[:cut].rstrip() + ellipsis
 
     # --- the line pool ---
     def _clear_views(self):
@@ -328,7 +361,8 @@ class Overlay:
         """
         fade = max(1, self.chrome.px(FADE_ZONE))
         top, bottom = view.y, view.y + view.height
-        room = min(top / fade, (self.height - bottom) / fade, 1.0)
+        room = min((top - self._content_top) / fade,
+                   (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
 
     def _restyle(self, indices: list[int] | None = None) -> None:
