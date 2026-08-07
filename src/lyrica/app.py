@@ -538,9 +538,11 @@ class Overlay:
         self._hidden = not self._hidden
         if self._hidden:
             self.root.withdraw()
+            chrome_mod.hold_timer_resolution(False)
             logger.info("overlay hidden")
             return
 
+        chrome_mod.hold_timer_resolution(True)
         self.root.deiconify()
         # Re-asserted rather than assumed. Mapping a window again puts it back
         # in the z-order as an ordinary one, so without this it returns *behind*
@@ -1019,8 +1021,10 @@ class Overlay:
         self.reader.start()
         self.hotkeys.start()
         self.tray.start()
+        chrome_mod.hold_timer_resolution(True)
         self._tick()
         self.root.mainloop()
+        chrome_mod.hold_timer_resolution(False)
         self.tray.stop()
         self.hotkeys.stop()
         self.reader.stop()

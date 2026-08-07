@@ -89,3 +89,22 @@ def test_the_level_rises_at_once_and_falls_gently(monkeypatch):
     after_one = made.level(1 / 60)
     assert 0.0 < after_one < 0.8, "a fall must take time"
     assert made.level(1.0) == 0.0, "and must reach silence eventually"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only timer")
+def test_holding_the_timer_resolution_is_idempotent():
+    # Every begin has to be matched by exactly one end, so asking twice for a
+    # state already held must not leave the resolution raised on the way out.
+    from lyrica.chrome import windows as win
+
+    assert win.hold_timer_resolution(True) is True
+    assert win.hold_timer_resolution(True) is True
+    assert win.hold_timer_resolution(False) is False
+    assert win.hold_timer_resolution(False) is False
+
+
+def test_asking_for_even_frames_is_safe_on_any_platform():
+    from lyrica import chrome as chrome_mod
+
+    chrome_mod.hold_timer_resolution(True)
+    chrome_mod.hold_timer_resolution(False)
