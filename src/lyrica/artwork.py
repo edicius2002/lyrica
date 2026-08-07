@@ -13,6 +13,7 @@ import hashlib
 import io
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -176,33 +177,84 @@ def cover_dir() -> Path:
     return path
 
 
+def _digest(key: str) -> Path:
+    return cover_dir() / (
+        hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".img")
+
+
 def _cover_path(artist: str, title: str, album: str) -> Path:
-    key = f"{artist.lower()}|{title.lower()}|{album.lower()}"
-    digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()
-    return cover_dir() / f"{digest}.img"
+    """The per-track key. Every track gets one; it is the fallback."""
+    return _digest(f"{artist.lower()}|{title.lower()}|{album.lower()}")
 
 
-def cached_cover(artist: str, title: str, album: str = "") -> bytes | None:
-    """A cover already on disk, or None. A miss is stored as an empty file."""
-    path = _cover_path(artist, title, album)
+def _album_path(artist: str, album: str) -> Path | None:
+    """The per-album key, where the player named an album.
+
+    Cover art belongs to a release, not to a track, and keying it by track made
+    every song on an album pay its own network round trip for the same picture.
+    Measured on this machine's cache: 52 stored covers were 34 distinct images,
+    one of them written six times — 18 fetches of roughly a second each that a
+    release-shaped key would have answered from disk.
+    """
+    if not album or not (artist or album):
+        return None
+    return _digest(f"album|{artist.lower()}|{album.lower()}")
+
+
+# How long a recorded miss is believed. Misses have to be recorded or a track
+# no source has would re-ask every source on every replay — but they are also
+# indistinguishable from a network that was down, and keying by album means one
+# bad minute can silence a whole record. Believing them for a fortnight keeps
+# the saving and puts a bound on the damage.
+MISS_TTL_S = 14 * 24 * 3600
+
+
+def _read(path: Path | None) -> bytes | None:
+    """Bytes for a hit, b"" for a live recorded miss, None for nothing usable."""
+    if path is None:
+        return None
     try:
-        if not path.exists():
-            return None
         data = path.read_bytes()
     except OSError:
         return None
-    return data or None
+    if data:
+        return data
+    try:
+        if time.time() - path.stat().st_mtime > MISS_TTL_S:
+            return None         # stale miss: worth asking again
+    except OSError:
+        return None
+    return b""
+
+
+def cached_cover(artist: str, title: str, album: str = "") -> bytes | None:
+    """A cover already on disk, or None.
+
+    The album key is tried first and the track key second, so entries written
+    before covers were keyed by release still answer instead of forcing one
+    refetch each.
+    """
+    for path in (_album_path(artist, album), _cover_path(artist, title, album)):
+        data = _read(path)
+        if data:
+            return data
+    return None
+
+
+def _recorded_miss(artist: str, title: str, album: str) -> bool:
+    return any(_read(p) == b"" for p in
+               (_album_path(artist, album), _cover_path(artist, title, album)))
 
 
 def store_cover(artist: str, title: str, album: str, data: bytes | None) -> None:
     """Keep a cover for next time. Misses are kept too.
 
-    A track whose cover no source has is the expensive case: without recording
-    the miss, every replay would ask every source again and wait for all of
-    them to fail.
+    Written under the album key when there is one, so the rest of the record is
+    already answered before it is ever played.
     """
+    path = _album_path(artist, album) or _cover_path(artist, title, album)
     try:
-        _cover_path(artist, title, album).write_bytes(data or b"")
+        path.write_bytes(data or b"")
     except OSError:
         logger.debug("could not cache the cover", exc_info=True)
 
@@ -211,28 +263,31 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> byt
     """The best cover any configured source has, or None.
 
     Disk first, so a track played before appears instantly rather than after a
-    network round trip.
+    network round trip. That is the path that matters — it costs 0.06 ms, and
+    everything after it costs about a second.
 
-    Then Discogs, which measured better on this library than the assumption
-    behind the old order: five of five tracks against Apple's three, at the
-    same 600 pixels, and the two Apple missed were both Latin releases. It is
-    slower — around 1.4 s against 0.9 s — but that is paid once per track and
-    never again, where a missing cover is permanent.
+    Then Apple, which is both quicker and usually better. Timed on four tracks:
+    339-925 ms against Discogs' 1086-1198 ms, and where both answered, Apple
+    returned the larger image twice of three — once by fifteen times, 166 KB
+    against 11 KB. It also needs no token, so it is what works when none is
+    configured.
 
-    Apple last, and it earns its place: it needs no token, so it is what works
-    when none is configured.
+    Discogs last, and it earns its place on exactly what a commercial catalogue
+    skips. In the same four, the one track Apple had no cover for at all was a
+    Latin release Discogs answered with 97 KB. The images are collector scans,
+    so they range from excellent to a crooked photograph of a sleeve — good
+    insurance, poor default.
     """
     if not (artist or title):
         return None
     cached = cached_cover(artist, title, album)
     if cached is not None:
         return cached
-    path = _cover_path(artist, title, album)
-    if path.exists():
-        return None     # a recorded miss; do not ask again
+    if _recorded_miss(artist, title, album):
+        return None     # asked before and nobody had it
 
-    data = (fetch_cover_discogs(artist, title, album)
-            or fetch_cover(artist, title, album, size=size))
+    data = (fetch_cover(artist, title, album, size=size)
+            or fetch_cover_discogs(artist, title, album))
     store_cover(artist, title, album, data)
     return data
 

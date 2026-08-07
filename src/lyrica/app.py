@@ -369,9 +369,11 @@ class Overlay:
     def _apply_art(self) -> None:
         """Put prepared images on the canvas, on the render thread."""
         if self._pending_art is None or self._dragging:
-            # Converting an image blocks the loop for ~15 ms, and anything the
-            # loop spends is time mouse events spend queued. It waits until the
-            # hand stops; a cover a moment late is not noticed, a stutter is.
+            # Measured at 1.0 ms for the backdrop and 0.02 ms for the cover, so
+            # this is not the guard against stutter it was once written as —
+            # the old comment claimed 15 ms. It stays because it costs nothing:
+            # a cover that waits for the hand to stop is never noticed, and the
+            # decoding it waits on already happened off this thread.
             return
         thumb, backdrop, song = self._pending_art
         self._pending_art = None
