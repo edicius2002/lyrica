@@ -29,7 +29,9 @@ from lyrica import (
     hotkeys,
     motion,
     songcolour,
+    sponsorblock,
     tray,
+    youtube,
 )
 from lyrica import (
     beam as beam_mod,
@@ -225,6 +227,7 @@ class Overlay:
         self._collapse = None
         self._views_width = 0
         self._art_done = True
+        self._cuts = sponsorblock.Cuts()
         self._revealed = True
         self._reveal_by = 0.0
 
@@ -495,7 +498,10 @@ class Overlay:
                 target = lyr.lines[index][0] - self.offset
                 # The lead exists so a line appears before it is sung; seeking
                 # to a line means starting where it starts, so it comes back off.
-                if self.reader.seek(max(0.0, target)):
+                # `target` stays in the recording's time because that is what the
+                # tick compares against; only the player is told where the video
+                # has to be for it.
+                if self.reader.seek(max(0.0, self._cuts.to_video(target))):
                     logger.info("seeking to line %d at %.2fs", index, target)
                     # Move now rather than waiting for the next poll, and ignore
                     # the position until it catches up. Without the guard the
@@ -534,7 +540,7 @@ class Overlay:
         snap = self.reader.snapshot
         if lyr is None or not lyr.lines or not snap.ok:
             return
-        self._set_offset(lyr.lines[0][0] - snap.live_position())
+        self._set_offset(lyr.lines[0][0] - self._cuts.to_song(snap.live_position()))
 
     def _set_offset(self, seconds: float):
         self.offset = max(-config.OFFSET_LIMIT_S,
@@ -792,6 +798,7 @@ class Overlay:
         self._lyrics_state = LYRICS_UNKNOWN
         self._art_done = False
         self._revealed = False
+        self._cuts = sponsorblock.Cuts()
         self._reveal_by = time.monotonic() + REVEAL_WAIT_S
         self._clear_views()
 
@@ -803,6 +810,37 @@ class Overlay:
 
         threading.Thread(target=work, daemon=True).start()
         self._start_artwork(gen, snap)
+        self._start_cuts(gen, snap)
+
+    def _start_cuts(self, gen: int, snap: Snapshot) -> None:
+        """Find out which parts of this video are not the song.
+
+        A lyric timeline is anchored to the release; a music video opens with a
+        film or a spoken intro and the words arrive whole seconds late. This is
+        the only thing in the process that knows how many, and it knows because
+        somebody wrote it down.
+
+        Off the render thread and never waited for: the card does not depend on
+        it, and a track whose answer arrives late is a track whose lyrics jump
+        once into place, which is better than a card held back for it.
+        """
+        if not snap.is_browser or not youtube.api_key():
+            return
+        title, duration = snap.title, snap.duration
+
+        def work():
+            video_id = youtube.video_id_for(title, duration)
+            if not video_id:
+                return
+            found = sponsorblock.cuts_for(video_id)
+            if found is None or gen != self.fetch_gen:
+                return
+            self._cuts = found
+            if found.intro:
+                logger.info("%s opens with %.1fs that is not the song",
+                            video_id, found.intro)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _start_artwork(self, gen: int, snap: Snapshot) -> None:
         """Fetch and prepare the cover off the render thread.
@@ -1198,7 +1236,10 @@ class Overlay:
 
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines:
-            pos = snap.live_position() + self.offset
+            # Through the cuts first: the player's position is a place in a
+            # video, and the lyrics are written against the recording. Without
+            # any they are the same number.
+            pos = self._cuts.to_song(snap.live_position()) + self.offset
             if self._awaiting_seek is not None:
                 target, since = self._awaiting_seek
                 # Keep counting from the jump rather than sitting on it. Holding
