@@ -6,7 +6,8 @@ lyrics over everything else, swept word by word.
 Run:      python -m lyrica   (or the `lyrica` console script)
 Keys:     Esc = quit | right click = quit | drag with mouse = move
           +/- = nudge this track's sync offset by ±0.25 s, remembered
-                (needs the overlay focused)
+          Ctrl +/- = the same by ±1 s | Enter = the first line starts now
+                (these need the overlay focused)
 Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
           Ctrl+Alt+plus / Ctrl+Alt+minus = resize | Ctrl+Alt+0 = designed size
 """
@@ -300,6 +301,10 @@ class Overlay:
         self.root.bind("<Escape>", lambda e: self._close())
         self.root.bind("<plus>", lambda e: self._nudge(+0.25))
         self.root.bind("<minus>", lambda e: self._nudge(-0.25))
+        # A whole second, for the scale a video intro works at.
+        self.root.bind("<Control-plus>", lambda e: self._nudge(+1.0))
+        self.root.bind("<Control-minus>", lambda e: self._nudge(-1.0))
+        self.root.bind("<Return>", lambda e: self._align())
         # Size. These are the fallback: they need the overlay focused, which
         # means clicking it, which seeks. The global shortcuts are what anyone
         # actually uses on Windows; this is what a platform without them gets.
@@ -500,8 +505,28 @@ class Overlay:
         self._restyle(indices)
 
     def _nudge(self, dt: float):
+        self._set_offset(self.offset + dt)
+
+    def _align(self):
+        """Take this moment as the song's first line.
+
+        A video with an intro runs ahead of a lyric timeline written for the
+        release, and the gap is whole seconds — one measured video was twenty.
+        Nothing in the metadata says how many: every synced record for that song
+        starts at 00:02.17 whatever duration it claims, so the timeline is the
+        release's and the intro is invisible to it. Correcting twenty seconds a
+        quarter at a time is eighty keypresses; the position the video is at when
+        the first words are sung is the whole answer, in one.
+        """
+        lyr = self.lyrics
+        snap = self.reader.snapshot
+        if lyr is None or not lyr.lines or not snap.ok:
+            return
+        self._set_offset(lyr.lines[0][0] - snap.live_position())
+
+    def _set_offset(self, seconds: float):
         self.offset = max(-config.OFFSET_LIMIT_S,
-                          min(config.OFFSET_LIMIT_S, self.offset + dt))
+                          min(config.OFFSET_LIMIT_S, seconds))
         config.save_offset(self.offset, self.track_key)
 
     # --- collapsing to the card ---

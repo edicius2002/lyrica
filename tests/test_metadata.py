@@ -15,6 +15,13 @@ from lyrica.sessions.base import (
     strip_artist_prefix,
 )
 
+
+@pytest.fixture
+def store_offsets(tmp_path, monkeypatch):
+    """A settings file of this test's own, so a saved nudge goes nowhere real."""
+    monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path))
+
+
 # --- captured payloads ------------------------------------------------------
 
 SPOTIFY = Snapshot(app="Spotify.exe", artist="Porter Robinson",
@@ -237,3 +244,64 @@ def test_the_card_keeps_the_players_own_words_until_something_resolves():
     assert Overlay._resolved_name(Panel(None)) == ()
     assert Overlay._resolved_name(Panel(Lyrics())) == ()
     assert Overlay._resolved_name(Panel(Lyrics(queried=("", "CHIHIRO")))) == ()
+
+
+# --- aligning a video that starts with an intro ------------------------------
+
+class Aligning:
+    """The overlay's offset state, without Tk or a session."""
+
+    def __init__(self, lyrics, position, key="chrome.exe|A|B"):
+        from types import SimpleNamespace
+        self.lyrics = lyrics
+        self.offset = 0.0
+        self.track_key = key
+        self.reader = SimpleNamespace(
+            snapshot=SimpleNamespace(ok=True, live_position=lambda: position))
+
+    def _set_offset(self, seconds):
+        from lyrica.app import Overlay
+        Overlay._set_offset(self, seconds)
+
+
+def test_aligning_takes_the_whole_intro_in_one_press(store_offsets):
+    # The lyrics say the first line is at 2.17 s. The video is 20 s further in,
+    # so it carries a 20 s intro and the lyrics must run 20 s later.
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.17, "To take my love away")], synced=True),
+                     position=22.17)
+    Overlay._align(panel)
+    assert panel.offset == -20.0
+
+
+def test_aligning_is_remembered_for_that_track(store_offsets):
+    from lyrica import config
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.17, "x")], synced=True), position=22.17)
+    Overlay._align(panel)
+    assert config.saved_offset(panel.track_key) == -20.0
+    assert config.saved_offset("chrome.exe|somebody|else") == 0.0
+
+
+def test_aligning_does_nothing_without_lyrics(store_offsets):
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    for lyr in (None, Lyrics()):
+        panel = Aligning(lyr, position=22.17)
+        Overlay._align(panel)
+        assert panel.offset == 0.0
+
+
+def test_an_intro_longer_than_the_limit_is_clamped(store_offsets):
+    from lyrica import config
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.0, "x")], synced=True), position=500.0)
+    Overlay._align(panel)
+    assert panel.offset == -config.OFFSET_LIMIT_S

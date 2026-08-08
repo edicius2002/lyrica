@@ -45,6 +45,8 @@ Play something and the overlay appears at the bottom center of the screen.
 | Move the overlay | Drag with the mouse |
 | Quit | `Esc` or right click |
 | Nudge sync offset | `+` / `-` (±0.25 s, remembered per track) |
+| Nudge by a whole second | `Ctrl` + `+` / `-` |
+| Say the first line starts now | `Enter` (for videos with an intro) |
 | Hide / show | `Ctrl`+`Alt`+`K` |
 | Quit | `Ctrl`+`Alt`+`Q` |
 | Make it bigger / smaller | `Ctrl`+`Alt`+`+` / `Ctrl`+`Alt`+`-` |

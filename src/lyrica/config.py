@@ -65,7 +65,12 @@ def _parse_size(raw: str, source: str) -> float | None:
 # How solid the panel is. Below the lower bound the desktop reads through the
 # text; at 1.0 it is an opaque slab and stops being glass at all.
 # How far the sync nudge may be remembered. A correction, not a seek.
-OFFSET_LIMIT_S = 10.0
+# How far a nudge may go. Wide enough for a music video's intro, which is the
+# thing it mostly corrects: one measured video ran twenty seconds ahead of a
+# lyric timeline written for the release. Still bounded, because past this it is
+# a mis-saved file rather than a preference — and the card shows the figure, so
+# a large one is never a mystery.
+OFFSET_LIMIT_S = 30.0
 
 OPACITY_MIN, OPACITY_MAX = 0.60, 1.0
 OPACITY_DEFAULT = 0.90
