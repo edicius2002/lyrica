@@ -198,6 +198,37 @@ The token is read from the environment and never written to disk by Lyrica, so
 it cannot end up in the repository. It is sent as a request header rather than
 in the URL, since a URL ends up in logs and proxies and a header does not.
 
+### Videos that open with an intro (optional)
+
+A lyric timeline is anchored to the release. A music video is not — it opens
+with a film, a spoken intro, a countdown — so the words arrive whole seconds
+late. `Enter` corrects that in one press and the correction is remembered for
+that track, which is all you need if it is occasional.
+
+With a YouTube Data API key it stops being your problem. SponsorBlock has a
+category, `music_offtopic`, that exists only for music videos and marks the
+parts of one that are not the song; a segment beginning at zero says exactly
+where the song starts. Checked against twelve videos by removing every marked
+stretch and comparing what was left against the release's own length, eleven
+agreed within seven seconds.
+
+```powershell
+setx LYRICA_YOUTUBE_KEY "your-key-here"
+```
+
+The key is only used to work out *which* video is playing, which Windows does
+not publish: Lyrica searches for the title the player reports and keeps the
+result whose length matches, then asks SponsorBlock about it. That question goes
+through SponsorBlock's hashed-prefix endpoint, so the service is told four
+characters of a digest and answers with every video sharing them — it never
+learns what you are listening to.
+
+Two limits worth knowing. About four in ten tracks outside the mainstream have
+nobody's annotation, and there `Enter` still applies. And a video whose music is
+a longer edit than the record — Thriller's extended dance break is the clear
+case — cannot be held in sync by any single correction, because its song is not
+the one the lyrics were written against.
+
 ## Sharing the cache between machines
 
 Lookups are cached under `%LOCALAPPDATA%\Lyrica\cache`. Set `LYRICA_CACHE_DIR` to move that

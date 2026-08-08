@@ -253,9 +253,12 @@ def test_the_card_keeps_the_players_own_words_until_something_resolves():
 class Aligning:
     """The overlay's offset state, without Tk or a session."""
 
-    def __init__(self, lyrics, position, key="chrome.exe|A|B"):
+    def __init__(self, lyrics, position, key="chrome.exe|A|B", cuts=None):
         from types import SimpleNamespace
+
+        from lyrica.sponsorblock import Cuts
         self.lyrics = lyrics
+        self._cuts = cuts or Cuts()
         self.offset = 0.0
         self.track_key = key
         self.reader = SimpleNamespace(
@@ -330,3 +333,17 @@ def test_a_half_empty_catalogue_entry_is_not_used():
     panel = Panel(Lyrics(queried=("Tiago PZK", "Traductor")),
                   Release(artist="", title="Traductor"))
     assert Overlay._resolved_name(panel) == ("Tiago PZK", "Traductor")
+
+
+def test_aligning_measures_against_the_recording_not_the_video(store_offsets):
+    # With the cuts known there is nothing left for the keypress to correct, so
+    # pressing it where the first line is sung must come out at zero rather than
+    # at minus the intro — otherwise the two corrections would stack.
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+    from lyrica.sponsorblock import Cuts
+
+    panel = Aligning(Lyrics(lines=[(2.17, "x")], synced=True),
+                     position=23.97, cuts=Cuts(((0.0, 21.8),)))
+    Overlay._align(panel)
+    assert abs(panel.offset) < 0.01
