@@ -139,3 +139,41 @@ def test_an_unwritable_directory_is_not_an_error(monkeypatch, tmp_path):
     monkeypatch.setattr(artwork, "cover_dir", lambda: tmp_path / "nope" / "deeper")
     store_cover("A", "B", "", b"x")     # must not raise
     assert cached_cover("A", "B", "") is None
+
+
+def down(*_a, **_k):
+    raise artwork.Unreachable
+
+
+def test_a_dropped_connection_does_not_silence_the_album(monkeypatch):
+    # The miss is written under the album key and believed for a fortnight, so
+    # one bad minute used to leave a whole record with no cover for two weeks.
+    monkeypatch.setattr(artwork, "fetch_cover", down)
+    monkeypatch.setattr(artwork, "fetch_cover_discogs", down)
+    assert best_cover("Air", "La Femme d'Argent", "Moon Safari") is None
+
+    monkeypatch.setattr(artwork, "fetch_cover", lambda *a, **k: b"back online")
+    assert best_cover("Air", "Sexy Boy", "Moon Safari") == b"back online"
+
+
+def test_one_source_being_down_still_asks_the_other(monkeypatch):
+    # The sources used to be chained with `or`, which a raise would skip past.
+    monkeypatch.setattr(artwork, "fetch_cover", down)
+    monkeypatch.setattr(artwork, "fetch_cover_discogs", lambda *a, **k: b"scan")
+    assert best_cover("Aventura", "Todavia", "God's Project") == b"scan"
+
+
+def test_a_source_that_answers_nothing_is_still_a_miss(monkeypatch):
+    # The saving this cache exists for: a track nobody has must not re-ask
+    # every source on every replay.
+    asked = []
+
+    def none(*_a, **_k):
+        asked.append(1)
+        return None
+
+    monkeypatch.setattr(artwork, "fetch_cover", none)
+    monkeypatch.setattr(artwork, "fetch_cover_discogs", none)
+    assert best_cover("Nobody", "Nothing", "Nowhere") is None
+    assert best_cover("Nobody", "Nothing", "Nowhere") is None
+    assert len(asked) == 2, "the second play asked again"
