@@ -303,3 +303,47 @@ def test_the_centre_is_kept_because_the_window_is_not_one_width(store):
     for width in (wide, compact):
         left = config.saved_place()[0] - width // 2
         assert left + width // 2 == centre_x
+
+
+def test_a_nudge_belongs_to_the_track_it_was_made_for(store):
+    # What it corrects is per track: a video with eight seconds of intro before
+    # the song needs eight seconds no other track wants.
+    config.save_offset(-8.0, "chrome.exe|Tiago PZK|Traductor")
+    config.save_offset(0.5, "Spotify.exe|Air|La Femme d'Argent")
+    assert config.saved_offset("chrome.exe|Tiago PZK|Traductor") == -8.0
+    assert config.saved_offset("Spotify.exe|Air|La Femme d'Argent") == 0.5
+
+
+def test_a_track_with_no_nudge_of_its_own_starts_at_zero(store):
+    config.save_offset(-8.0, "chrome.exe|Tiago PZK|Traductor")
+    assert config.saved_offset("chrome.exe|Someone|Else") == 0.0
+
+
+def test_a_nudge_saved_before_nudges_were_per_track_still_applies(store):
+    config.settings_path().write_text('{"offset": 1.25}', encoding="utf-8")
+    assert config.saved_offset("chrome.exe|Anyone|Anything") == 1.25
+
+
+def test_a_per_track_nudge_beats_the_old_global_one(store):
+    config.settings_path().write_text('{"offset": 1.25}', encoding="utf-8")
+    config.save_offset(-3.0, "chrome.exe|Tiago PZK|Traductor")
+    assert config.saved_offset("chrome.exe|Tiago PZK|Traductor") == -3.0
+
+
+def test_only_so_many_tracks_are_remembered(store):
+    for i in range(config.OFFSET_MEMORY + 20):
+        config.save_offset(0.25, f"chrome.exe|artist|track {i}")
+    kept = config.settings().get("offsets")
+    assert len(kept) == config.OFFSET_MEMORY
+    assert "chrome.exe|artist|track 0" not in kept
+    assert f"chrome.exe|artist|track {config.OFFSET_MEMORY + 19}" in kept
+
+
+def test_re_nudging_a_track_keeps_it_from_being_forgotten(store):
+    config.save_offset(0.25, "old favourite")
+    for i in range(config.OFFSET_MEMORY - 1):
+        config.save_offset(0.25, f"filler {i}")
+    config.save_offset(0.5, "old favourite")          # touched again
+    for i in range(config.OFFSET_MEMORY - 1):
+        config.save_offset(0.25, f"later filler {i}")
+    assert config.saved_offset("old favourite") == 0.5

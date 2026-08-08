@@ -6,12 +6,21 @@ asserted that Chrome leaves `artist` empty, which Chrome never does — the test
 passed while describing a payload that does not occur. Cases here are only added
 from something a session actually published.
 """
+import pytest
+
 from lyrica.sessions.base import (
     Snapshot,
     clean_title,
     split_browser_title,
     strip_artist_prefix,
 )
+
+
+@pytest.fixture
+def store_offsets(tmp_path, monkeypatch):
+    """A settings file of this test's own, so a saved nudge goes nowhere real."""
+    monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path))
+
 
 # --- captured payloads ------------------------------------------------------
 
@@ -32,6 +41,13 @@ SOUNDCLOUD_REUPLOAD = Snapshot(app="chrome.exe", artist="Minh Prime",
 SOUNDCLOUD_MIX = Snapshot(app="chrome.exe", artist="nigeldelviero",
                           title="Chill Study Beats - Lofi Hip Hop Mix [2018]",
                           duration=7200.3, ok=True)
+
+# Captured 2026-08-07. The artist field holds only the first name of a two-name
+# credit, which is the ordinary shape of a collaboration on YouTube. The
+# timeline was not recorded for this one, so it carries no duration.
+YOUTUBE_FEATURE = Snapshot(app="chrome.exe", artist="Tiago PZK",
+                           title="Tiago PZK, Myke Towers - Traductor (Video Oficial)",
+                           ok=True)
 
 
 # --- clean_title ------------------------------------------------------------
@@ -132,3 +148,160 @@ def test_candidates_are_deduplicated_and_non_empty():
         assert candidates, f"{snap.title!r} produced no candidate"
         assert len(candidates) == len(set(candidates))
         assert all(title for _, title in candidates)
+
+
+# --- a credit longer than the artist field ----------------------------------
+
+def test_a_second_artist_in_the_title_is_still_a_prefix():
+    # "Tiago PZK, Myke Towers - Traductor" under an artist field of "Tiago PZK".
+    # The old rule needed the separator to follow the artist immediately, so the
+    # whole credit stayed in the title and the card read it as the song's name.
+    assert YOUTUBE_FEATURE.norm_artist_title() == ("Tiago PZK", "Traductor")
+
+
+def test_a_song_that_merely_starts_with_the_artists_word_is_left_alone():
+    # "Air" is a real artist and "Airbag" is a real song. Nothing here reads as
+    # a credit, so the title keeps every character.
+    assert strip_artist_prefix("Air", "Airbag") == "Airbag"
+    assert strip_artist_prefix("Love", "Love Story - Taylor Swift") == \
+        "Love Story - Taylor Swift"
+
+
+def test_the_joining_words_of_a_credit_are_recognised():
+    for credit in ("Bad Bunny & Jhayco - Dakiti", "Bad Bunny feat. Drake - Mia",
+                   "Bad Bunny x Rosalia - La Noche", "Bad Bunny con Ozuna - Pa Ti"):
+        assert strip_artist_prefix("Bad Bunny", credit) == credit.split(" - ")[1]
+
+
+def test_the_split_is_offered_even_when_the_artist_is_in_the_title():
+    # It used to be skipped whenever the artist appeared anywhere in the title,
+    # which skipped the one reading that names both performers.
+    assert ("Tiago PZK, Myke Towers", "Traductor") in \
+        YOUTUBE_FEATURE.lookup_candidates()
+
+
+def test_offering_the_split_adds_no_duplicate_for_a_plain_repeat():
+    # Where the artist is repeated with the separator right after it, the split
+    # says exactly what the first candidate already does.
+    assert YOUTUBE.lookup_candidates().count(("Dua Lipa", "Levitating Featuring DaBaby")) == 1
+
+
+# --- the reading that resolved ----------------------------------------------
+
+def test_a_result_remembers_which_reading_found_it(tmp_path, monkeypatch):
+    # The card is named from this: naming it any other way would contradict the
+    # lyrics on screen.
+    from lyrica import providers
+    from lyrica.lyrics import Lyrics
+
+    monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda a, t, d, al: (
+                            (Lyrics(lines=[(0.0, "x")], synced=True), ["stub"])
+                            if a == "Billie Eilish" else (None, ["stub"])))
+    got = providers.fetch_for_candidates(
+        [("BillieEilishVEVO", "Billie Eilish - CHIHIRO"),
+         ("Billie Eilish", "CHIHIRO")])
+    assert got.queried == ("Billie Eilish", "CHIHIRO")
+
+
+def test_the_reading_survives_the_cache(tmp_path, monkeypatch):
+    from lyrica import providers
+    from lyrica.lyrics import Lyrics
+
+    monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda *a: (Lyrics(lines=[(0.0, "x")], synced=True,
+                                           source="s"), providers._provider_names()))
+    providers.fetch_lyrics("Billie Eilish", "CHIHIRO")
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda *a: pytest.fail("the cache should have answered"))
+    again = providers.fetch_lyrics("Billie Eilish", "CHIHIRO")
+    assert again.queried == ("Billie Eilish", "CHIHIRO")
+
+
+class Panel:
+    """Only the attribute `_resolved_name` reads."""
+
+    def __init__(self, lyrics=None):
+        self.lyrics = lyrics
+
+
+def test_the_card_is_named_after_the_reading_that_resolved():
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    lyr = Lyrics(lines=[(0.0, "x")], synced=True, queried=("Billie Eilish", "CHIHIRO"))
+    assert Overlay._resolved_name(Panel(lyr)) == ("Billie Eilish", "CHIHIRO")
+
+
+def test_the_card_keeps_the_players_own_words_until_something_resolves():
+    # Nothing found yet, or nothing found at all: the reading the player gave is
+    # all anything knows, and it is what the compact card shows.
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    assert Overlay._resolved_name(Panel(None)) == ()
+    assert Overlay._resolved_name(Panel(Lyrics())) == ()
+    assert Overlay._resolved_name(Panel(Lyrics(queried=("", "CHIHIRO")))) == ()
+
+
+# --- aligning a video that starts with an intro ------------------------------
+
+class Aligning:
+    """The overlay's offset state, without Tk or a session."""
+
+    def __init__(self, lyrics, position, key="chrome.exe|A|B"):
+        from types import SimpleNamespace
+        self.lyrics = lyrics
+        self.offset = 0.0
+        self.track_key = key
+        self.reader = SimpleNamespace(
+            snapshot=SimpleNamespace(ok=True, live_position=lambda: position))
+
+    def _set_offset(self, seconds):
+        from lyrica.app import Overlay
+        Overlay._set_offset(self, seconds)
+
+
+def test_aligning_takes_the_whole_intro_in_one_press(store_offsets):
+    # The lyrics say the first line is at 2.17 s. The video is 20 s further in,
+    # so it carries a 20 s intro and the lyrics must run 20 s later.
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.17, "To take my love away")], synced=True),
+                     position=22.17)
+    Overlay._align(panel)
+    assert panel.offset == -20.0
+
+
+def test_aligning_is_remembered_for_that_track(store_offsets):
+    from lyrica import config
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.17, "x")], synced=True), position=22.17)
+    Overlay._align(panel)
+    assert config.saved_offset(panel.track_key) == -20.0
+    assert config.saved_offset("chrome.exe|somebody|else") == 0.0
+
+
+def test_aligning_does_nothing_without_lyrics(store_offsets):
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    for lyr in (None, Lyrics()):
+        panel = Aligning(lyr, position=22.17)
+        Overlay._align(panel)
+        assert panel.offset == 0.0
+
+
+def test_an_intro_longer_than_the_limit_is_clamped(store_offsets):
+    from lyrica import config
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+
+    panel = Aligning(Lyrics(lines=[(2.0, "x")], synced=True), position=500.0)
+    Overlay._align(panel)
+    assert panel.offset == -config.OFFSET_LIMIT_S

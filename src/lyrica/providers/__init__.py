@@ -69,7 +69,8 @@ PROVIDERS: list[LyricsProvider] = [
 # search waiting on a name that is never coming.
 OVERALL_TIMEOUT_S = 12.0
 
-_CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact")
+_CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
+                 "queried")
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -103,6 +104,7 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     # unequal to freshly parsed ones. Restoring the shape keeps a cached hit
     # indistinguishable from a live one.
     lyr.words = [[tuple(w) for w in line] for line in d.get("words", [])]
+    lyr.queried = tuple(lyr.queried)     # JSON has no tuples
     return lyr, asked
 
 
@@ -211,6 +213,17 @@ def _ask_providers(artist: str, title: str, duration: float,
     return best, asked
 
 
+def _stamp(result: Lyrics | None, artist: str, title: str) -> Lyrics | None:
+    """Record which reading of the metadata produced this answer.
+
+    Set on the way out rather than trusted from the cache, so entries written
+    before the field existed carry it too.
+    """
+    if result is not None:
+        result.queried = (artist, title)
+    return result
+
+
 def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
                  album: str = "") -> Lyrics | None:
     """Best answer any provider has for one artist/title pair, or None.
@@ -236,11 +249,12 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
             # later supersede a line-level hit instead of being shadowed by it.
             unasked = [p for p in PROVIDERS if p.name not in asked]
             if not unasked or _nothing_left_to_beat(cached, unasked):
-                return cached
+                return _stamp(cached, artist, title)
             logger.info("re-querying %r - %r: %s never asked", artist, title,
                         [p.name for p in unasked])
 
     best, asked = _ask_providers(artist, title, duration, album)
+    _stamp(best, artist, title)
     try:
         _cache_write(cpath, best, asked)
     except OSError:
