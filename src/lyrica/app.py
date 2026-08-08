@@ -208,6 +208,7 @@ class Overlay:
         self._card_raw = None
         self._awaiting_seek = None
         self._hidden = False
+        self._closing = False
         self._lyrics_state = LYRICS_UNKNOWN
         self._compact = False
         self._collapse = None
@@ -285,8 +286,8 @@ class Overlay:
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
             widget.bind("<ButtonRelease-1>", self._drag_end)
-            widget.bind("<Button-3>", lambda e: self.root.destroy())
-        self.root.bind("<Escape>", lambda e: self.root.destroy())
+            widget.bind("<Button-3>", lambda e: self._close())
+        self.root.bind("<Escape>", lambda e: self._close())
         self.root.bind("<plus>", lambda e: self._nudge(+0.25))
         self.root.bind("<minus>", lambda e: self._nudge(-0.25))
         # Size. These are the fallback: they need the overlay focused, which
@@ -304,12 +305,24 @@ class Overlay:
 
     ACTIONS: ClassVar[dict] = {
         "toggle": lambda self: self._toggle_visible(),
-        "quit": lambda self: self.root.destroy(),
+        "quit": lambda self: self._close(),
         "bigger": lambda self: self._resize(+SIZE_STEP),
         "smaller": lambda self: self._resize(-SIZE_STEP),
         "reset": lambda self: self._resize_to(1.0),
         "autostart": lambda self: self._toggle_autostart(),
     }
+
+    def _close(self) -> None:
+        """Ask for the overlay to go away, without pulling it out from under us.
+
+        Destroying the root where the request arrives is what a shortcut or a
+        tray click used to do, and both are drained from inside the tick — so
+        the rest of that tick carried on measuring text and recolouring a canvas
+        that no longer existed, throwing TclError from an `after` callback. The
+        request is recorded here and acted on at the top of the loop, where
+        nothing follows it.
+        """
+        self._closing = True
 
     def _drain_actions(self) -> None:
         """Act on whatever the shortcuts and the tray icon asked for.
@@ -960,6 +973,10 @@ class Overlay:
     # --- render ---
     def _tick(self):
         self._drain_actions()
+        if self._closing:
+            # Nothing may run after this: every line below touches a widget.
+            self.root.destroy()
+            return
         if self._hidden:
             # Nothing to draw and nobody watching. The session reader keeps
             # polling on its own thread, so this stays cheap without going

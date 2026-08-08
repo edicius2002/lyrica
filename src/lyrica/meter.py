@@ -225,8 +225,17 @@ class WindowsMeter:
 
     @staticmethod
     def _call(obj, slot, argtypes, *args):
+        """Invoke a COM method and *return* its status code.
+
+        `c_long` rather than `ctypes.HRESULT`, and the difference is not
+        cosmetic: `HRESULT` carries a `_check_retval_` that raises OSError on a
+        failing code instead of returning it. Every `if hr:` in this module was
+        therefore dead on exactly the path it was written for, and the exception
+        went where nobody had planned for it — out of `raw()`, through the
+        render tick, past the line that re-arms it.
+        """
         vtable = ctypes.cast(obj, POINTER(POINTER(c_void_p))).contents
-        proto = ctypes.WINFUNCTYPE(ctypes.HRESULT, c_void_p, *argtypes)
+        proto = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, *argtypes)
         return proto(vtable[slot])(obj, *args)
 
     @staticmethod
@@ -236,12 +245,33 @@ class WindowsMeter:
             ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(vtable[RELEASE])(obj)
 
     def raw(self) -> float:
+        """The endpoint's current peak, or silence.
+
+        Nothing here may raise. This is read once a frame from the render tick,
+        and an exception escaping it skips the `after` that re-arms the loop —
+        the overlay stops for good, with a traceback going to a stderr the
+        packaged build discards. An endpoint can be invalidated at any moment by
+        a device being unplugged, so that is a matter of when rather than if.
+        """
         if self._meter is None:
             return 0.0
-        value = c_float()
-        hr = self._call(self._meter, GET_PEAK_VALUE, [POINTER(c_float)],
-                        byref(value))
-        return 0.0 if hr else value.value
+        try:
+            value = c_float()
+            failed = self._call(self._meter, GET_PEAK_VALUE, [POINTER(c_float)],
+                                byref(value))
+        except OSError:
+            failed = True
+        if failed:
+            # The device is gone or the endpoint is stale. Reported once, then
+            # the border simply stops reacting, which is what it does with no
+            # audio anyway.
+            logger.info("the audio meter stopped answering; the border will "
+                        "hold its resting level", exc_info=True)
+            self._release(self._meter)
+            self._meter = None
+            self.available = False
+            return 0.0
+        return value.value
 
     def level(self, dt: float = 1 / 60) -> float:
         """The smoothed level, 0..1. Rises at once, falls gently.
