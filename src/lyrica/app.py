@@ -258,13 +258,21 @@ class Overlay:
                                    sh - self.height))
         # Where it was left, if it was left anywhere reachable. Clamped rather
         # than trusted: a position saved on a monitor since unplugged is a
-        # window nobody can see and nobody can drag back.
-        remembered = config.saved_centre()
-        if remembered is not None:
-            self._start_x = max(0, min(remembered[0] - self.width // 2,
-                                       sw - self.width))
-            self._start_y = max(0, min(remembered[1] - self.height // 2,
-                                       sh - self.height))
+        # window nobody can see and nobody can drag back. Across the whole
+        # desktop, not the primary screen, or a second monitor is unreachable.
+        dleft, dtop, dwidth, dheight = chrome_mod.desktop_bounds(self.root)
+        place, centre = config.saved_place(), config.saved_centre()
+        if place is not None:
+            wanted = (place[0] - self.width // 2, place[1])
+        elif centre is not None:
+            # Written before the vertical anchor was corrected; read the way it
+            # was written so an upgrade keeps the position it had.
+            wanted = (centre[0] - self.width // 2, centre[1] - self.height // 2)
+        else:
+            wanted = None
+        if wanted is not None:
+            self._start_x = max(dleft, min(wanted[0], dleft + dwidth - self.width))
+            self._start_y = max(dtop, min(wanted[1], dtop + dheight - self.height))
         self.root.geometry(
             f"{self.width}x{self.height}+{self._start_x}+{self._start_y}")
 
@@ -434,13 +442,17 @@ class Overlay:
         chrome_mod.move(self.root, x, y)
 
     def _remember_where(self) -> None:
-        """Keep the middle of the window, not its corner.
+        """Keep the horizontal middle and the top edge — the two that survive.
 
-        A collapse and a resize both hold the middle and derive a new corner
-        from it, so a corner is only true for the width it was taken at.
+        Not the corner, because the window has two widths and a corner is only
+        true for the one it was taken at. Not the vertical middle either, and
+        that half was wrong until review caught it: a collapse holds the *top*
+        so the card does not move, so a middle saved while the panel was
+        compact belonged to a 114 px window and reopening at 375 put it 130 px
+        too high.
         """
-        config.save_centre(self.root.winfo_x() + self.width // 2,
-                           self.root.winfo_y() + self.height // 2)
+        config.save_place(self.root.winfo_x() + self.width // 2,
+                          self.root.winfo_y())
 
     def _drag_end(self, _e):
         was_dragging = self._moved
@@ -526,17 +538,21 @@ class Overlay:
         return compact_target(self._lyrics_state, self._compact)
 
     def _retarget_size(self, animate: bool = True) -> None:
-        """Start moving toward the size the current state calls for."""
-        want = self._want_compact()
-        if want == self._compact:
-            # Nothing to decide. A collapse already in flight is advanced by
-            # `_advance_collapse`, never restarted here — an earlier version
-            # fell through this guard while one was running and rebuilt it with
-            # a fresh start time on every tick, which pinned the animation at
-            # its first frame and left the window exactly where it began.
-            return
-        self._compact = want
+        """Start moving toward the size the current state calls for.
+
+        Driven by the size rather than by the state. Comparing states instead
+        was correct about *when* to collapse and blind to the compact panel's
+        width, which is measured from the card: two lyric-less tracks in a row
+        left the second one wearing the first one's width, so a long title was
+        truncated inside a panel sized for a short one.
+        """
+        self._compact = self._want_compact()
         target = self._target_size()
+        if self._collapse is not None and self._collapse[2:4] == target:
+            # Already on its way there. Re-arming would rebuild the animation
+            # with a fresh start time on every tick, which pins it at its first
+            # frame and leaves the window exactly where it began.
+            return
         if (self.width, self.height) == target:
             self._collapse = None
             return
@@ -553,7 +569,8 @@ class Overlay:
         from_w, from_h, to_w, to_h, started = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
-        t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS)
+        t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
+                                motion.RESIZE_CURVE)
         self._resize_window(round(from_w + (to_w - from_w) * t),
                             round(from_h + (to_h - from_h) * t))
         if not done:
@@ -580,8 +597,13 @@ class Overlay:
         top = self.root.winfo_y()
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
-        sw = self.root.winfo_screenwidth()
-        x = max(0, min(centre - width // 2, sw - width))
+        # The whole desktop, not the primary monitor. Clamping to
+        # `winfo_screenwidth` teleported the panel back from a second screen
+        # every time a track with no lyrics collapsed it — measured here, a
+        # 4480 px desktop against a 1920 px primary.
+        left, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
+        x = max(left, min(centre - width // 2, left + dwidth - width))
+        top = max(dtop, top)
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)
         self.root.update_idletasks()
@@ -592,6 +614,13 @@ class Overlay:
         title, artists = self._card_text or ("", "")
         self._lay_out_card(title, artists)
         self._place_thumb()
+        # The anchor moved, so the lines have to. `_retarget` is otherwise only
+        # reached from `_go_to_line`, so a column placed against the compact
+        # anchor at the start of an expansion stayed there for the whole growth
+        # — the active line drawn over the card, its neighbours above
+        # `_content_top` and painted invisible, until the next lyric arrived.
+        if self._views and self.line_index in self._views:
+            self._retarget(sorted(self._views), animate=False)
 
     # --- showing and hiding ---
     def _toggle_visible(self) -> None:
@@ -680,6 +709,12 @@ class Overlay:
         # to whatever size it used to be.
         self.root.update_idletasks()
         chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+        # The ring is laid out once for a size and only recoloured after that,
+        # so a scale change leaves it tracing the previous window: inset well
+        # inside the panel after growing, clipped off the edge after shrinking.
+        if self.beam is not None:
+            self.beam.reshape(self.width, self.height,
+                              self.chrome.px(chrome_mod.CORNER_RADIUS))
 
         self.canvas.itemconfigure(self._title_item, font=self.f_title)
         self.canvas.itemconfigure(self._artist_item, font=self.f_artist)

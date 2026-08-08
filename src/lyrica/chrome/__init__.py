@@ -168,6 +168,23 @@ def hold_timer_resolution(hold: bool) -> None:
     win.hold_timer_resolution(hold)
 
 
+def desktop_bounds(root: tk.Tk) -> tuple:
+    """(left, top, width, height) of everything the window may be placed on.
+
+    Tk only knows the primary monitor, and clamping to it drags a window back
+    from a second screen every time it is resized. Windows can report the whole
+    virtual desktop, whose origin is negative when a screen sits left of or
+    above the primary one — so this returns an origin as well as a size, and
+    callers must not assume it starts at zero.
+    """
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+        bounds = win.desktop_bounds()
+        if bounds is not None:
+            return bounds
+    return (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
+
+
 def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
     """Drop the expensive part of the window effect while it is being moved.
 

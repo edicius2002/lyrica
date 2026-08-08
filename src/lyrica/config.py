@@ -178,6 +178,25 @@ def save_size(value: float) -> None:
     save_setting("size", round(clamp_size(value), 2))
 
 
+def saved_place() -> tuple[int, int] | None:
+    """Where the window was left: (horizontal middle, top edge).
+
+    Two different anchors, because the window's two sizes preserve two
+    different things. Collapsing to the card holds the horizontal middle while
+    the corner moves under it, so the middle is what survives across widths.
+    But it holds the *top edge*, not the vertical middle — the card lives up
+    there and must not move — so a vertical centre saved while compact belongs
+    to a 114 px window and reopening at 375 px put the panel 130 px too high.
+
+    Falls back to the older `centre` key, read the way it was written, so an
+    upgrade does not lose the position it had.
+    """
+    value = settings().get("place")
+    if _is_pair(value):
+        return int(value[0]), int(value[1])
+    return None
+
+
 def saved_centre() -> tuple[int, int] | None:
     """Where the middle of the window was left, or None.
 
@@ -198,14 +217,18 @@ def saved_centre() -> tuple[int, int] | None:
     caller clamps it to whatever screen exists now.
     """
     value = settings().get("centre")
-    if (isinstance(value, list) and len(value) == 2
-            and all(isinstance(v, (int, float)) for v in value)):
+    if _is_pair(value):
         return int(value[0]), int(value[1])
     return None
 
 
-def save_centre(x: int, y: int) -> None:
-    save_setting("centre", [int(x), int(y)])
+def save_place(x: int, top: int) -> None:
+    save_setting("place", [int(x), int(top)])
+
+
+def _is_pair(value) -> bool:
+    return (isinstance(value, list) and len(value) == 2
+            and all(isinstance(v, (int, float)) for v in value))
 
 
 def saved_offset() -> float:
