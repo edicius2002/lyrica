@@ -20,6 +20,7 @@ import requests
 
 from lyrica.lyrics import Lyrics, parse_lrc
 from lyrica.providers.base import LyricsProvider
+from lyrica.textmatch import fold
 
 SEARCH_URL = "https://music.163.com/api/search/get"
 LYRIC_URL = "https://music.163.com/api/song/lyric"
@@ -27,10 +28,6 @@ HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://music.163.com/"}
 TIMEOUT = 12
 
 logger = logging.getLogger(__name__)
-
-
-def _norm(s: str) -> str:
-    return "".join(ch for ch in s.lower() if ch.isalnum() or ch.isspace()).strip()
 
 
 def _artists_of(song: dict) -> str:
@@ -45,8 +42,8 @@ def _score(song: dict, artist: str, title: str, duration: float) -> float:
     duration alone.
     """
     score = 0.0
-    got_artist, got_title = _norm(_artists_of(song)), _norm(song.get("name", ""))
-    want_artist, want_title = _norm(artist), _norm(title)
+    got_artist, got_title = fold(_artists_of(song)), fold(song.get("name", ""))
+    want_artist, want_title = fold(artist), fold(title)
 
     if want_artist and got_artist:
         if want_artist == got_artist:
