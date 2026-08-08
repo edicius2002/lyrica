@@ -86,6 +86,13 @@ SUSPEND_GLASS_WHILE_DRAGGING = True
 # Lyrics feel late when they land exactly on the beat: you read a line as it
 # begins, so it has to be there fractionally before the voice. better-lyrics
 # settled on the same correction, and those numbers are adopted, not guessed.
+# How long the card will wait for every part of itself before going up with
+# whatever it has. Long enough to cover a cold fetch on a slow connection —
+# measured at about a second for the cover and one and a half for the lyrics —
+# short enough that a source which never answers does not strand the panel on
+# the previous song.
+REVEAL_WAIT_S = 3.0
+
 LINE_LEAD_S = 0.115
 WORD_LEAD_S = 0.150
 
@@ -216,6 +223,10 @@ class Overlay:
         self._lyrics_state = LYRICS_UNKNOWN
         self._compact = False
         self._collapse = None
+        self._views_width = 0
+        self._art_done = True
+        self._revealed = True
+        self._reveal_by = 0.0
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -779,6 +790,9 @@ class Overlay:
         self.lyrics = None
         self._identified = artwork.Release()
         self._lyrics_state = LYRICS_UNKNOWN
+        self._art_done = False
+        self._revealed = False
+        self._reveal_by = time.monotonic() + REVEAL_WAIT_S
         self._clear_views()
 
         def work():
@@ -797,6 +811,7 @@ class Overlay:
         inline, and it only needs doing once a track.
         """
         if not artwork.available():
+            self._art_done = True
             return
 
         candidates = snap.lookup_candidates()
@@ -819,6 +834,10 @@ class Overlay:
                 self._identified = named
                 logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
                             named.album or "no album")
+            if gen == self.fetch_gen:
+                # Last, and whatever the outcome: this says the search is over,
+                # not that it found anything.
+                self._art_done = True
             if not data or gen != self.fetch_gen:
                 return
             # The bytes first, so a resize that arrives from here on finds them
@@ -949,6 +968,29 @@ class Overlay:
         if len(box) >= 2:
             self.canvas.coords(self._thumb_image, box[0], box[1])
 
+    def _ready_to_show(self) -> bool:
+        """Whether this track's card may go up yet.
+
+        The three things that make up a card arrive at three different times.
+        Measured cold, from a track change: the player's own words are there
+        within a tick, the cover and the catalogue's name land together at about
+        a second, and the lyrics at about one and a half. So the panel used to
+        put up a name, change it to a different name a second later, and grow a
+        thumbnail beside it — three separate events for one song starting.
+
+        Held until they can go up together instead. The previous track stays on
+        screen for that second rather than the panel blanking, because it was
+        true a moment ago and a gap reads as a fault. Warm, all of this is about
+        ten milliseconds and nobody sees it at all.
+
+        The deadline is what keeps a source that never answers — no network, no
+        cover anywhere — from holding the panel on the last song forever.
+        """
+        if not self._revealed:
+            settled = self._art_done and self._lyrics_state != LYRICS_UNKNOWN
+            self._revealed = settled or time.monotonic() >= self._reveal_by
+        return self._revealed
+
     def _resolved_name(self) -> tuple:
         """What the song turned out to be called, or () while nothing is known.
 
@@ -1045,6 +1087,29 @@ class Overlay:
                 self.canvas, self.width // 2, start_y, text, words,
                 font=self.f_line, wrap=self.wrap, palette=self.palette,
                 scale=self.chrome.scale)
+        self._views_width = self.width
+
+    def _refit_views(self) -> None:
+        """Keep the lines centred on the window they are actually in.
+
+        Two answers, because the width changes in two circumstances. While the
+        panel is still moving the lines are only shifted, which is cheap and
+        leaves the vertical glide alone. Once it settles they are rebuilt, since
+        the wrap width moved as well and no amount of shifting answers that.
+        """
+        if self.width == self._views_width or not self._views:
+            return
+        if self._collapse is not None:
+            for view in self._views.values():
+                view.recentre(self.width // 2)
+            return
+        self._views_width = self.width
+        for view in self._views.values():
+            view.destroy()
+        self._views.clear()
+        self._glides.clear()
+        self._targets.clear()
+        self.line_index = -1        # the next tick builds them at the new width
 
     def _retarget(self, indices: list[int], animate: bool) -> None:
         """Place the active line at the anchor and stack the rest around it."""
@@ -1112,16 +1177,16 @@ class Overlay:
             self.offset = config.saved_offset(self.track_key)
             self._start_fetch(snap)
 
-        self._apply_art()
-
-        card = self._card_for(snap)
-        if card != self._card_text:
-            self._card_text = card
-            title, artists = card
-            self.canvas.itemconfigure(self._title_item, text=title)
-            self.canvas.itemconfigure(self._artist_item, text=artists)
-            self._lay_out_card(title, artists)
-            self._place_thumb()
+        if self._ready_to_show():
+            self._apply_art()
+            card = self._card_for(snap)
+            if card != self._card_text:
+                self._card_text = card
+                title, artists = card
+                self.canvas.itemconfigure(self._title_item, text=title)
+                self.canvas.itemconfigure(self._artist_item, text=artists)
+                self._lay_out_card(title, artists)
+                self._place_thumb()
 
         interval = SLOW_TICK_MS
         if self._advance_beam():
@@ -1129,6 +1194,7 @@ class Overlay:
         self._retarget_size()
         if self._advance_collapse():
             interval = FAST_TICK_MS
+        self._refit_views()
 
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines:

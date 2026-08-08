@@ -94,3 +94,65 @@ def test_the_first_line_shows_before_the_singing_starts():
         index = 0
     assert (index, waiting) == (0, True)
     assert lyr.line_index_at(22.0) == 0, "and it is the same line once it starts"
+
+
+# --- one song starting is one event -----------------------------------------
+
+class Reveal:
+    """The readiness rule, without the rest of the overlay."""
+
+    def __init__(self, now=0.0):
+        from lyrica.app import LYRICS_UNKNOWN
+        self._art_done = False
+        self._revealed = False
+        self._reveal_by = 100.0
+        self._lyrics_state = LYRICS_UNKNOWN
+        self.now = now
+
+    def ready(self):
+        import time as _time
+
+        from lyrica.app import Overlay
+        real, _time.monotonic = _time.monotonic, lambda: self.now
+        try:
+            return Overlay._ready_to_show(self)
+        finally:
+            _time.monotonic = real
+
+
+def test_the_card_waits_for_every_part_of_itself():
+    from lyrica.app import LYRICS_ABSENT, LYRICS_PRESENT
+
+    r = Reveal()
+    assert not r.ready(), "nothing has arrived"
+    r._art_done = True
+    assert not r.ready(), "the lyrics are still out"
+    r._lyrics_state = LYRICS_PRESENT
+    assert r.ready()
+
+    r = Reveal()
+    r._lyrics_state = LYRICS_ABSENT
+    assert not r.ready(), "the cover is still out"
+    r._art_done = True
+    assert r.ready()
+
+
+def test_a_source_that_never_answers_does_not_strand_the_panel():
+    r = Reveal()
+    r._reveal_by = 50.0
+    r.now = 49.0
+    assert not r.ready()
+    r.now = 50.0
+    assert r.ready(), "the deadline has to release it"
+
+
+def test_once_shown_it_stays_shown():
+    # The state that decides readiness keeps moving after the card goes up, and
+    # a card that could un-reveal itself would flicker.
+    from lyrica.app import LYRICS_PRESENT, LYRICS_UNKNOWN
+
+    r = Reveal()
+    r._art_done, r._lyrics_state = True, LYRICS_PRESENT
+    assert r.ready()
+    r._lyrics_state = LYRICS_UNKNOWN
+    assert r.ready()
