@@ -268,7 +268,7 @@ reported playback position.
 
 - [x] `docs/IMPLEMENTATION_PLAN.md` — this file
 - [x] Translate the viability report to English and rename it `research/VIABILITY.md`
-- [ ] Open the PR against `main`
+- [x] Open the PR against `main`
 
 **Out of scope:** any change under `src/` or `tests/`.
 
