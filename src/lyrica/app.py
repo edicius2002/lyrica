@@ -73,7 +73,6 @@ FONT_LINE = ("Segoe UI", -30, "bold")
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
-DRAG_TICK_MS = 120  # while the window is being moved, the hand comes first
 
 # Drop the blur while dragging. Everything measurable inside the process came
 # back clean — the move lands in ~2.4 ms, the loop stalls twice in eight
@@ -125,6 +124,23 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
+
+
+def should_animate(step: int | None, dragging: bool) -> bool:
+    """Whether a move between lines should glide or simply land.
+
+    A move within the visible column animates, in either direction — going back
+    a line should travel just as the next one does. A longer jump is a
+    discontinuity, and animating one is how a view ends up chasing itself across
+    a song.
+
+    Never while the window is being dragged. The whole lyric column is dirty for
+    every frame of a glide, and on top of a moving window that measured 5.41 ms
+    a frame against 1.39 for the sweep alone, with a worst case of 45 ms —
+    nearly three frames, which is what a hand feels as a stutter. Nobody follows
+    a 460 ms glide while moving the panel it is drawn on.
+    """
+    return step is not None and 0 < step <= CONTEXT and not dragging
 
 
 def compact_target(state: str, currently_compact: bool) -> bool:
@@ -453,11 +469,7 @@ class Overlay:
         self.line_index = index
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
-        # A move within the visible column animates, in either direction — going
-        # back a line should travel just as the next one does. A longer jump is
-        # a discontinuity, and animating one is how a view ends up chasing
-        # itself across a song.
-        self._retarget(indices, animate=step is not None and 0 < step <= CONTEXT)
+        self._retarget(indices, animate=should_animate(step, self._dragging))
         self._restyle(indices)
 
     def _nudge(self, dt: float):
@@ -980,7 +992,7 @@ class Overlay:
             interval = FAST_TICK_MS
 
         lyr = self.lyrics
-        if lyr is not None and lyr.synced and lyr.lines and not self._dragging:
+        if lyr is not None and lyr.synced and lyr.lines:
             pos = snap.live_position() + self.offset
             if self._awaiting_seek is not None:
                 target, since = self._awaiting_seek
@@ -1003,12 +1015,6 @@ class Overlay:
                 # of the frame at full strength and be clipped rather than fade.
                 self._restyle()
                 interval = FAST_TICK_MS
-            if self._dragging:
-                # Nobody reads the lyrics while dragging the window they are on.
-                # Measured: repainting at 60 Hz pushes a move's worst case from
-                # 2.6 ms to 14.7 ms, which is most of a frame — the animation
-                # costs the drag far more than the drag costs the animation.
-                interval = DRAG_TICK_MS
             active = self._views.get(self.line_index)
             if active is not None and active.words:
                 word, fraction = lyr.word_progress_at(self.line_index,
