@@ -347,3 +347,62 @@ def test_aligning_measures_against_the_recording_not_the_video(store_offsets):
                      position=23.97, cuts=Cuts(((0.0, 21.8),)))
     Overlay._align(panel)
     assert abs(panel.offset) < 0.01
+
+
+class Settling:
+    """Only what `_settle_cuts` reads."""
+
+    def __init__(self, cuts):
+        self._cuts, self._cuts_checked = cuts, None
+
+
+def _settle(cuts, last_line, video_len):
+    from types import SimpleNamespace
+
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+    panel = Settling(cuts)
+    Overlay._settle_cuts(panel, Lyrics(lines=[(1.0, "a"), (last_line, "z")],
+                                       synced=True),
+                         SimpleNamespace(duration=video_len))
+    return panel
+
+
+def test_impossible_cuts_are_dropped_before_they_move_a_line():
+    # The real case: LOYALTY. has 24 s marked in the middle and no opening
+    # stretch, so there is nothing left worth keeping.
+    from lyrica.sponsorblock import Cuts
+
+    panel = _settle(Cuts(((97.061, 121.53), (214.202, 218.101))), 220.73, 239.5)
+    assert panel._cuts.spans == ()
+
+
+def test_an_impossible_middle_does_not_cost_the_intro():
+    from lyrica.sponsorblock import Cuts
+
+    panel = _settle(Cuts(((0.0, 21.8), (100.0, 190.0))), 220.0, 239.5)
+    assert panel._cuts.spans == ((0.0, 21.8),)
+
+
+def test_cuts_that_fit_are_left_alone():
+    from lyrica.sponsorblock import Cuts
+
+    spans = ((0.0, 21.808), (249.38, 281.521))
+    assert _settle(Cuts(spans), 211.0, 282.0)._cuts.spans == spans
+
+
+def test_the_check_runs_once_per_set():
+    # It cannot change while the track does not, and it runs from the tick.
+    from types import SimpleNamespace
+
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+    from lyrica.sponsorblock import Cuts
+
+    panel = Settling(Cuts(((0.0, 21.8),)))
+    lyr = Lyrics(lines=[(1.0, "a"), (211.0, "z")], synced=True)
+    snap = SimpleNamespace(duration=282.0)
+    Overlay._settle_cuts(panel, lyr, snap)
+    first = panel._cuts
+    Overlay._settle_cuts(panel, lyr, snap)
+    assert panel._cuts is first

@@ -228,6 +228,7 @@ class Overlay:
         self._views_width = 0
         self._art_done = True
         self._cuts = sponsorblock.Cuts()
+        self._cuts_checked = None
         self._revealed = True
         self._reveal_by = 0.0
 
@@ -799,6 +800,7 @@ class Overlay:
         self._art_done = False
         self._revealed = False
         self._cuts = sponsorblock.Cuts()
+        self._cuts_checked = None
         self._reveal_by = time.monotonic() + REVEAL_WAIT_S
         self._clear_views()
 
@@ -1029,6 +1031,26 @@ class Overlay:
             self._revealed = settled or time.monotonic() >= self._reveal_by
         return self._revealed
 
+    def _settle_cuts(self, lyr: Lyrics, snap: Snapshot) -> None:
+        """Refuse a set of cuts the recording cannot fit inside the video.
+
+        Checked here rather than where they arrive because it takes the lyrics,
+        and the two are fetched in parallel. Once per set: the answer cannot
+        change while the track does not.
+        """
+        if self._cuts_checked is self._cuts or not self._cuts.spans or not lyr.lines:
+            return
+        end = lyr.lines[-1][0]
+        for fewer in (self._cuts, self._cuts.leading(), sponsorblock.Cuts()):
+            if fewer.fits(end, snap.duration):
+                if fewer.spans != self._cuts.spans:
+                    logger.info("cuts %s leave no room for a %.0fs recording in "
+                                "a %.0fs video; keeping %s", self._cuts.spans,
+                                end, snap.duration, fewer.spans)
+                    self._cuts = fewer
+                break
+        self._cuts_checked = self._cuts
+
     def _resolved_name(self) -> tuple:
         """What the song turned out to be called, or () while nothing is known.
 
@@ -1236,6 +1258,7 @@ class Overlay:
 
         lyr = self.lyrics
         if lyr is not None and lyr.synced and lyr.lines:
+            self._settle_cuts(lyr, snap)
             # Through the cuts first: the player's position is a place in a
             # video, and the lyrics are written against the recording. Without
             # any they are the same number.

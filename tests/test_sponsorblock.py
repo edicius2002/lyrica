@@ -165,3 +165,34 @@ def test_a_cached_miss_is_believed(store, monkeypatch):
     assert len(calls) == 1
     from lyrica.sponsorblock import _path
     assert json.loads(_path("v").read_text(encoding="utf-8")) is None
+
+
+# --- cuts that cannot be true ------------------------------------------------
+
+def test_cuts_that_leave_no_room_for_the_recording_are_refutable():
+    # LOYALTY. (Dlh-dzB2U4Y): 24 s marked in the middle of a 239.5 s video, and
+    # the recording's last line is at 220.7 s. Taking those 24 s out puts that
+    # line nine seconds past the end of the video it is playing in.
+    cuts = Cuts(((97.061, 121.53), (214.202, 218.101)))
+    assert cuts.to_video(220.73) == pytest.approx(249.1, abs=0.1)
+    assert not cuts.fits(220.73, 239.5)
+
+
+def test_a_set_that_does_fit_is_not_refused():
+    # Despacito: 21.8 s of intro and an outro, in a 282 s video.
+    cuts = Cuts(((0.0, 21.808), (249.38, 281.521)))
+    assert cuts.fits(211.0, 282.0)
+
+
+def test_nothing_to_check_against_refuses_nothing():
+    cuts = Cuts(((97.0, 121.5),))
+    assert cuts.fits(220.0, 0.0), "no video length known"
+    assert cuts.fits(0.0, 239.5), "no lyrics known"
+
+
+def test_only_the_opening_stretch_is_kept_when_the_set_cannot_be():
+    # Across fifteen videos an opening segment was right eleven times of twelve;
+    # a stretch in the middle appeared twice and was wrong once.
+    assert Cuts(((0.0, 21.8), (100.0, 130.0))).leading().spans == ((0.0, 21.8),)
+    assert Cuts(((97.0, 121.5),)).leading().spans == ()
+    assert Cuts().leading().spans == ()
