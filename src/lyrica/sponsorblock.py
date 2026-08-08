@@ -89,6 +89,29 @@ class Cuts:
             removed += min(video_t, end) - start
         return video_t - removed
 
+    def leading(self) -> "Cuts":
+        """Only the opening stretch, which is the half the evidence supports.
+
+        Across fifteen videos an opening segment was right eleven times of
+        twelve; a stretch in the middle appeared in two, and one of those two
+        removed time the recording still contains. When the whole set cannot be
+        true, this is the part worth keeping.
+        """
+        return Cuts(self.spans[:1]) if self.intro else Cuts()
+
+    def fits(self, song_end: float, video_len: float, slack: float = 4.0) -> bool:
+        """Whether a recording this long can sit inside a video that long.
+
+        Cuts are submitted by anyone, for a purpose next to but not the same as
+        this one, and a stretch that is off-topic on screen may still be in the
+        record. That case is refutable with arithmetic rather than with
+        judgement: LOYALTY. is marked with 24 s in the middle, and removing them
+        puts the song's last line nine seconds past the end of its own video.
+        """
+        if video_len <= 0 or song_end <= 0:
+            return True
+        return self.to_video(song_end) <= video_len + slack
+
     def to_video(self, song_t: float) -> float:
         """The playhead a moment of the recording sits at. Inverse of `to_song`."""
         at = song_t
