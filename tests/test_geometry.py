@@ -137,3 +137,27 @@ def test_art_that_is_still_current_is_taken():
     art = ("thumb", None, b"current")
     Overlay._offer_art(panel, 3, panel._shape_gen, art)
     assert panel._pending_art is art
+
+
+def test_a_line_moves_to_the_new_centre_when_the_window_widens(tk_root):
+    # Every character's x is computed once, from the centre the window had when
+    # the line was built, and a line only ever moves vertically afterwards. A
+    # panel coming back out of its compact size left the lyrics off to one side.
+    import tkinter as tk
+
+    from lyrica.lineview import LineView
+    from lyrica.palette import DEFAULT
+
+    def centre(view):
+        return (min(s for s, _ in view._row_spans)
+                + max(e for _, e in view._row_spans)) / 2
+
+    view = LineView(tk.Canvas(tk_root, width=900, height=200), 394, 40.0,
+                    "y no me digas que ya no me quieres", [],
+                    font=("Segoe UI", 20), wrap=700, palette=DEFAULT)
+    assert abs(centre(view) - 394) < 1
+    view.recentre(504)
+    assert abs(centre(view) - 504) < 1
+    view.recentre(504)                      # idempotent
+    assert abs(centre(view) - 504) < 1
+    view.destroy()

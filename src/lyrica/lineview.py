@@ -45,6 +45,7 @@ class LineView:
         self.words = words
         self.feather = FEATHER_PX * scale
         self.y = float(y)
+        self._cx = float(cx)
         self._items: list = []      # [centre_x, row, item, colour]
         self._outline: list = []
         self._word_chars: list[int] = []   # timed token -> its first character
@@ -104,6 +105,25 @@ class LineView:
             for item in self.item_ids():
                 self.canvas.move(item, 0, delta)
             self.y += delta
+
+    def recentre(self, cx: float) -> None:
+        """Shift the whole line to a new horizontal centre.
+
+        Every character's x is computed once, from the centre the window had
+        when the line was built, and moving vertically is all that ever happens
+        to a line afterwards. So a window that changes width leaves its lines
+        centred on a box that no longer exists — which is what put the lyrics
+        off to one side after the panel came back out of its compact size.
+        """
+        delta = round(cx - self._cx)
+        if not delta:
+            return
+        for item in self.item_ids():
+            self.canvas.move(item, delta, 0)
+        self._cx += delta
+        for entry in self._items:
+            entry[0] += delta
+        self._row_spans = [(a + delta, b + delta) for a, b in self._row_spans]
 
     def item_ids(self):
         yield from self._outline
