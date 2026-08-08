@@ -1145,6 +1145,14 @@ class Overlay:
                 else:
                     pos = assumed                   # trust the jump, not the poll
             index = lyr.line_index_at(pos + LINE_LEAD_S)
+            # Before the first line there is no active line, and the panel used
+            # to sit empty until the singing started — which on a video with a
+            # twenty-second intro is twenty seconds of the overlay pretending it
+            # knows less than it does. The song is identified and its words are
+            # already here, so the first line waits on screen instead, unlit.
+            waiting = index < 0
+            if waiting:
+                index = 0
             if index != self.line_index:
                 self._go_to_line(index, lyr)
 
@@ -1155,13 +1163,19 @@ class Overlay:
                 self._restyle()
                 interval = FAST_TICK_MS
             active = self._views.get(self.line_index)
-            if active is not None and active.words:
+            if active is None:
+                pass
+            elif waiting:
+                # Held at the unsung level whether or not it has word timings:
+                # nothing has been sung yet, and that is precisely what it says.
+                active.show_inactive(self.palette.unsung)
+            elif active.words:
                 word, fraction = lyr.word_progress_at(self.line_index,
                                                       pos + WORD_LEAD_S)
                 active.show_sweep(word, fraction)
                 if word >= 0:
                     interval = FAST_TICK_MS
-            elif active is not None:
+            else:
                 # No word timing for this line: light all of it. Leaving it dim
                 # would say none of it has been sung, about the line playing.
                 active.show_lit()

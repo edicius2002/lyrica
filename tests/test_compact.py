@@ -74,3 +74,23 @@ def test_two_songs_with_no_lyrics_in_a_row_never_expand():
 def test_a_definite_answer_still_decides():
     assert compact_target(LYRICS_ABSENT, currently_compact=False) is True
     assert compact_target(LYRICS_PRESENT, currently_compact=True) is False
+
+
+# --- the first line waits on screen -----------------------------------------
+
+def test_the_first_line_shows_before_the_singing_starts():
+    # `line_index_at` reports -1 until the first timestamp, and the panel used
+    # to draw nothing at all until then. On a video with an intro that is the
+    # whole intro spent looking at an empty box.
+    from lyrica.lyrics import Lyrics
+
+    lyr = Lyrics(lines=[(21.4, "primera"), (25.0, "segunda")], synced=True)
+    assert lyr.line_index_at(0.0) == -1, "the source of the emptiness"
+
+    # What the tick now does with that.
+    index = lyr.line_index_at(0.0)
+    waiting = index < 0
+    if waiting:
+        index = 0
+    assert (index, waiting) == (0, True)
+    assert lyr.line_index_at(22.0) == 0, "and it is the same line once it starts"

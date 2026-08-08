@@ -126,7 +126,10 @@ def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
     needs somewhere dark to travel through.
     """
     dark = tuple(palette.backdrop)
-    mid = rgb_of(palette.unsung)
+    # The beam's own mid, not the unsung line's. They were the same number until
+    # the unlit text was brightened for legibility, at which point the ring lost
+    # the dark ground the head needs to travel through.
+    mid = rgb_of(palette.beam)
     head = rgb_of(palette.sung)
     out = []
     for i in range(steps):

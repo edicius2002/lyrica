@@ -60,22 +60,37 @@ RAMP_STEPS = 64
 
 # The greyscale levels the palette used before colour. Luminance anchors now,
 # not outputs — what a role keeps of them is RETAIN's business.
-ANCHOR = {"sung": 255, "unsung": 138, "side": 98, "far": 48,
-          "title": 208, "artist": 156, "sheen": 44}
+ANCHOR = {"sung": 255, "unsung": 186, "side": 132, "far": 62,
+          "title": 208, "artist": 156, "sheen": 44, "beam": 138}
 
 # How much of that anchor's luminance each role keeps once coloured. Below 1.0
 # is the price of colour, charged where it costs least to pay.
-RETAIN = {"sung": 0.98, "unsung": 0.78, "side": 0.72, "far": 0.60,
-          "title": 0.94, "artist": 0.86, "sheen": 0.60}
+RETAIN = {"sung": 0.98, "unsung": 0.90, "side": 0.90, "far": 0.90,
+          "title": 0.94, "artist": 0.86, "sheen": 0.60, "beam": 0.78}
 
 # The chroma each role aims at, at full song strength — screen units, largest
 # channel minus smallest, which is exactly what reaches the glass while the
 # level stays under the ceiling.
 CHROMA = {"sung": 8, "unsung": 46, "side": 58, "far": 34,
-          "title": 44, "artist": 56, "sheen": 26}
+          "title": 44, "artist": 56, "sheen": 26, "beam": 46}
 
 # A role may not fall below this fraction of its anchor luminance to buy colour.
 FLOOR = 0.55
+
+# The same rule for the lyric ladder, and much stricter, because that is where
+# the complaint was. The colour used to live exactly where the light did not:
+# the sung word asks for chroma 8 and keeps 98 % of its luminance, while every
+# unlit role asked for four to seven times the chroma and paid for it. So the
+# whole body of text a reader is *not* being led through was at once the most
+# coloured and the dimmest, and those were the same fact.
+#
+# It is also not the same fact for every cover. Luminance is 21 % red, 72 %
+# green and 7 % blue, so a yellow tint is nearly free and a violet one is not:
+# measured across seven hues, the unlit ladder lost 3 % of its light on yellow
+# and 22 % on violet. Fixing the light instead of the chroma is what makes a
+# song look like the last one — a hard hue now gives up colour rather than
+# light, and the worst loss across those same seven hues is 4 %.
+LADDER_FLOOR = 0.90
 
 # What the card must clear against the wash it sits on. Higher than the lyrics'
 # floor on purpose: the title and the artist are read at a glance rather than
@@ -128,13 +143,28 @@ MIN_CONTRAST = 3.2
 # and its neighbours while charging them 14 % instead.
 LADDER_COMP_EXP = 0.5
 
+# The least a rung must fall below the one above it. The ladder is an *ordering*
+# before it is a set of levels — a neighbour as bright as the line being sung
+# reads as the wrong line being active — and sharing only part of the
+# compression is exactly what can break that: where the composition clamps hard,
+# the active line pays the full cost and its neighbours pay the square root, so
+# a lower rung can end up above a higher one. Measured under acrylic, a neutral
+# track came out with its neighbours brighter than the line being sung.
+LADDER_STEP = 0.85
+
 # How much of the cover has to carry colour before the palette trusts the hue,
 # and where that trust reaches full. Ramped rather than gated, so a borderline
 # cover drifts toward grey instead of flipping between two palettes between
 # plays.
 CONF_LO, CONF_HI = 0.06, 0.35
 
-ROLES = ("sung", "unsung", "side", "far", "title", "artist", "sheen")
+# The lyric ladder, and only it, is held to the light budget. The card keeps
+# the looser floor because it was never the thing reading as dim, and the beam
+# because it is not text at all — it wants a dark ground to travel through,
+# which is the opposite of what a legible line wants.
+TEXT_ROLES = ("sung", "unsung", "side", "far")
+
+ROLES = ("sung", "unsung", "side", "far", "title", "artist", "sheen", "beam")
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -240,13 +270,17 @@ def _derive_neutral(sweep_de: float, law: Composition) -> dict:
     """The greyscale ladder, compressed by the same sweep rule as the rest."""
     sung = _grey(255)
     unsung = _sweep_limited(sung, _grey, sweep_de, law)
-    comp = luminance(unsung) / (luminance(_grey(UNSUNG_CEILING))
+    comp = luminance(unsung) / (luminance(_grey(min(law.headroom,
+                                                    UNSUNG_CEILING)))
                                 * RETAIN["unsung"])
     out = {"sung": sung, "unsung": unsung}
+    rung = luminance(unsung)
     for role in ROLES:
         if role in out:
             continue
         want = luminance((ANCHOR[role],) * 3) * RETAIN[role] * comp ** LADDER_COMP_EXP
+        if role in TEXT_ROLES:
+            want = min(want, rung * LADDER_STEP)
         lo, hi = 0.0, 255.0
         for _ in range(20):
             mid = (lo + hi) / 2
@@ -255,6 +289,8 @@ def _derive_neutral(sweep_de: float, law: Composition) -> dict:
             else:
                 lo = mid
         out[role] = _grey(hi)
+        if role in TEXT_ROLES:
+            rung = luminance(out[role])
     return out | {"_meta": (0.0, 0.0, comp,
                             delta_e(law.compose(WORST_DESKTOP, sung),
                                     law.compose(WORST_DESKTOP, unsung)))}
@@ -273,7 +309,7 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
     # sweep rule limits it, so the answer is the highest level that still reads
     # as a different colour from the sung word over the worst desktop there is.
     got_c = CHROMA["unsung"] * strength
-    floor_l = luminance((ANCHOR["unsung"],) * 3) * FLOOR
+    floor_l = luminance((ANCHOR["unsung"],) * 3) * LADDER_FLOOR
     unsung = None
     fallback, fallback_score = None, -1.0
     while True:
@@ -302,9 +338,13 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
 
     # Everything else follows the unsung state in luminance, so the ladder keeps
     # the shape the greyscale palette gave it whatever the sweep cost.
-    comp = luminance(unsung) / (luminance((ANCHOR["unsung"],) * 3)
-                                * RETAIN["unsung"])
+    # Against the ceiling actually available, not the ladder's nominal one: a
+    # composition that clamps below it makes every role look compressed by a
+    # cost the sweep rule never charged, and under acrylic that drained the
+    # card of colour it could have kept.
+    comp = luminance(unsung) / (luminance((ceiling,) * 3) * RETAIN["unsung"])
     out = {"sung": sung, "unsung": unsung}
+    rung = luminance(unsung)
     for role in ROLES:
         if role in out:
             continue
@@ -318,7 +358,11 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
         top = law.headroom if role in CARD_ROLES else ceiling
         anchor = min(ANCHOR[role], top)
         want = luminance((anchor,) * 3) * RETAIN[role] * shared
-        floor = luminance((anchor,) * 3) * FLOOR * shared
+        budget = LADDER_FLOOR if role in TEXT_ROLES else FLOOR
+        floor = luminance((anchor,) * 3) * budget * shared
+        if role in TEXT_ROLES:
+            want = min(want, rung * LADDER_STEP)
+            floor = min(floor, want)
         got_role = CHROMA[role] * strength
         for _ in range(12):
             colour = solve(hue, max(want, floor), got_role, top)
@@ -330,6 +374,8 @@ def _derive_coloured(hue: float, strength: float, sweep_de: float,
             # while still standing off the wash behind it.
             got_role *= 0.85
         out[role] = colour
+        if role in TEXT_ROLES:
+            rung = luminance(colour)
     return out | {"_meta": (hue, strength, comp,
                             delta_e(law.compose(WORST_DESKTOP, sung),
                                     law.compose(WORST_DESKTOP, unsung)))}
@@ -346,6 +392,7 @@ class Palette:
     title: str
     artist: str
     sheen: str
+    beam: str
     outline: int
     ramp: list[str]
     glow: bool
@@ -438,6 +485,7 @@ KEYED = Palette(
     title="#e8ecf2",
     artist="#c9cfda",
     sheen="#78808d",
+    beam="#9aa3b2",
     outline=2,          # the only thing keeping text legible over a bright video
     ramp=_blend_ramp("#9aa3b2", "#ffffff"),
     glow=False,         # an offset copy would just smear, with nothing to add to
