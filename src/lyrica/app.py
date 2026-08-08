@@ -5,7 +5,8 @@ lyrics over everything else, swept word by word.
 
 Run:      python -m lyrica   (or the `lyrica` console script)
 Keys:     Esc = quit | right click = quit | drag with mouse = move
-          +/- = nudge sync offset by ±0.25 s  (needs the overlay focused)
+          +/- = nudge this track's sync offset by ±0.25 s, remembered
+                (needs the overlay focused)
 Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
           Ctrl+Alt+plus / Ctrl+Alt+minus = resize | Ctrl+Alt+0 = designed size
 """
@@ -501,7 +502,7 @@ class Overlay:
     def _nudge(self, dt: float):
         self.offset = max(-config.OFFSET_LIMIT_S,
                           min(config.OFFSET_LIMIT_S, self.offset + dt))
-        config.save_offset(self.offset)
+        config.save_offset(self.offset, self.track_key)
 
     # --- collapsing to the card ---
     def _card_span(self) -> int:
@@ -771,7 +772,7 @@ class Overlay:
         if not artwork.available():
             return
 
-        artist, title = snap.norm_artist_title()
+        candidates = snap.lookup_candidates()
         album = snap.album
 
         def work():
@@ -781,7 +782,7 @@ class Overlay:
             # the swap to the sharp one was visible — and a cover that changes
             # under you reads worse than one that arrives a moment late.
             wanted = max(600, self._thumb_size * 4)
-            data = (artwork.best_cover(artist, title, album, size=wanted)
+            data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
                     or self.reader.read_artwork())
             if not data or gen != self.fetch_gen:
                 return
@@ -913,19 +914,32 @@ class Overlay:
         if len(box) >= 2:
             self.canvas.coords(self._thumb_image, box[0], box[1])
 
+    def _resolved_name(self) -> tuple:
+        """What the song turned out to be called, or () while nothing is known.
+
+        A browser states a track several defensible ways and only one of them
+        finds it. Once one has, naming the card any other way is contradicting
+        the lyrics on screen: the panel read "BillieEilishVEVO — Billie Eilish -
+        CHIHIRO" over a word-timed match found as "Billie Eilish — CHIHIRO".
+        """
+        lyr = self.lyrics
+        queried = getattr(lyr, "queried", ()) if lyr is not None else ()
+        return queried if len(queried) == 2 and all(queried) else ()
+
     def _card_for(self, snap: Snapshot) -> tuple[str, str]:
         # Short-circuited on the raw inputs. Measuring text costs a round trip
         # into Tk, and this runs on every tick where the song changes a few
         # times an hour — a millisecond spent re-deriving an unchanged string
         # is a millisecond mouse events spend queued.
-        raw = (snap.ok, snap.artist, snap.title, round(self.offset, 2))
+        found = self._resolved_name()
+        raw = (snap.ok, snap.artist, snap.title, found, round(self.offset, 2))
         if raw == self._card_raw:
             return self._card_text or ("", "")
         self._card_raw = raw
 
         if not snap.ok:
             return "", ""
-        artist, title = snap.norm_artist_title()
+        artist, title = found or snap.norm_artist_title()
         if self.offset:
             title += f"   [{self.offset:+.2f}s]"
         limit = self.wrap - self._thumb_size
@@ -1051,6 +1065,9 @@ class Overlay:
         if snap.ok and snap.track_key() != self.track_key:
             self.track_key = snap.track_key()
             self.line_index = -1
+            # Before the fetch, so a track with a remembered nudge is right from
+            # its first frame rather than jumping once the lyrics land.
+            self.offset = config.saved_offset(self.track_key)
             self._start_fetch(snap)
 
         self._apply_art()

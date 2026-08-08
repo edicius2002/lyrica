@@ -177,3 +177,30 @@ def test_a_source_that_answers_nothing_is_still_a_miss(monkeypatch):
     assert best_cover("Nobody", "Nothing", "Nowhere") is None
     assert best_cover("Nobody", "Nothing", "Nowhere") is None
     assert len(asked) == 2, "the second play asked again"
+
+
+def test_the_cover_falls_through_to_the_next_reading(monkeypatch):
+    # A channel name is not a release, so the first reading finds nothing and
+    # the video's own letterboxed thumbnail used to be what was shown.
+    asked = []
+
+    def apple(artist, title, album="", size=600):
+        asked.append(artist)
+        return b"sleeve" if artist == "Billie Eilish" else None
+
+    monkeypatch.setattr(artwork, "fetch_cover", apple)
+    monkeypatch.setattr(artwork, "fetch_cover_discogs", lambda *a, **k: None)
+    got = artwork.best_cover_for_candidates(
+        [("BillieEilishVEVO", "Billie Eilish - CHIHIRO"),
+         ("Billie Eilish", "CHIHIRO")])
+    assert got == b"sleeve"
+    assert asked == ["BillieEilishVEVO", "Billie Eilish"]
+
+
+def test_the_first_reading_that_answers_ends_the_search(monkeypatch):
+    asked = []
+    monkeypatch.setattr(artwork, "fetch_cover",
+                        lambda a, *r, **k: asked.append(a) or b"sleeve")
+    monkeypatch.setattr(artwork, "fetch_cover_discogs", lambda *a, **k: None)
+    assert artwork.best_cover_for_candidates([("A", "B"), ("C", "D")]) == b"sleeve"
+    assert asked == ["A"]

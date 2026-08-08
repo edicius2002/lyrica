@@ -42,6 +42,11 @@ class Lyrics:
     source: str = ""
     instrumental: bool = False
     exact: bool = False  # the provider identified the track, rather than guessing at it
+    # The (artist, title) that produced this answer. A browser can state a track
+    # several defensible ways and only one of them finds it, so the reading that
+    # worked is worth keeping: it is the closest thing to a correct name for the
+    # song that anything in the process knows.
+    queried: tuple = ()
 
     @property
     def precision(self) -> Precision:

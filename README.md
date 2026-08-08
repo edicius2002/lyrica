@@ -44,7 +44,7 @@ Play something and the overlay appears at the bottom center of the screen.
 |---|---|
 | Move the overlay | Drag with the mouse |
 | Quit | `Esc` or right click |
-| Nudge sync offset | `+` / `-` (±0.25 s) |
+| Nudge sync offset | `+` / `-` (±0.25 s, remembered per track) |
 | Hide / show | `Ctrl`+`Alt`+`K` |
 | Quit | `Ctrl`+`Alt`+`Q` |
 | Make it bigger / smaller | `Ctrl`+`Alt`+`+` / `Ctrl`+`Alt`+`-` |
@@ -56,7 +56,7 @@ means clicking it, and clicking it seeks to a line. `Esc` and `+` / `-` still
 need it focused. On other platforms the size keys need the focus too.
 
 A size chosen this way is remembered, and takes over from `LYRICA_SIZE`. So are
-the place you drag the window to and any sync offset you nudge in — all of it in
+the place you drag the window to and the sync offset of every track you nudge — all of it in
 `settings.json` beside the cache.
 
 ## The border reacts to the music

@@ -29,6 +29,14 @@ JUNK_TAIL = re.compile(
 
 SEPARATORS = (" - ", " – ", " — ", " | ")
 
+# What can join one artist to the next in a credit: "A, B - Title", "A & B",
+# "A feat. B". Used to tell a longer credit apart from a song whose name simply
+# begins with the artist's word.
+ARTIST_LIST = re.compile(
+    r"^\s*(?:[,&×+/]|(?:feat|ft|featuring|with|and|y|x|vs|con)\.?\s)",
+    re.IGNORECASE,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +78,15 @@ def strip_artist_prefix(artist: str, title: str) -> str:
             return rest[len(sep):].strip()
     if rest.startswith(("-", "–", "—", "|", ":")):
         return rest[1:].strip()
+    # "Tiago PZK, Myke Towers - Traductor" under an artist field of "Tiago PZK":
+    # the stated artist is only the first name in a longer credit, so the whole
+    # credit is the prefix and none of it is the song. Accepted only when what
+    # follows the artist reads as a credit — punctuation or a joining word — so
+    # a track called "Airbag" by an artist called "Air" is left alone.
+    if ARTIST_LIST.match(rest):
+        for sep in SEPARATORS:
+            if sep in rest:
+                return rest.split(sep, 1)[1].strip()
     return title
 
 
@@ -123,12 +140,16 @@ class Snapshot:
 
         add(*self.norm_artist_title())
 
-        # The artist field may be an uploader handle rather than a performer.
-        # Only worth trying when the title carries a separator and does not
-        # already contain the stated artist.
+        # The artist field may be an uploader handle rather than a performer,
+        # or only the first name of a longer credit. Either way the title's own
+        # left-hand side is a reading worth trying; when it says the same thing
+        # as the first candidate, `add` drops it as a duplicate. It used to be
+        # skipped whenever the artist appeared anywhere in the title, which also
+        # skipped it for "Tiago PZK, Myke Towers - Traductor" — where the split
+        # is the only reading that names the song.
         if self.is_browser:
             split_artist, split_title = split_browser_title(self.title)
-            if split_artist and self.artist.lower() not in self.title.lower():
+            if split_artist:
                 add(split_artist, split_title)
 
         add(self.artist, self.title)

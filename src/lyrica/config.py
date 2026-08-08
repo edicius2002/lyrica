@@ -231,9 +231,7 @@ def _is_pair(value) -> bool:
             and all(isinstance(v, (int, float)) for v in value))
 
 
-def saved_offset() -> float:
-    """The sync nudge, in seconds. Zero if there is none or it is unusable."""
-    value = settings().get("offset")
+def _bounded_offset(value) -> float:
     if not isinstance(value, (int, float)):
         return 0.0
     # Bounded, because a nudge is a correction and not a seek: anything past a
@@ -242,8 +240,40 @@ def saved_offset() -> float:
     return max(-OFFSET_LIMIT_S, min(OFFSET_LIMIT_S, float(value)))
 
 
-def save_offset(seconds: float) -> None:
-    save_setting("offset", round(seconds, 2))
+# How many tracks keep a remembered nudge. A nudge is worth a few bytes and
+# almost never revisited, so the cap is only there to stop the settings file
+# growing without bound over years of listening.
+OFFSET_MEMORY = 200
+
+
+def saved_offset(track: str = "") -> float:
+    """The sync nudge for one track, in seconds.
+
+    Per track because the thing it corrects is per track: a video with eight
+    seconds of intro before the song needs eight seconds that no other track
+    wants. One shared number meant fixing a video broke the next one.
+    """
+    offsets = settings().get("offsets")
+    if track and isinstance(offsets, dict) and track in offsets:
+        return _bounded_offset(offsets[track])
+    # Whatever a single global nudge was set to before nudges were per track.
+    # Still honoured as the starting point for a track that has none of its own.
+    return _bounded_offset(settings().get("offset"))
+
+
+def save_offset(seconds: float, track: str = "") -> None:
+    if not track:
+        save_setting("offset", round(seconds, 2))
+        return
+    stored = settings().get("offsets")
+    offsets = dict(stored) if isinstance(stored, dict) else {}
+    # Re-inserted rather than updated in place, so the dictionary's order is
+    # least-recently-set first and the trim below drops the right end.
+    offsets.pop(track, None)
+    offsets[track] = round(seconds, 2)
+    for stale in list(offsets)[:-OFFSET_MEMORY]:
+        del offsets[stale]
+    save_setting("offsets", offsets)
 
 
 def size_scale() -> float:
