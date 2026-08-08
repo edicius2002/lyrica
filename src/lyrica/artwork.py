@@ -11,6 +11,7 @@ it. That is why the brightness here can be so low and still be visible at all.
 """
 import hashlib
 import io
+import json
 import logging
 import os
 import time
@@ -69,20 +70,7 @@ def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> by
     Returns None on anything unexpected: a missing cover is a cosmetic loss,
     and the session's own thumbnail is already on screen by the time this runs.
     """
-    query = " ".join(part for part in (artist, title) if part).strip()
-    if not query:
-        return None
-    try:
-        r = requests.get(SEARCH_URL,
-                         params={"term": query, "entity": "song", "limit": 3},
-                         headers=HEADERS, timeout=8)
-        r.raise_for_status()
-        results = r.json().get("results") or []
-    except (requests.RequestException, ValueError):
-        logger.debug("cover search failed for %r", query, exc_info=True)
-        raise Unreachable from None
-
-    best = _closest(results, artist, title, album)
+    best = _apple_match(artist, title, album)
     if best is None:
         return None
     url = best.get("artworkUrl100") or best.get("artworkUrl60") or ""
@@ -98,6 +86,52 @@ def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> by
     except requests.RequestException:
         logger.debug("cover download failed", exc_info=True)
         raise Unreachable from None
+
+
+def _match_dir() -> Path:
+    path = config.cache_root() / "matches"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _apple_match(artist: str, title: str, album: str = "") -> dict | None:
+    """The catalogue entry that looks like this track, or None.
+
+    Cached, because two callers want it — the cover and the name — and a search
+    that ran for one should not run again for the other. Misses are cached too:
+    a track no catalogue has is the ordinary case for a live set or a mix.
+    """
+    query = " ".join(part for part in (artist, title) if part).strip()
+    if not query:
+        return None
+    path = _match_dir() / (hashlib.sha1(
+        f"{artist.lower()}|{title.lower()}|{album.lower()}".encode(),
+        usedforsecurity=False).hexdigest() + ".json")
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    else:
+        return cached or None
+
+    try:
+        r = requests.get(SEARCH_URL,
+                         params={"term": query, "entity": "song", "limit": 3},
+                         headers=HEADERS, timeout=8)
+        r.raise_for_status()
+        results = r.json().get("results") or []
+    except (requests.RequestException, ValueError):
+        logger.debug("cover search failed for %r", query, exc_info=True)
+        # Not written to the cache: a search that could not be made says nothing
+        # about whether the catalogue has the track.
+        raise Unreachable from None
+
+    best = _closest(results, artist, title, album)
+    try:
+        path.write_text(json.dumps(best or {}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        logger.debug("could not cache the catalogue match", exc_info=True)
+    return best
 
 
 def _closest(results: list, artist: str, title: str, album: str):
@@ -125,7 +159,12 @@ def _closest(results: list, artist: str, title: str, album: str):
             score += 1
         if score > best_score:
             best, best_score = item, score
-    return best if best_score >= 3 else None
+    if best_score < 3:
+        return None
+    # Kept on the item so a caller with a stricter bar than "which picture"
+    # can apply it, and so it survives the cache alongside the entry.
+    best["_score"] = best_score
+    return best
 
 
 def discogs_token() -> str:
@@ -312,6 +351,51 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> byt
     if data or not unreachable:
         store_cover(artist, title, album, data)
     return data
+
+
+# The bar for renaming the song on screen, above the bar for choosing a picture.
+# Showing the wrong sleeve is a cosmetic loss; showing the wrong name tells
+# somebody something false about what they are listening to. Four takes the
+# artist matching *and* the title matching exactly, where three takes a partial
+# title — enough to pick between three search results, not enough to contradict
+# what the player says the song is called.
+IDENTIFY_SCORE = 4.0
+
+
+@dataclass(frozen=True)
+class Release:
+    """What a catalogue says a track is. Empty when none recognised it."""
+
+    artist: str = ""
+    title: str = ""
+    album: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.artist and self.title)
+
+
+def identify(candidates: list, album: str = "") -> Release:
+    """What the catalogue calls this track, across every reading of the metadata.
+
+    A browser gives the channel's words for a song, and those are a description
+    of a video rather than a name for a track: "Tiago PZK, Myke Towers -
+    Traductor (Video Oficial)". A catalogue that recognises the same track knows
+    what it is actually called, who is actually credited, and — the part nothing
+    else in the process has for a browser at all — which record it came from.
+
+    The search this needs has already run for the cover, and its answer is
+    cached, so this costs nothing on top in the ordinary case.
+    """
+    for artist, title in candidates:
+        try:
+            item = _apple_match(artist, title, album)
+        except Unreachable:
+            continue
+        if item and item.get("_score", 0.0) >= IDENTIFY_SCORE:
+            return Release(artist=(item.get("artistName") or "").strip(),
+                           title=(item.get("trackName") or "").strip(),
+                           album=(item.get("collectionName") or "").strip())
+    return Release()
 
 
 def best_cover_for_candidates(candidates: list, album: str = "",

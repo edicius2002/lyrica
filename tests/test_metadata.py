@@ -221,10 +221,12 @@ def test_the_reading_survives_the_cache(tmp_path, monkeypatch):
 
 
 class Panel:
-    """Only the attribute `_resolved_name` reads."""
+    """Only the attributes `_resolved_name` reads."""
 
-    def __init__(self, lyrics=None):
+    def __init__(self, lyrics=None, identified=None):
+        from lyrica.artwork import Release
         self.lyrics = lyrics
+        self._identified = identified or Release()
 
 
 def test_the_card_is_named_after_the_reading_that_resolved():
@@ -305,3 +307,26 @@ def test_an_intro_longer_than_the_limit_is_clamped(store_offsets):
     panel = Aligning(Lyrics(lines=[(2.0, "x")], synced=True), position=500.0)
     Overlay._align(panel)
     assert panel.offset == -config.OFFSET_LIMIT_S
+
+
+def test_a_catalogue_entry_outranks_the_reading_that_found_the_lyrics():
+    # The reading is the wording that happened to work; the entry is a record of
+    # what the track is.
+    from lyrica.app import Overlay
+    from lyrica.artwork import Release
+    from lyrica.lyrics import Lyrics
+
+    panel = Panel(Lyrics(queried=("Tiago PZK", "Traductor")),
+                  Release(artist="Tiago PZK & Myke Towers", title="Traductor",
+                          album="Gotti"))
+    assert Overlay._resolved_name(panel) == ("Tiago PZK & Myke Towers", "Traductor")
+
+
+def test_a_half_empty_catalogue_entry_is_not_used():
+    from lyrica.app import Overlay
+    from lyrica.artwork import Release
+    from lyrica.lyrics import Lyrics
+
+    panel = Panel(Lyrics(queried=("Tiago PZK", "Traductor")),
+                  Release(artist="", title="Traductor"))
+    assert Overlay._resolved_name(panel) == ("Tiago PZK", "Traductor")
