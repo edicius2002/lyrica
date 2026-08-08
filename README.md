@@ -61,6 +61,38 @@ A size chosen this way is remembered, and takes over from `LYRICA_SIZE`. So are
 the place you drag the window to and the sync offset of every track you nudge — all of it in
 `settings.json` beside the cache.
 
+## How a word lights up
+
+Three things happen as the sweep reaches a word, and each is tunable because
+each was arrived at by measurement rather than by taste.
+
+The **front** is the band where a letter is part-way between sung and unsung.
+`LYRICA_SWEEP_FEATHER` sets its width in pixels, default 12. A letter is about
+18 wide and lasts about 29 ms in fast delivery against a 16 ms frame, so the
+useful span is narrow at both ends: at 40 there are two and a half letters in
+transition and no boundary at all, only a cloud, and under about 10 the
+transition is shorter than one frame and narrowing it further changes nothing
+that can be drawn.
+
+The **bloom** is the light a struck word leaves behind. `LYRICA_BLOOM` sets how
+long it lasts as a multiple of how long that word is sung for, default 1.0 — the
+light drains exactly as the word finishes. Not a number of seconds: the sweep
+crossing a word is already on the word's own clock, and a constant put the two
+in disagreement, spent before a long word was half lit and still burning after a
+short one had gone. `off` removes it.
+
+The **lift** is the word rising and settling. `LYRICA_LIFT` scales it, default
+1.0, `off` to remove it. Deliberately small: it stands in for the scaling the
+effect it imitates actually does, and too much of it reads as a bounce rather
+than as emphasis. There is no room to brighten a word instead — the sung colour
+is already at 253 of 255.
+
+The bloom is a real gaussian blur, drawn with PIL and handed to the canvas as an
+image rather than faked with offset copies of the glyph. That is not only
+truer — four copies two pixels apart double every curve — but twenty times
+cheaper per frame, since showing a different image costs 0.005 ms where
+recolouring four items costs 0.21.
+
 ## The border reacts to the music
 
 The panel's edge carries a slow light that brightens with what is playing. It

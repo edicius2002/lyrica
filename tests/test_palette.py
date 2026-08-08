@@ -306,10 +306,16 @@ def test_only_the_washed_palettes_fade_into_a_backdrop():
     assert not KEYED.washed
 
 
-def test_only_an_additive_surface_glows():
-    # An offset copy on a replacing surface smears rather than adding light.
+def test_a_wash_behind_the_words_is_what_allows_a_glow():
+    # It used to be limited to compositions that add light, on the reasoning
+    # that an offset copy elsewhere replaces what it lands on. True of the
+    # window's composition, but the copies are drawn on the canvas *under* the
+    # glyph, where a pale shape on a dark wash reads as a halo whatever the
+    # window then does with the result.
     assert pal_mod.for_song(FROSTED_CHROME, NEUTRAL).glow
-    assert not pal_mod.for_song(PANEL_CHROME, NEUTRAL).glow
+    assert pal_mod.for_song(PANEL_CHROME, NEUTRAL).glow
+    # Keyed mode has no wash: there the text stands over arbitrary video and
+    # anything behind it costs legibility rather than buying it.
     assert not KEYED.glow
 
 

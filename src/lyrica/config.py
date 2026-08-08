@@ -100,6 +100,86 @@ def opacity() -> float:
     return max(OPACITY_MIN, min(OPACITY_MAX, value))
 
 
+# How wide the sweep's leading edge is, in designed pixels. A letter is about
+# 18 wide, and a letter lasts about 29 ms in fast singing against a 16 ms frame,
+# so the useful span is narrow at both ends: past 40 there is never a boundary,
+# only a cloud, and under about 10 the transition is shorter than a frame and
+# narrowing it further changes nothing that can be drawn.
+FEATHER_MIN, FEATHER_MAX = 4.0, 60.0
+FEATHER_DEFAULT = 12.0
+
+
+def sweep_feather() -> float:
+    """How many pixels the sweep takes to cross from unsung to sung."""
+    raw = os.environ.get("LYRICA_SWEEP_FEATHER", "").strip()
+    if not raw:
+        return FEATHER_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_SWEEP_FEATHER=%r is not a number; using %s",
+                       raw, FEATHER_DEFAULT)
+        return FEATHER_DEFAULT
+    if not FEATHER_MIN <= value <= FEATHER_MAX:
+        logger.warning("LYRICA_SWEEP_FEATHER=%s is outside %s-%s; clamping",
+                       value, FEATHER_MIN, FEATHER_MAX)
+    return max(FEATHER_MIN, min(FEATHER_MAX, value))
+
+
+# How long a struck word keeps its light, as a multiple of how long that word is
+# sung for. One means the light drains exactly as the word finishes. Not a
+# number of seconds: the sweep crossing a word is on the word's own clock, and a
+# constant put the two in disagreement — the glow spent before a long word was
+# half lit, and still burning after a short one had gone.
+BLOOM_MIN, BLOOM_MAX = 0.0, 3.0
+BLOOM_DEFAULT = 1.0
+
+
+def bloom_factor() -> float:
+    """How long a word's light lasts, as a multiple of the word's own length."""
+    raw = os.environ.get("LYRICA_BLOOM", "").strip()
+    if not raw:
+        return BLOOM_DEFAULT
+    if raw.lower() in ("off", "none", "no"):
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_BLOOM=%r is not a number; using %s",
+                       raw, BLOOM_DEFAULT)
+        return BLOOM_DEFAULT
+    if not BLOOM_MIN <= value <= BLOOM_MAX:
+        logger.warning("LYRICA_BLOOM=%s is outside %s-%s; clamping",
+                       value, BLOOM_MIN, BLOOM_MAX)
+    return max(BLOOM_MIN, min(BLOOM_MAX, value))
+
+
+# How far a struck word rises, as a multiple of the designed travel. Kept small
+# on purpose: a vertical shift is a stand-in for the scaling the effect being
+# imitated actually does, and a stand-in that moves too far stops reading as
+# emphasis and starts reading as a bounce.
+LIFT_MIN, LIFT_MAX = 0.0, 3.0
+LIFT_DEFAULT = 1.0
+
+
+def lift_factor() -> float:
+    """How much of the designed rise a struck word takes."""
+    raw = os.environ.get("LYRICA_LIFT", "").strip()
+    if not raw:
+        return LIFT_DEFAULT
+    if raw.lower() in ("off", "none", "no"):
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_LIFT=%r is not a number; using %s", raw, LIFT_DEFAULT)
+        return LIFT_DEFAULT
+    if not LIFT_MIN <= value <= LIFT_MAX:
+        logger.warning("LYRICA_LIFT=%s is outside %s-%s; clamping",
+                       value, LIFT_MIN, LIFT_MAX)
+    return max(LIFT_MIN, min(LIFT_MAX, value))
+
+
 BEAM_STYLES = ("comet", "shine")
 
 

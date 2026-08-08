@@ -20,6 +20,13 @@ SCROLL_CURVE = (0.86, 0.0, 0.2, 1.0)
 # ordinary ease-in-out: no sudden middle, and both ends still settle.
 RESIZE_CURVE = (0.42, 0.0, 0.58, 1.0)
 
+# The rise of a struck word, and its settling back. Two curves because the two
+# halves are not the same gesture: a word is hit, which is sudden, and then
+# relaxes, which is not. One linear ramp for both was what made the motion read
+# as a staircase rather than as an answer.
+STRIKE_UP = (0.16, 0.9, 0.35, 1.0)      # nearly there at once, then eases in
+STRIKE_DOWN = (0.32, 0.0, 0.68, 1.0)    # slow to leave, slow to arrive
+
 DURATION_MS = 460
 # Each row further from the active line takes this much longer, which is what
 # fans the movement out instead of moving the block rigidly.
