@@ -46,6 +46,17 @@ BLUR_RADIUS = 8
 BACKDROP_CAP = 30
 
 
+class Unreachable(Exception):
+    """A source could not be asked, as opposed to answering that it has nothing.
+
+    The difference matters only here, but it matters a lot: a recorded miss is
+    believed for a fortnight and is written under the album key, so treating one
+    dropped connection as an answer leaves a whole record with no cover for two
+    weeks. A source that could not be reached records nothing and is simply
+    asked again next time.
+    """
+
+
 def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
     """A high-resolution cover from Apple's public catalogue search.
 
@@ -69,7 +80,7 @@ def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> by
         results = r.json().get("results") or []
     except (requests.RequestException, ValueError):
         logger.debug("cover search failed for %r", query, exc_info=True)
-        return None
+        raise Unreachable from None
 
     best = _closest(results, artist, title, album)
     if best is None:
@@ -86,7 +97,7 @@ def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> by
         return image.content
     except requests.RequestException:
         logger.debug("cover download failed", exc_info=True)
-        return None
+        raise Unreachable from None
 
 
 def _closest(results: list, artist: str, title: str, album: str):
@@ -155,7 +166,7 @@ def fetch_cover_discogs(artist: str, title: str, album: str = "") -> bytes | Non
         # Deliberately quiet about the response: a failed auth reply can carry
         # the token back, and this goes to a log file.
         logger.debug("discogs search failed")
-        return None
+        raise Unreachable from None
 
     for item in results:
         url = item.get("cover_image") or ""
@@ -286,9 +297,20 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> byt
     if _recorded_miss(artist, title, album):
         return None     # asked before and nobody had it
 
-    data = (fetch_cover(artist, title, album, size=size)
-            or fetch_cover_discogs(artist, title, album))
-    store_cover(artist, title, album, data)
+    data, unreachable = None, False
+    for ask in (lambda: fetch_cover(artist, title, album, size=size),
+                lambda: fetch_cover_discogs(artist, title, album)):
+        try:
+            data = ask()
+        except Unreachable:
+            # Ask the next source anyway: Apple being down is no reason not to
+            # try Discogs, and before this the `or` chain skipped it.
+            unreachable = True
+            continue
+        if data:
+            break
+    if data or not unreachable:
+        store_cover(artist, title, album, data)
     return data
 
 

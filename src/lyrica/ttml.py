@@ -64,12 +64,23 @@ def _collect_spans(node: ET.Element) -> list:
     the next span. That tail is the only record of whether two spans were
     adjacent in the source or had a space between them, and it is what a line
     has to be rebuilt from.
+
+    An element that emits no span of its own — an untimed wrapper, a background
+    chorus, a `<br/>` — still has a tail, and it belongs to the span before it.
+    Dropping it welds that span to the next one: a wrapped "Hello" followed by
+    " world" came out "Helloworld".
     """
     spans = []
+
+    def carry(tail: str) -> None:
+        """Hand a passed-over element's tail to the last span collected."""
+        if tail and spans:
+            start, end, text, so_far = spans[-1]
+            spans[-1] = (start, end, text, so_far + tail)
+
     for child in node:
-        if _local(child.tag) != "span":
-            continue
-        if _is_background(child):
+        if _local(child.tag) != "span" or _is_background(child):
+            carry(child.tail or "")
             continue
         start = parse_time(child.get("begin"))
         end = parse_time(child.get("end"))
@@ -80,6 +91,7 @@ def _collect_spans(node: ET.Element) -> list:
             # A span may wrap further spans without being timed or a background
             # marker; its children are the real words.
             spans.extend(_collect_spans(child))
+            carry(child.tail or "")
     return spans
 
 

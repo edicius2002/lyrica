@@ -92,3 +92,48 @@ def test_an_older_saved_centre_is_still_honoured(tmp_path, monkeypatch):
     config.save_setting("centre", [800, 500])
     assert config.saved_place() is None
     assert config.saved_centre() == (800, 500)
+
+
+class ArtStub:
+    """Just the parts of the overlay that decide whether late art is kept."""
+
+    def __init__(self):
+        self.fetch_gen = 3
+        self._shape_gen = 0
+        self._pending_art = None
+        self._cover_data = b"bytes"
+
+    def _build_art(self, data):
+        return ("thumb", "backdrop", data)
+
+
+def test_art_built_for_the_old_size_is_dropped():
+    # The worker reads the window's size while it builds. A resize in that gap
+    # left it holding images for the size before, and it used to overwrite the
+    # correctly-sized ones the resize had just built.
+    from lyrica.app import Overlay
+
+    panel = ArtStub()
+    shape = panel._shape_gen
+    Overlay._reshape_art(panel)                      # the resize rebuilds
+    fresh = panel._pending_art
+    Overlay._offer_art(panel, 3, shape, ("stale", None, b"old size"))
+    assert panel._pending_art is fresh
+
+
+def test_art_from_a_track_that_already_changed_is_dropped():
+    from lyrica.app import Overlay
+
+    panel = ArtStub()
+    panel.fetch_gen = 4
+    Overlay._offer_art(panel, 3, panel._shape_gen, ("late", None, b"old track"))
+    assert panel._pending_art is None
+
+
+def test_art_that_is_still_current_is_taken():
+    from lyrica.app import Overlay
+
+    panel = ArtStub()
+    art = ("thumb", None, b"current")
+    Overlay._offer_art(panel, 3, panel._shape_gen, art)
+    assert panel._pending_art is art

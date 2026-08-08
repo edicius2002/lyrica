@@ -215,3 +215,30 @@ def test_a_line_with_no_timed_spans_still_reads():
            '<p begin="0s" end="3s">una  linea   suelta</p>'
            '</div></body></tt>')
     assert ttml.parse_ttml(doc).lines[0][1] == "una linea suelta"
+
+
+def test_a_wrapper_keeps_the_space_that_followed_it():
+    # The wrapper is untimed, so its children are the words — but its own tail
+    # is the only space between "Hello" and "world", and recursing past it
+    # dropped that space and welded the two together.
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="3s">'
+           '<span><span begin="0s" end="1s">Hello</span></span> '
+           '<span begin="1s" end="2s">world</span>'
+           '</p></div></body></tt>')
+    assert ttml.parse_ttml(doc).lines[0][1] == "Hello world"
+
+
+def test_a_background_chorus_keeps_the_space_that_followed_it():
+    # Background vocals are dropped whole, and the space after one belongs to
+    # the word before it.
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml" '
+           'xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><body><div>'
+           '<p begin="0s" end="4s">'
+           '<span begin="0s" end="1s">canta</span>'
+           '<span ttm:role="x-bg"><span begin="1s" end="2s">ooh</span></span> '
+           '<span begin="2s" end="3s">conmigo</span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert lyrics.lines[0][1] == "canta conmigo"
+    assert [w[2] for w in lyrics.words[0]] == ["canta", "conmigo"]

@@ -199,6 +199,7 @@ class Overlay:
         self._press_y = 0
         self._moved = False
         self._pending_art = None
+        self._shape_gen = 0
         self._cover_data = None     # kept so a resize can re-derive both images
         self._backdrop_item = None
         self._backdrop_photo = None
@@ -580,8 +581,7 @@ class Overlay:
         # at the end: doing it per frame costs 5-12 ms a time, and a slightly
         # mis-scaled backdrop for a third of a second is not visible while the
         # panel is still moving.
-        if self._cover_data:
-            self._pending_art = self._build_art(self._cover_data)
+        self._reshape_art()
         return False
 
     def _resize_window(self, width: int, height: int) -> None:
@@ -742,8 +742,7 @@ class Overlay:
         # window. Inline rather than on a thread — it measures ~18 ms, and this
         # is a keypress rather than a track change, so there is a hand waiting
         # for it and nothing else in flight.
-        if self._cover_data:
-            self._pending_art = self._build_art(self._cover_data)
+        self._reshape_art()
         logger.info("overlay size %.2f (%dx%d)", self._size, self.width, self.height)
 
     # --- lyrics ---
@@ -784,11 +783,40 @@ class Overlay:
             wanted = max(600, self._thumb_size * 4)
             data = (artwork.best_cover(artist, title, album, size=wanted)
                     or self.reader.read_artwork())
-            if data and gen == self.fetch_gen:
-                self._cover_data = data
-                self._pending_art = self._build_art(data)
+            if not data or gen != self.fetch_gen:
+                return
+            # The bytes first, so a resize that arrives from here on finds them
+            # and rebuilds; then the mark, so one that arrives mid-build is
+            # noticed and this thread's stale images are dropped instead of
+            # overwriting the resize's.
+            self._cover_data = data
+            shape = self._shape_gen
+            self._offer_art(gen, shape, self._build_art(data))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _offer_art(self, gen: int, shape: int, art: tuple) -> None:
+        """Take images built off the render thread, if they are still current.
+
+        Two ways they may not be. The track can have changed, which `gen`
+        catches; and the window can have been resized while they were being
+        built, which `shape` catches — those images are the wrong size and the
+        resize has already built the right ones.
+        """
+        if gen == self.fetch_gen and shape == self._shape_gen:
+            self._pending_art = art
+
+    def _reshape_art(self) -> None:
+        """Rebuild the cover for the size the window has now.
+
+        Bumping the generation is the point as much as the rebuild: the artwork
+        worker may be part-way through building images for the size the window
+        had a moment ago, and without a mark to check it would land after this
+        one and put them back.
+        """
+        self._shape_gen += 1
+        if self._cover_data:
+            self._pending_art = self._build_art(self._cover_data)
 
     def _build_art(self, data: bytes) -> tuple:
         """Everything derived from one cover, at the current size.

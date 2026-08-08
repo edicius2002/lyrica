@@ -120,11 +120,14 @@ def test_releases_without_any_image_are_a_miss(wired):
     assert fetch_cover_discogs("A", "B") is None
 
 
-def test_a_network_failure_is_a_miss_not_a_crash(monkeypatch):
+def test_a_network_failure_says_so_rather_than_answering(monkeypatch):
+    # Not a miss: a miss is believed for a fortnight, and a dropped connection
+    # is not evidence that nobody has the cover.
     monkeypatch.setenv("LYRICA_DISCOGS_TOKEN", "t")
     monkeypatch.setattr(artwork.requests, "get",
                         lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError()))
-    assert fetch_cover_discogs("A", "B") is None
+    with pytest.raises(artwork.Unreachable):
+        fetch_cover_discogs("A", "B")
 
 
 # --- the order the sources are asked in -------------------------------------
