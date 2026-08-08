@@ -202,6 +202,7 @@ class Overlay:
         self._moved = False
         self._pending_art = None
         self._shape_gen = 0
+        self._identified = artwork.Release()
         self._cover_data = None     # kept so a resize can re-derive both images
         self._backdrop_item = None
         self._backdrop_photo = None
@@ -776,6 +777,7 @@ class Overlay:
         self.fetch_gen += 1
         gen = self.fetch_gen
         self.lyrics = None
+        self._identified = artwork.Release()
         self._lyrics_state = LYRICS_UNKNOWN
         self._clear_views()
 
@@ -809,6 +811,14 @@ class Overlay:
             wanted = max(600, self._thumb_size * 4)
             data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
                     or self.reader.read_artwork())
+            # After the cover, because the search both need has then run and its
+            # answer is on disk. Assigned even when no cover was found: a track
+            # can be named by a catalogue that has no picture of it.
+            named = artwork.identify(candidates, album)
+            if gen == self.fetch_gen and named:
+                self._identified = named
+                logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
+                            named.album or "no album")
             if not data or gen != self.fetch_gen:
                 return
             # The bytes first, so a resize that arrives from here on finds them
@@ -942,11 +952,18 @@ class Overlay:
     def _resolved_name(self) -> tuple:
         """What the song turned out to be called, or () while nothing is known.
 
-        A browser states a track several defensible ways and only one of them
-        finds it. Once one has, naming the card any other way is contradicting
-        the lyrics on screen: the panel read "BillieEilishVEVO — Billie Eilish -
-        CHIHIRO" over a word-timed match found as "Billie Eilish — CHIHIRO".
+        Three readings, weakest last. A catalogue that recognised the track
+        knows its name; failing that, the reading that found the lyrics is the
+        closest thing to one, since naming the card any other way contradicts
+        the lyrics on screen — the panel read "BillieEilishVEVO — Billie Eilish
+        - CHIHIRO" over a word-timed match found as "Billie Eilish — CHIHIRO";
+        failing both, the player's own words are all anyone knows.
         """
+        # A catalogue entry first: it is a record of what the track is, where
+        # the reading below is only the wording that happened to find it.
+        named = self._identified
+        if named:
+            return (named.artist, named.title)
         lyr = self.lyrics
         queried = getattr(lyr, "queried", ()) if lyr is not None else ()
         return queried if len(queried) == 2 and all(queried) else ()
