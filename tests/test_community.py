@@ -153,3 +153,20 @@ def test_the_provider_declares_it_can_reach_word_level():
     # The cascade uses this to decide whether a line-level answer may end the
     # search, so it has to be right.
     assert CommunityTtmlProvider.max_precision is Precision.WORD
+
+
+def test_a_missing_accent_is_not_a_different_performer():
+    # The -5 exists to sink a different artist with the same title. A lost acute
+    # accent was triggering it: the correct record scored 9.5 with the accents
+    # and -3.5 without, against a floor of 3.0, so the right lyrics were thrown
+    # away over one character.
+    from lyrica.providers.community import CommunityTtmlProvider, _score
+
+    record = {"artist_name": "ROSALÍA", "track_name": "DESPECHÁ",
+              "duration": 155, "timing_type": "word"}
+    assert _score(record, "Rosalia", "Despecha", 155.0) >= CommunityTtmlProvider.MIN_SCORE
+    assert _score(record, "ROSALÍA", "DESPECHÁ", 155.0) >= CommunityTtmlProvider.MIN_SCORE
+    # And the guard it was tripping still works.
+    stranger = {"artist_name": "Karaoke Band", "track_name": "DESPECHÁ",
+                "duration": 155}
+    assert _score(stranger, "Rosalia", "Despecha", 155.0) < CommunityTtmlProvider.MIN_SCORE

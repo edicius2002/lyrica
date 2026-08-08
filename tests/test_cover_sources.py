@@ -264,3 +264,30 @@ def test_a_search_that_could_not_be_made_is_not_remembered(isolated_matches,
         with pytest.raises(artwork.Unreachable):
             artwork._apple_match("Air", "La Femme d'Argent")
     assert len(searches) == 2
+
+
+# --- accents are a disagreement between sources, not information -------------
+
+def test_the_cover_is_found_without_the_accents():
+    # A browser reports "Despecha" where the catalogue holds "DESPECHÁ". Keeping
+    # the accent made those neither equal nor substrings, and the track was lost
+    # outright.
+    results = [{"artistName": "ROSALÍA", "trackName": "DESPECHÁ",
+                "collectionName": "MOTOMAMI +"}]
+    assert artwork._closest(results, "Rosalia", "Despecha", "") is results[0]
+    assert artwork._closest(results, "ROSALÍA", "DESPECHÁ", "") is results[0]
+
+
+def test_folding_does_not_let_a_stranger_through():
+    results = [{"artistName": "Karaoke Band", "trackName": "DESPECHÁ"}]
+    assert artwork._closest(results, "Rosalia", "Despecha", "") is None
+
+
+def test_a_script_that_is_not_latin_survives_folding():
+    # NetEase and the community source both answer with Chinese and Japanese
+    # titles, which a transliterator would flatten to nothing.
+    from lyrica.textmatch import fold
+
+    assert fold("千本桜") == "千本桜"
+    assert fold("夜に駆ける") == "夜に駆ける"
+    assert fold("Ａｎｇｅｌ") == "angel", "fullwidth forms do fold, and should"

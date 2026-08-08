@@ -21,6 +21,7 @@ from pathlib import Path
 import requests
 
 from lyrica import config
+from lyrica.textmatch import fold
 
 logger = logging.getLogger(__name__)
 
@@ -146,14 +147,11 @@ def _closest(results: list, artist: str, title: str, album: str):
     A search always answers with something; showing a stranger's cover over
     someone's lyrics is worse than showing the small one the player gave us.
     """
-    def norm(s: str) -> str:
-        return "".join(c for c in (s or "").lower() if c.isalnum() or c.isspace()).strip()
-
-    want_artist, want_title, want_album = norm(artist), norm(title), norm(album)
+    want_artist, want_title, want_album = fold(artist), fold(title), fold(album)
     best, best_score = None, 0.0
     for item in results:
-        got_artist = norm(item.get("artistName", ""))
-        got_title = norm(item.get("trackName", ""))
+        got_artist = fold(item.get("artistName", ""))
+        got_title = fold(item.get("trackName", ""))
         score = 0.0
         if want_artist and (want_artist in got_artist or got_artist in want_artist):
             score += 2
@@ -161,7 +159,7 @@ def _closest(results: list, artist: str, title: str, album: str):
             score += 2
         elif want_title and (want_title in got_title or got_title in want_title):
             score += 1
-        if want_album and norm(item.get("collectionName", "")) == want_album:
+        if want_album and fold(item.get("collectionName", "")) == want_album:
             score += 1
         if score > best_score:
             best, best_score = item, score
