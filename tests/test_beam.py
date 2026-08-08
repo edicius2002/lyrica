@@ -112,56 +112,51 @@ def test_asking_for_even_frames_is_safe_on_any_platform():
 
 # --- the two styles ---------------------------------------------------------
 
-def _lit(style, level):
+def _lit(style, level, canvas):
     """What every segment of a ring would be lit to, as brightness 0..255."""
-    import tkinter as tk
-
     from lyrica import palette as pal_mod
     from lyrica.beam import Beam
     from lyrica.chrome import Chrome, ChromeMode
     from lyrica.glass import PANEL, rgb_of
     from lyrica.songcolour import SongColour
 
-    root = tk.Tk()
-    root.withdraw()
-    canvas = tk.Canvas(root, width=600, height=200)
     palette = pal_mod.for_song(
         Chrome(ChromeMode.PANEL, "#000", PANEL),
         SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
     ring = Beam(canvas, 600, 200, 18, 1.0, style)
     ring.advance(0.0, level, palette)
     levels = [max(rgb_of(s)) for s in ring._shades]
-    root.destroy()
+    ring.destroy()
     return levels
 
 
-def test_the_comet_leaves_most_of_the_ring_dark():
+def test_the_comet_leaves_most_of_the_ring_dark(canvas):
     # A travelling light needs somewhere dark to travel through; that is the
     # whole difference between a comet and a lit border.
     from lyrica.beam import COMET
 
-    levels = _lit(COMET, 1.0)
+    levels = _lit(COMET, 1.0, canvas)
     dark = sum(1 for v in levels if v < 40)
     assert dark > len(levels) * 0.7, "too much of the ring is lit to read as a comet"
     assert max(levels) > 200, "the head is not bright"
 
 
-def test_the_shine_lights_every_edge_at_once():
+def test_the_shine_lights_every_edge_at_once(canvas):
     # Asked for as the quieter alternative: constant across all the borders,
     # with the colour moving rather than a bright spot.
     from lyrica.beam import SHINE
 
-    levels = _lit(SHINE, 1.0)
+    levels = _lit(SHINE, 1.0, canvas)
     assert min(levels) > 50, "part of the border went dark"
     assert max(levels) - min(levels) > 30, "nothing moves through it"
 
 
-def test_the_shine_stays_lit_with_no_audio_at_all():
+def test_the_shine_stays_lit_with_no_audio_at_all(canvas):
     # There often is none — playback can be rendered on another device
     # entirely — so silence must not put the border out.
     from lyrica.beam import SHINE
 
-    assert min(_lit(SHINE, 0.0)) > 20
+    assert min(_lit(SHINE, 0.0, canvas)) > 20
 
 
 def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
@@ -177,46 +172,41 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
 
 # --- the music's character drives the shine ---------------------------------
 
-def _shine(character):
-    import tkinter as tk
-
+def _shine(character, canvas):
     from lyrica import palette as pal_mod
     from lyrica.beam import SHINE, Beam
     from lyrica.chrome import Chrome, ChromeMode
     from lyrica.glass import PANEL, rgb_of
     from lyrica.songcolour import SongColour
 
-    root = tk.Tk()
-    root.withdraw()
-    canvas = tk.Canvas(root, width=1125, height=375)
     palette = pal_mod.for_song(
         Chrome(ChromeMode.PANEL, "#000", PANEL),
         SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
     ring = Beam(canvas, 1125, 375, 18, 1.25, SHINE)
     ring.advance(0.0, character, palette)
     levels = [max(rgb_of(s)) for s in ring._shades]
-    root.destroy()
+    ring.destroy()
     return max(levels) - min(levels)
 
 
-def test_a_flat_master_gets_an_even_border():
+def test_a_flat_master_gets_an_even_border(canvas):
     # Where the style of the music shows. A wall of sound has no air in it, and
     # neither should the border round it: measured 0.05 dynamics for a heavily
     # compressed master against 0.94 for an open one.
     from lyrica.meter import Character
 
-    flat = _shine(Character(level=0.6, dynamics=0.05, rate=0.8))
-    open_ = _shine(Character(level=0.6, dynamics=0.90, rate=0.5))
+    flat = _shine(Character(level=0.6, dynamics=0.05, rate=0.8), canvas)
+    open_ = _shine(Character(level=0.6, dynamics=0.90, rate=0.5), canvas)
     assert open_ > flat * 2, f"flat {flat}, open {open_} — the styles look alike"
 
 
-def test_silence_leaves_it_lit_but_still():
+def test_silence_leaves_it_lit_but_still(canvas):
     from lyrica.meter import Character
 
-    assert _shine(Character()) < 20
+    assert _shine(Character(), canvas) < 20
 
 
-def test_busier_music_turns_it_faster():
+def test_busier_music_turns_it_faster(tk_root):
     # Driven by the onset rate rather than a tempo. Which multiple of the beat
     # that rate counts is not recoverable from loudness, so a ring spinning once
     # per beat would spin at half or double speed about half the time.
@@ -232,20 +222,19 @@ def test_busier_music_turns_it_faster():
     palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
     moved = []
     for rate in (0.0, 1.0):
-        # A root of its own each time. Sharing one across the loop made this
-        # pass in the suite and fail alone, which is tkinter's default-root
-        # state rather than anything about the beam.
-        root = tk.Tk()
-        root.withdraw()
-        ring = Beam(tk.Canvas(root, width=600, height=200), 600, 200, 18, 1.0,
-                    SHINE)
+        # A canvas of its own each time, but the session's one root. Building a
+        # root per iteration was an earlier fix for tkinter's default-root
+        # state; a root that is never torn down mid-session settles that too,
+        # and without it Tcl runs out of interpreters on the CI runner.
+        ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
+                    1.0, SHINE)
         ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
         moved.append(ring._phase)
-        root.destroy()
+        ring.destroy()
     assert moved[1] > moved[0], "the rate did not reach the rotation"
 
 
-def test_the_comet_ignores_the_character():
+def test_the_comet_ignores_the_character(tk_root):
     # Only the shine reads it. The comet's whole shape is a travelling head, and
     # varying its speed with the music would fight the thing you follow.
     import tkinter as tk
@@ -260,13 +249,11 @@ def test_the_comet_ignores_the_character():
     palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
     phases = []
     for rate in (0.0, 1.0):
-        root = tk.Tk()
-        root.withdraw()
-        ring = Beam(tk.Canvas(root, width=600, height=200), 600, 200, 18, 1.0,
-                    COMET)
+        ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
+                    1.0, COMET)
         ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
         phases.append(ring._phase)
-        root.destroy()
+        ring.destroy()
     assert phases[0] == phases[1]
 
 

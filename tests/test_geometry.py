@@ -29,32 +29,41 @@ def test_the_resize_curve_still_settles_at_both_ends():
     assert motion.cubic_bezier(1.0, motion.RESIZE_CURVE) == 1.0
 
 
-def test_the_desktop_is_every_monitor(monkeypatch):
+class FakeScreen:
+    """Everything `desktop_bounds` asks a root for. No interpreter needed."""
+
+    def winfo_screenwidth(self):
+        return 1920
+
+    def winfo_screenheight(self):
+        return 1080
+
+
+class FakeDesktop:
+    """A second monitor to the left of the primary one, so the origin is
+    negative — the case a naive (0, 0, w, h) rect gets wrong."""
+
+    @staticmethod
+    def desktop_bounds():
+        return (-1920, 0, 3840, 1080)
+
+
+def test_the_platform_beats_what_tk_can_see(monkeypatch):
     # Tk only knows the primary screen, and clamping to it dragged the panel
     # back from a second monitor on every collapse.
-    import tkinter as tk
-
+    import lyrica.chrome.windows  # noqa: F401  (so the stub replaces it)
     from lyrica import chrome as chrome_mod
 
-    root = tk.Tk()
-    root.withdraw()
-    _left, _top, width, height = chrome_mod.desktop_bounds(root)
-    assert width >= root.winfo_screenwidth()
-    assert height >= root.winfo_screenheight()
-    root.destroy()
+    monkeypatch.setattr(chrome_mod.sys, "platform", "win32")
+    monkeypatch.setattr(chrome_mod, "windows", FakeDesktop, raising=False)
+    assert chrome_mod.desktop_bounds(FakeScreen()) == (-1920, 0, 3840, 1080)
 
 
 def test_the_desktop_falls_back_to_the_screen_without_the_platform(monkeypatch):
-    import tkinter as tk
-
     from lyrica import chrome as chrome_mod
 
     monkeypatch.setattr(chrome_mod.sys, "platform", "linux")
-    root = tk.Tk()
-    root.withdraw()
-    assert chrome_mod.desktop_bounds(root) == (
-        0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
-    root.destroy()
+    assert chrome_mod.desktop_bounds(FakeScreen()) == (0, 0, 1920, 1080)
 
 
 def test_the_remembered_place_is_the_middle_across_and_the_top_down(tmp_path,
