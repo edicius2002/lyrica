@@ -41,10 +41,16 @@ BLUR_RADIUS = 8
 
 # Where the wash is scaled to land: the 95th-percentile channel of every
 # backdrop, whatever the cover started at. High enough to read as the song
-# having a hue, low enough that unsung text at 138 keeps better than 3:1 over
-# it — which a fixed brightness factor could not promise, because it has to be
-# picked for the brightest sleeve and is then wrong for all the others.
-BACKDROP_CAP = 30
+# having a hue, low enough that the unlit line stands off it — which a fixed
+# brightness factor could not promise, because it has to be picked for the
+# brightest sleeve and is then wrong for all the others.
+#
+# Halved from 30, which is the cheapest of the three ways the unlit text was
+# made to read: it gives up the song's colour in the *background*, where losing
+# it costs a reader nothing, rather than in the words, where losing it was the
+# complaint. The unlit line's contrast over the wash went from 2.24:1 at worst
+# to 4.31:1 with the text itself unchanged.
+BACKDROP_CAP = 14
 
 
 class Unreachable(Exception):

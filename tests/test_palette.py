@@ -323,3 +323,67 @@ def test_the_keyed_palette_ignores_the_cover():
     # artwork says nothing about.
     assert pal_mod.for_song(KEYED_CHROME, TEAL) is KEYED
     assert pal_mod.for_chrome(KEYED_CHROME) is KEYED
+
+
+# --- the colour must not be what dims the words -----------------------------
+
+def test_no_unlit_role_gives_up_much_of_its_light_for_colour():
+    # The complaint this budget exists for: the colour lived exactly where the
+    # light did not, so a coloured cover dimmed the whole body of unlit text
+    # rather than one rung of the ladder.
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+
+    ch = Chrome(ChromeMode.PANEL, "#101014", PANEL)
+    grey = pal_mod.for_song(ch, NEUTRAL)
+    for song in COLOURED:
+        p = pal_mod.for_song(ch, song)
+        for role in ("unsung", "side", "far"):
+            kept = lum(getattr(p, role)) / lum(getattr(grey, role))
+            assert kept > 0.90, (
+                f"{role} at hue {song.hue:.0f} gave up "
+                f"{(1 - kept) * 100:.0f}% of its light to buy colour")
+
+
+def test_a_hard_hue_gives_up_colour_rather_than_light():
+    # Luminance is 21% red, 72% green, 7% blue, so a violet tint costs several
+    # times what a yellow one does. Paying in light made the same design look
+    # fine on one cover and murky on the next; paying in colour does not.
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL, rgb_of
+    from lyrica.glass import chroma as chroma_of
+    from lyrica.songcolour import SongColour
+
+    ch = Chrome(ChromeMode.PANEL, "#101014", PANEL)
+
+    def unsung_for(hue):
+        song = SongColour(hue=hue, sat=0.75, weight=0.6, accent_hue=hue,
+                          neutral=False, dominant=(0, 0, 0))
+        return pal_mod.for_song(ch, song).unsung
+
+    easy, hard = unsung_for(55.0), unsung_for(275.0)      # yellow, violet
+    assert abs(lum(easy) - lum(hard)) / lum(easy) < 0.06, "the light differs"
+    assert chroma_of(rgb_of(hard)) < chroma_of(rgb_of(easy)), "the colour does not"
+
+
+@pytest.mark.parametrize("chrome", LAWS)
+def test_the_ladder_cannot_invert(chrome):
+    # An ordering before it is a set of levels. The neighbours share only part
+    # of the active line's compression, which under a composition that clamps
+    # hard used to lift them past it.
+    for song in (NEUTRAL, *COLOURED):
+        p = pal_mod.for_song(chrome, song)
+        assert lum(p.sung) > lum(p.unsung) > lum(p.side) > lum(p.far)
+
+
+def test_the_beam_keeps_a_dark_ground_to_travel_through():
+    # It used to borrow the unsung line's colour, and the two were the same
+    # number only by accident: one wants to be legible, the other wants to be
+    # dark enough that a travelling head reads as travelling.
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+
+    ch = Chrome(ChromeMode.PANEL, "#101014", PANEL)
+    for song in (NEUTRAL, *COLOURED):
+        p = pal_mod.for_song(ch, song)
+        assert lum(p.beam) < lum(p.unsung) * 0.85
