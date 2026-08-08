@@ -211,13 +211,13 @@ def store(tmp_path, monkeypatch):
 
 def test_nothing_remembered_yet_is_not_an_error(store):
     assert config.settings() == {}
-    assert config.saved_centre() is None
+    assert config.saved_place() is None
     assert config.saved_offset() == 0.0
 
 
-def test_a_centre_survives(store):
-    config.save_centre(340, 900)
-    assert config.saved_centre() == (340, 900)
+def test_a_place_survives(store):
+    config.save_place(340, 900)
+    assert config.saved_place() == (340, 900)
 
 
 def test_an_offset_survives(store):
@@ -226,10 +226,10 @@ def test_an_offset_survives(store):
 
 
 def test_settings_do_not_overwrite_each_other(store):
-    config.save_centre(10, 20)
+    config.save_place(10, 20)
     config.save_offset(0.5)
     config.save_size(1.3)
-    assert config.saved_centre() == (10, 20)
+    assert config.saved_place() == (10, 20)
     assert config.saved_offset() == 0.5
     assert config.size_scale() == 1.3
 
@@ -252,7 +252,7 @@ def test_a_corrupt_store_degrades_to_defaults(store):
     # someone edited into nonsense has to cost the settings, not the overlay.
     config.settings_path().write_text("{not json", encoding="utf-8")
     assert config.settings() == {}
-    assert config.saved_centre() is None
+    assert config.saved_place() is None
     assert config.size_scale() == 1.0
 
 
@@ -261,9 +261,9 @@ def test_a_store_that_is_not_a_mapping_is_ignored(store):
     assert config.settings() == {}
 
 
-def test_a_nonsense_centre_is_ignored(store):
-    config.settings_path().write_text('{"centre": "middle"}', encoding="utf-8")
-    assert config.saved_centre() is None
+def test_a_nonsense_place_is_ignored(store):
+    config.settings_path().write_text('{"place": "middle"}', encoding="utf-8")
+    assert config.saved_place() is None
 
 
 def test_a_wild_offset_is_clamped(store):
@@ -276,16 +276,16 @@ def test_a_wild_offset_is_clamped(store):
 
 
 def test_saving_the_same_value_twice_does_not_rewrite(store):
-    config.save_centre(5, 5)
+    config.save_place(5, 5)
     before = config.settings_path().stat().st_mtime_ns
-    config.save_centre(5, 5)
+    config.save_place(5, 5)
     assert config.settings_path().stat().st_mtime_ns == before
 
 
 def test_an_unwritable_store_is_not_an_error(monkeypatch, tmp_path):
     monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path / "file"))
     (tmp_path / "file").write_text("not a directory", encoding="utf-8")
-    config.save_centre(1, 2)      # must not raise
+    config.save_place(1, 2)      # must not raise
     config.save_offset(0.1)
 
 
@@ -296,10 +296,10 @@ def test_the_centre_is_kept_because_the_window_is_not_one_width(store):
     # never at — measured as reopening 400 px right of where it had been put.
     wide, compact = 1125, 325
     centre_x = 527 + wide // 2                  # left at 527, full size
-    config.save_centre(centre_x, 700)
+    config.save_place(centre_x, 700)
 
     # Collapsing does not touch the store, and reopening at either width puts
     # the middle back where it was.
     for width in (wide, compact):
-        left = config.saved_centre()[0] - width // 2
+        left = config.saved_place()[0] - width // 2
         assert left + width // 2 == centre_x

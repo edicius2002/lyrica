@@ -123,6 +123,25 @@ def hold_timer_resolution(hold: bool) -> bool:
     return _timer_held
 
 
+# The virtual desktop: every monitor together, in one coordinate space whose
+# origin can be negative when a screen sits left of or above the primary one.
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+
+
+def desktop_bounds() -> tuple | None:
+    """(left, top, width, height) across all monitors, or None if unavailable."""
+    try:
+        metric = ctypes.windll.user32.GetSystemMetrics
+        bounds = (metric(SM_XVIRTUALSCREEN), metric(SM_YVIRTUALSCREEN),
+                  metric(SM_CXVIRTUALSCREEN), metric(SM_CYVIRTUALSCREEN))
+    except (AttributeError, OSError):
+        return None
+    return bounds if bounds[2] > 0 and bounds[3] > 0 else None
+
+
 def set_dpi_awareness() -> float:
     """Opt out of DPI virtualisation and return the current scale factor.
 

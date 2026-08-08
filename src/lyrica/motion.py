@@ -12,6 +12,14 @@ import time
 # which is what makes a move read as weight rather than as a slide.
 SCROLL_CURVE = (0.86, 0.0, 0.2, 1.0)
 
+# The panel resizing is not a line scrolling, and borrowing the curve above for
+# it was a mistake worth naming. That one is steep on purpose — over the 50 px a
+# row travels, the sharp middle reads as weight. Over the 800 px the window
+# changes width by when it collapses, the same curve put 89 % of the change into
+# 40 % of the frames, which reads as a snap rather than a shrink. This is an
+# ordinary ease-in-out: no sudden middle, and both ends still settle.
+RESIZE_CURVE = (0.42, 0.0, 0.58, 1.0)
+
 DURATION_MS = 460
 # Each row further from the active line takes this much longer, which is what
 # fans the movement out instead of moving the block rigidly.
