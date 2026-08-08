@@ -23,6 +23,7 @@ from lyrica.overlay_text import (
     OUTLINE_COLOUR,
     measure,
     ring_offsets,
+    split_for_wrapping,
     wrap_words,
 )
 from lyrica.palette import GLOW_LEVELS
@@ -65,19 +66,26 @@ class LineView:
         # two. Timings are mapped onto the text afterwards instead, which makes
         # what appears on screen exactly what the line says.
         self.text = text or " ".join(w[2] for w in words)
-        tokens = [(0.0, 0.0, part) for part in self.text.split()]
+        pieces = split_for_wrapping(self.text)
+        tokens = [(0.0, 0.0, piece) for piece, _glued in pieces]
+        glued = [g for _piece, g in pieces]
         self._word_chars = self._map_words_to_text(words)
-        rows = wrap_words(tokens, font_obj, key, space, wrap)
+        rows = wrap_words(tokens, font_obj, key, space, wrap, glued)
         self._row_spans: list[tuple[float, float]] = []
 
         for r, row in enumerate(rows):
-            total = sum(w for _, _, w in row) + space * (len(row) - 1)
+            # Per piece, because a script written without spaces gets none: the
+            # gap belongs to the boundary, not to every boundary alike.
+            gaps = [0 if k == 0 or glued[i] else space
+                    for k, (i, _text, _w) in enumerate(row)]
+            total = sum(w for _, _, w in row) + sum(gaps)
             # Never started off the left edge: a word too wide to break would
             # otherwise lose its beginning, which is worse than losing its end.
             x = max(EDGE_MARGIN * scale, cx - total / 2)
             self._row_spans.append((x, x + total))
             row_y = y + r * self.line_height
-            for _token_index, word_text, _ in row:
+            for (_token_index, word_text, _), gap in zip(row, gaps, strict=True):
+                x += gap
                 for ch in word_text:
                     adv = measure(font_obj, key, ch)
                     # Only in keyed mode, the one mode with nothing drawn behind
@@ -93,7 +101,6 @@ class LineView:
                     self._items.append([x + adv / 2, r, item, palette.side])
                     self._outline.extend(outline)
                     x += adv
-                x += space
 
         self.height = len(rows) * self.line_height
 

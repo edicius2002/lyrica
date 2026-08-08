@@ -16,6 +16,7 @@ import requests
 
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider
+from lyrica.textmatch import fold
 from lyrica.ttml import parse_ttml
 
 SEARCH_URL = "https://lyrics-api.binimum.org/getLyrics"
@@ -25,16 +26,12 @@ TIMEOUT = 15
 logger = logging.getLogger(__name__)
 
 
-def _norm(s: str) -> str:
-    return "".join(ch for ch in s.lower() if ch.isalnum() or ch.isspace()).strip()
-
-
 def _score(rec: dict, artist: str, title: str, duration: float) -> float:
     """How much this result looks like the recording that is playing."""
     score = 0.0
-    got_artist = _norm(rec.get("artist_name", ""))
-    got_title = _norm(rec.get("track_name", ""))
-    want_artist, want_title = _norm(artist), _norm(title)
+    got_artist = fold(rec.get("artist_name", ""))
+    got_title = fold(rec.get("track_name", ""))
+    want_artist, want_title = fold(artist), fold(title)
 
     if want_artist and got_artist:
         if want_artist == got_artist:
