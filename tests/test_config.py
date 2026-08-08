@@ -347,3 +347,59 @@ def test_re_nudging_a_track_keeps_it_from_being_forgotten(store):
     for i in range(config.OFFSET_MEMORY - 1):
         config.save_offset(0.25, f"later filler {i}")
     assert config.saved_offset("old favourite") == 0.5
+
+
+def test_the_sweep_front_defaults_to_the_designed_width(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_SWEEP_FEATHER", raising=False)
+    assert config.sweep_feather() == config.FEATHER_DEFAULT
+
+
+def test_the_sweep_front_can_be_tuned(store, monkeypatch):
+    monkeypatch.setenv("LYRICA_SWEEP_FEATHER", "10")
+    assert config.sweep_feather() == 10.0
+
+
+def test_a_front_narrower_than_a_frame_can_draw_is_clamped(store, monkeypatch):
+    # Under about ten pixels the transition is shorter than one frame at fast
+    # delivery, so there is nothing left to draw; the floor says so rather than
+    # letting a zero through.
+    monkeypatch.setenv("LYRICA_SWEEP_FEATHER", "0")
+    assert config.sweep_feather() == config.FEATHER_MIN
+    monkeypatch.setenv("LYRICA_SWEEP_FEATHER", "500")
+    assert config.sweep_feather() == config.FEATHER_MAX
+
+
+def test_an_unparseable_front_is_ignored(store, monkeypatch):
+    monkeypatch.setenv("LYRICA_SWEEP_FEATHER", "ancho")
+    assert config.sweep_feather() == config.FEATHER_DEFAULT
+
+
+def test_the_bloom_defaults_and_can_be_tuned(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_BLOOM", raising=False)
+    assert config.bloom_factor() == config.BLOOM_DEFAULT
+    monkeypatch.setenv("LYRICA_BLOOM", "0.4")
+    assert config.bloom_factor() == 0.4
+
+
+def test_the_bloom_can_be_turned_off_by_name(store, monkeypatch):
+    for word in ("off", "none", "NO"):
+        monkeypatch.setenv("LYRICA_BLOOM", word)
+        assert config.bloom_factor() == 0.0
+
+
+def test_a_wild_bloom_is_clamped_and_a_bad_one_ignored(store, monkeypatch):
+    monkeypatch.setenv("LYRICA_BLOOM", "9")
+    assert config.bloom_factor() == config.BLOOM_MAX
+    monkeypatch.setenv("LYRICA_BLOOM", "brillante")
+    assert config.bloom_factor() == config.BLOOM_DEFAULT
+
+
+def test_the_lift_defaults_and_can_be_tuned(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_LIFT", raising=False)
+    assert config.lift_factor() == config.LIFT_DEFAULT
+    monkeypatch.setenv("LYRICA_LIFT", "0.5")
+    assert config.lift_factor() == 0.5
+    monkeypatch.setenv("LYRICA_LIFT", "off")
+    assert config.lift_factor() == 0.0
+    monkeypatch.setenv("LYRICA_LIFT", "99")
+    assert config.lift_factor() == config.LIFT_MAX

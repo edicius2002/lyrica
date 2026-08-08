@@ -226,6 +226,9 @@ class Overlay:
         self._compact = False
         self._collapse = None
         self._views_width = 0
+        self._feather = config.sweep_feather()
+        self._bloom = config.bloom_factor()
+        self._lift = config.lift_factor()
         self._art_done = True
         self._cuts = sponsorblock.Cuts()
         self._cuts_checked = None
@@ -1146,7 +1149,8 @@ class Overlay:
             self._views[index] = LineView(
                 self.canvas, self.width // 2, start_y, text, words,
                 font=self.f_line, wrap=self.wrap, palette=self.palette,
-                scale=self.chrome.scale)
+                scale=self.chrome.scale, feather=self._feather,
+                bloom=self._bloom, lift=self._lift)
         self._views_width = self.width
 
     def _refit_views(self) -> None:
@@ -1303,7 +1307,10 @@ class Overlay:
                 word, fraction = lyr.word_progress_at(self.line_index,
                                                       pos + WORD_LEAD_S)
                 active.show_sweep(word, fraction)
-                if word >= 0:
+                # Advanced every frame rather than only when the front moves:
+                # the bloom is a decay in time, and between two words the front
+                # stands still while the light behind it still has to drain.
+                if active.advance_bloom(time.monotonic()) or word >= 0:
                     interval = FAST_TICK_MS
             else:
                 # No word timing for this line: light all of it. Leaving it dim

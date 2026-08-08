@@ -407,6 +407,7 @@ class Palette:
     sweep_de: float = 0.0
     compression: float = 1.0
     _fades: dict = field(default_factory=dict, repr=False, compare=False)
+    _blooms: dict = field(default_factory=dict, repr=False, compare=False)
 
     def at(self, fraction: float) -> str:
         """The sweep colour at 0..1 through a character."""
@@ -420,6 +421,23 @@ class Palette:
         way out, instead of appearing and vanishing at full strength.
         """
         return self.side if distance <= 1 else self.far
+
+    def bloom(self, level: float) -> str:
+        """The halo behind a struck character, at 0..1 of its strength.
+
+        From the backdrop to the sung colour, so it is invisible when spent and
+        as bright as the word itself at the moment of the strike. Aiming at a
+        fixed grey is what made the first attempt invisible: the levels it used
+        top out at a luminance of 63, drawn behind text at 253.
+        """
+        step = int(_clamp(level, 0.0, 1.0) * (RAMP_STEPS - 1))
+        hit = self._blooms.get(step)
+        if hit is None:
+            hit = hex_of(tuple(
+                a + (b - a) * step / (RAMP_STEPS - 1)
+                for a, b in zip(self.backdrop, rgb_of(self.sung), strict=True)))
+            self._blooms[step] = hit
+        return hit
 
     def faded(self, distance: int, visibility: float) -> str:
         """Brightness for a line, dimmed by how near the edge it has drifted.
@@ -462,9 +480,15 @@ def _assemble(colours: dict, *, backdrop: tuple, law: Composition) -> Palette:
         # enough to be the contrast by itself.
         outline=0,
         ramp=_blend_ramp(roles["unsung"], roles["sung"]),
-        # Only where the surface adds light. Elsewhere an offset copy replaces
-        # what it lands on and smears instead of glowing.
-        glow=law.additive,
+        # Wherever there is a wash behind the words. The note this replaces
+        # limited it to compositions that add light, on the reasoning that an
+        # offset copy elsewhere replaces what it lands on rather than glowing —
+        # true of the window's composition, but the copies are drawn on the
+        # canvas *under* the glyph, where a pale shape on a dark wash reads as a
+        # halo whatever the window does with the result. Keyed mode is still
+        # without one: there the text stands over arbitrary video and anything
+        # behind it costs legibility rather than buying it.
+        glow=True,
         washed=True,
         backdrop=backdrop,
         hue=hue,
@@ -492,6 +516,10 @@ KEYED = Palette(
     washed=False,
 )
 
+# Kept for the additive path, where the value is *added* to what is behind and
+# a dark grey therefore brightens it. On a canvas nothing is added: a shape is
+# replaced, so a halo has to be bright in itself or it is only a shadow. That is
+# what `Palette.bloom` is for.
 GLOW_LEVELS = [f"#{g:02x}{g:02x}{g:02x}" for g in range(RAMP_STEPS)]
 
 
@@ -527,4 +555,4 @@ def rebacked(pal: Palette, backdrop: tuple) -> Palette:
     backdrop = tuple(backdrop)
     if backdrop == pal.backdrop:
         return pal
-    return replace(pal, backdrop=backdrop, _fades={})
+    return replace(pal, backdrop=backdrop, _fades={}, _blooms={})
