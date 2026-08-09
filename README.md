@@ -100,6 +100,37 @@ truer — four copies two pixels apart double every curve — but twenty times
 cheaper per frame, since showing a different image costs 0.005 ms where
 recolouring four items costs 0.21.
 
+## Who is singing
+
+One dialect of the sources — Apple Music's TTML, which two of the community
+providers serve — records more than the words. It says which voice sings each
+line, and its head says whether that voice is a person or a group:
+
+    <ttm:agent type="person" xml:id="v1"/>
+    <p begin="27.395" ttm:agent="v1">…
+
+In a duet the first two voices the song introduces step off the column, one to
+each side, and whatever they sing together stays in the middle. Whoever opens
+takes the left, because that is an order a listener can predict; by frequency it
+would depend on the whole song, and the singer with the second verse would take
+the left half of a duet purely by having more lines. A third voice keeps the
+middle too — a duet has two sides, and inventing a third position would be
+claiming a third singer.
+
+It is a step, not an alignment. The reference pushes one voice to each edge,
+which works in a full-height view and not in a panel whose width comes from its
+own longest line: aligned outright, a short line ends up against the margin and
+the eye crosses the whole panel every time the singers trade. `LYRICA_VOICE_STEP`
+sets it in pixels, default 48 — at 34 two consecutive lines read as one of them
+being slightly out of true rather than as a side. `off` removes it. A line too
+long to take the whole step takes what room there is and no more, so nothing
+ever reaches the margin.
+
+Nothing moves for a song with one singer, or for a source that does not say —
+which is most of them. The names in that head metadata are never read: they are
+the one part of this that could be wrong about a real person, and nothing here
+would show them.
+
 ## The border reacts to the music
 
 The panel's edge carries a slow light that brightens with what is playing. It

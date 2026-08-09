@@ -21,6 +21,18 @@ They are kept apart rather than dropped. They cannot join the main sequence —
 their times overlap it rather than following it, and interleaving two
 simultaneous vocals gives nonsense — so they come back as a line of their own,
 to be shown somewhere of its own.
+
+Who sings a line is `ttm:agent`, and what each agent is comes from the head:
+
+    <ttm:agent type="person" xml:id="v1">
+      <ttm:name type="full">Lady Gaga</ttm:name>
+    </ttm:agent>
+    <ttm:agent type="group" xml:id="v3"/>
+
+Both halves are needed and neither is enough. The id alone cannot say whether
+"v3" is a third singer or the two of them together, and the head alone cannot
+say which lines are whose. The names are not read: they are the one part of
+this that could be wrong about a real person, and nothing here would show them.
 """
 import re
 import xml.etree.ElementTree as ET
@@ -60,6 +72,38 @@ def _local(tag: str) -> str:
 
 def _is_background(el: ET.Element) -> bool:
     return el.get(f"{{{TTM_NS}}}role") == "x-bg" or el.get("role") == "x-bg"
+
+
+XML_ID = "{http://www.w3.org/XML/1998/namespace}id"
+
+
+def _agent_of(el: ET.Element) -> str:
+    """The id of whoever sings this line, or "" when the document is silent.
+
+    Both spellings are accepted for the same reason the namespaces are patched
+    in: documents in the wild use the prefix without ever declaring it, and a
+    parser that has fallen back to reading them literally sees a bare `agent`.
+    """
+    return (el.get(f"{{{TTM_NS}}}agent") or el.get("agent") or "").strip()
+
+
+def _declared_agents(root: ET.Element) -> dict:
+    """Agent id -> what the head calls it: "person", "group", "other".
+
+    Only the ones it declares. An id used on a line but never declared is left
+    out rather than guessed at, and a reader downstream can take its own
+    default — which is the honest shape, since "undeclared" and "a person" are
+    different states and only one of them is a claim the document made.
+    """
+    found: dict = {}
+    for el in root.iter():
+        if _local(el.tag) != "agent":
+            continue
+        who = (el.get(XML_ID) or el.get("id") or "").strip()
+        kind = (el.get("type") or "").strip().lower()
+        if who and kind:
+            found[who] = kind
+    return found
 
 
 def _collect_spans(node: ET.Element) -> list:
@@ -201,6 +245,7 @@ def parse_ttml(body: str) -> Lyrics | None:
     words: list = []
     backing: list = []
     backing_words: list = []
+    voices: list = []
     for p in root.iter():
         if _local(p.tag) != "p":
             continue
@@ -214,6 +259,7 @@ def parse_ttml(body: str) -> Lyrics | None:
             continue
         lines.append((start, text))
         words.append(line_words)
+        voices.append(_agent_of(p))
         echo = _backing_spans(p)
         backing.append(" ".join("".join(x + tail for _s, _e, x, tail in echo).split()))
         backing_words.append(_words(echo))
@@ -228,9 +274,17 @@ def parse_ttml(body: str) -> Lyrics | None:
     words = [words[i] for i in order]
     backing = [backing[i] for i in order]
     backing_words = [backing_words[i] for i in order]
+    voices = [voices[i] for i in order]
 
+    # Dropped whole when no line names a singer, so a document without agents
+    # is indistinguishable from one that was never asked — which is what stops
+    # a list of sixty empty strings being written to the cache for nothing.
+    if not any(voices):
+        voices = []
     return Lyrics(lines=lines, words=words, synced=True,
-                  backing=backing, backing_words=backing_words)
+                  backing=backing, backing_words=backing_words,
+                  voices=voices,
+                  singers=_declared_agents(root) if voices else {})
 
 
 def declared_timing(body: str) -> str:

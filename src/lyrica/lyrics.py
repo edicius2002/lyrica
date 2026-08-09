@@ -53,6 +53,48 @@ class Lyrics:
     # being sung, so one sequence would interleave them into nonsense.
     backing: list = field(default_factory=list)
     backing_words: list = field(default_factory=list)
+    # Who sings each line, as the source's own agent id, index-matched to
+    # `lines`. Empty when the source does not say — which is most of them.
+    voices: list = field(default_factory=list)
+    # What each of those ids is: "person", "group" or "other", as declared.
+    # Only the ones the source declared; an id absent here was used on a line
+    # and never introduced, and that is a different thing from being a person.
+    singers: dict = field(default_factory=dict)
+
+    def voice_at(self, line_index: int) -> str:
+        """Who sings a line, or "" when nothing said."""
+        if 0 <= line_index < len(self.voices):
+            return self.voices[line_index]
+        return ""
+
+    def voice_sides(self) -> dict:
+        """Which way each voice leans: -1 towards the left, +1 the right, 0 not.
+
+        Empty when there is nothing to tell apart, and that is the common case:
+        one singer, or a source that never said. Nothing then moves, so a solo
+        track looks exactly as it did.
+
+        A side goes to the first two voices in the order the song introduces
+        them, so whoever opens is on the left — which is both what the reference
+        does and the only ordering a listener could predict. Frequency would
+        have been the alternative and is worse: it can only be known after the
+        whole song, so the singer with the second verse would take the left half
+        of a duet purely by having more lines.
+
+        Anything the document calls a group keeps the middle, and so does any
+        third voice. A duet has two sides; what the two of them sing together
+        belongs to neither, and inventing a third position for it would say
+        there was a third singer.
+        """
+        order: list = []
+        for who in self.voices:
+            if who and who not in order:
+                order.append(who)
+        apart = [w for w in order if self.singers.get(w) != "group"]
+        if len(apart) < 2:
+            return {}
+        return {w: (-1 if w == apart[0] else 1 if w == apart[1] else 0)
+                for w in order}
 
     def backing_at(self, line_index: int) -> tuple:
         """(text, words) sung behind a line, or ("", []) where nothing was."""

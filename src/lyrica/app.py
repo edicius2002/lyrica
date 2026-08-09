@@ -315,6 +315,14 @@ class Overlay:
         self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
+        self._sides: dict = {}
+        self._sides_of: Lyrics | None = None
+        # A step, not an alignment: the reference pushes one voice to each edge,
+        # which works in a full-height view and does not here, because this
+        # panel's width comes from its own longest line — a short line aligned
+        # outright ends up against the margin, and the eye crosses the whole
+        # panel every time the singers trade.
+        self._voice_step = config.voice_step()
         # Read once and set on the module, because it decides what the cached
         # images *are* rather than how they are used.
         bloom_mod.GROWTH = config.growth_factor()
@@ -1339,6 +1347,7 @@ class Overlay:
                 self._glides.pop(index, None)
                 self._targets.pop(index, None)
 
+        sides = self._voice_sides(lyr)
         for index in indices:
             if index in self._views:
                 continue
@@ -1347,12 +1356,35 @@ class Overlay:
             # Born off the bottom when it is arriving from below, so its first
             # movement is the same rise as the lines already on screen.
             start_y = self.height if index > self.line_index else -self.chrome.px(60)
-            self._views[index] = LineView(
+            view = LineView(
                 self.canvas, self.width // 2, start_y, text, words,
                 font=self.f_line, wrap=self.wrap, palette=self.palette,
                 scale=self.chrome.scale, feather=self._feather,
-                bloom=self._bloom)
+                bloom=self._bloom,
+                lean=sides.get(lyr.voice_at(index), 0)
+                * self.chrome.px(self._voice_step))
+            self._views[index] = view
+            self._fit_view(view)
         self._views_width = self.width
+
+    def _voice_sides(self, lyr: Lyrics) -> dict:
+        """Which way each of this song's voices leans, worked out once.
+
+        Kept against the object rather than the track, because the lyrics are
+        what the answer is about: a song whose words arrive late replaces this
+        `Lyrics` and gets asked again, and one that never changes is asked once
+        however many thousand ticks it plays for.
+        """
+        if lyr is not self._sides_of:
+            self._sides_of, self._sides = lyr, lyr.voice_sides()
+        return self._sides
+
+    def _fit_view(self, view: LineView) -> None:
+        """Let a line take its voice's step, as far as the margins allow."""
+        if not view.lean:
+            return
+        margin = self.chrome.px(EDGE_MARGIN)
+        view.fit(margin, self.width - margin)
 
     def _show_backing(self, lyr: Lyrics, pos: float) -> None:
         """Draw what is sung behind the active line, off at the right margin.
@@ -1451,6 +1483,11 @@ class Overlay:
         if self._collapse is not None:
             for view in self._views.values():
                 view.recentre(self.width // 2)
+                # Re-clipped rather than carried: the box the step is bounded
+                # by is narrower mid-collapse than the one it was granted in,
+                # and a line holding its full step through that would be the
+                # one thing on screen crossing the margin.
+                self._fit_view(view)
             return
         self._views_width = self.width
         self._clear_backing()

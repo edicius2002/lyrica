@@ -100,7 +100,8 @@ class LineView:
 
     def __init__(self, canvas: tk.Canvas, cx: int, y: float, text: str, words: list,
                  *, font, wrap: int, palette, scale: float = 1.0,
-                 feather: float = FEATHER_PX, bloom: float = BLOOM_S):
+                 feather: float = FEATHER_PX, bloom: float = BLOOM_S,
+                 lean: float = 0.0):
         self.canvas = canvas
         self.palette = palette
         self.words = words
@@ -109,6 +110,11 @@ class LineView:
         self._scale = scale
         self.y = float(y)
         self._cx = float(cx)
+        # How far this line's voice wants to stand from the column, and how far
+        # it actually does. The two differ whenever the line is too long to move
+        # the whole way, which is the point: see `fit`.
+        self.lean = float(lean)
+        self._shift = 0.0
         self._items: list = []      # [centre_x, row, item, colour]
         self._char_piece: list[int] = []   # character -> the word it belongs to
         self._outline: list = []
@@ -220,11 +226,43 @@ class LineView:
         off to one side after the panel came back out of its compact size.
         """
         delta = round(cx - self._cx)
-        if not delta:
-            return
+        if delta:
+            self._cx += delta
+            self._slide(delta)
+
+    def fit(self, left: float, right: float) -> None:
+        """Stand this line's voice aside, as far as the box between the margins
+        allows.
+
+        The offset is a fixed step rather than an alignment, and it is clipped
+        here rather than granted. Aligning outright is what the reference does,
+        but the reference is not working inside a panel whose width comes from
+        its own longest line: there, a short line ends up against the edge and
+        the eye crosses the whole panel every time the singers trade. A step
+        that a long line simply cannot take in full says the same thing about
+        who is singing without ever putting a word near the margin — and the
+        lines that keep it whole are the short ones, which are the ones a duet
+        actually alternates on.
+
+        Idempotent, so it can be called again whenever the box changes without
+        the line creeping further each time.
+        """
+        want = self.lean
+        lo = min((a for a, _b in self._row_spans), default=0.0) - self._shift
+        hi = max((b for _a, b in self._row_spans), default=0.0) - self._shift
+        if want > 0:
+            want = max(0.0, min(want, right - hi))
+        elif want < 0:
+            want = min(0.0, max(want, left - lo))
+        delta = round(want - self._shift)
+        if delta:
+            self._shift += delta
+            self._slide(delta)
+
+    def _slide(self, delta: int) -> None:
+        """Move every part of the line sideways, geometry included."""
         for item in self.item_ids():
             self.canvas.move(item, delta, 0)
-        self._cx += delta
         for entry in self._items:
             entry[0] += delta
         self._row_spans = [(a + delta, b + delta) for a, b in self._row_spans]

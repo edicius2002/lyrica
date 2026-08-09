@@ -180,6 +180,37 @@ def growth_factor() -> float:
     return max(GROWTH_MIN, min(GROWTH_MAX, value))
 
 
+# How far each singer of a duet stands from the column, in pixels at the
+# designed size. Rendered before it was chosen: at 34 two lines by different
+# voices sit 68 px apart and it reads as one of them being slightly out of
+# true rather than as a side; the step has to be about half a word before the
+# eye takes it as deliberate. The ceiling is where the longest line runs out of
+# room — the wrap width leaves a hundred pixels on each side of the window —
+# past which the step would be granted to short lines and refused to long ones,
+# which is the ragged look this is bounded to avoid.
+VOICE_STEP_MIN, VOICE_STEP_MAX = 0.0, 100.0
+VOICE_STEP_DEFAULT = 48.0
+
+
+def voice_step() -> float:
+    """How far a duet's two voices stand from the column, in pixels."""
+    raw = os.environ.get("LYRICA_VOICE_STEP", "").strip()
+    if not raw:
+        return VOICE_STEP_DEFAULT
+    if raw.lower() in ("off", "none", "no"):
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_VOICE_STEP=%r is not a number; using %s",
+                       raw, VOICE_STEP_DEFAULT)
+        return VOICE_STEP_DEFAULT
+    if not VOICE_STEP_MIN <= value <= VOICE_STEP_MAX:
+        logger.warning("LYRICA_VOICE_STEP=%s is outside %s-%s; clamping",
+                       value, VOICE_STEP_MIN, VOICE_STEP_MAX)
+    return max(VOICE_STEP_MIN, min(VOICE_STEP_MAX, value))
+
+
 BEAM_STYLES = ("comet", "shine")
 
 

@@ -403,3 +403,16 @@ def test_the_growth_defaults_and_can_be_tuned(store, monkeypatch):
     assert config.growth_factor() == 0.0
     monkeypatch.setenv("LYRICA_GROWTH", "5")
     assert config.growth_factor() == config.GROWTH_MAX
+
+
+def test_the_voice_step_defaults_and_can_be_tuned(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_VOICE_STEP", raising=False)
+    assert config.voice_step() == config.VOICE_STEP_DEFAULT
+    monkeypatch.setenv("LYRICA_VOICE_STEP", "70")
+    assert config.voice_step() == 70
+    monkeypatch.setenv("LYRICA_VOICE_STEP", "off")
+    assert config.voice_step() == 0.0
+    monkeypatch.setenv("LYRICA_VOICE_STEP", "400")
+    assert config.voice_step() == config.VOICE_STEP_MAX
+    monkeypatch.setenv("LYRICA_VOICE_STEP", "un poco")
+    assert config.voice_step() == config.VOICE_STEP_DEFAULT

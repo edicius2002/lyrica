@@ -81,7 +81,10 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 #    arrived first. Those that lost a race hold a source with no backing
 #    vocals, and nothing in the entry says whether it lost one or the other
 #    source simply had nothing — so they are all asked again.
-CACHE_VERSION = 3
+# 4: entries written before who sings each line was parsed at all. Same story
+#    as 2, and the same answer: an entry whose providers have all been asked is
+#    never refreshed by anything else, so the version is what refreshes it.
+CACHE_VERSION = 4
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -123,6 +126,8 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     lyr.backing = list(d.get("backing", []))
     lyr.backing_words = [[tuple(w) for w in line]
                          for line in d.get("backing_words", [])]
+    lyr.voices = list(d.get("voices", []))
+    lyr.singers = dict(d.get("singers", {}))
     return lyr, asked
 
 
@@ -132,15 +137,27 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
     else:
         payload = {"lines": result.lines, "words": result.words, "asked": asked,
                    "backing": result.backing, "backing_words": result.backing_words,
+                   "voices": result.voices, "singers": result.singers,
                    "v": CACHE_VERSION}
         payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _staged(lyr: Lyrics) -> bool:
+    """Whether this answer knows anything about who was singing.
+
+    Backing vocals and named voices come from the same place — the one dialect
+    that records either — so they are one property here rather than two tests
+    that would always agree. What it separates is a source that transcribed the
+    words from one that transcribed the performance.
+    """
+    return any(lyr.backing) or bool(lyr.voices)
+
+
 def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
     """Whether `new` should replace `best`.
 
-    Precision first, and then whether anything was sung behind the line. That
+    Precision first, and then whether the answer knows who was singing. That
     second test is not a refinement: measured against a real cache, Levitating
     was held as `musixmatch/richsync` — the same WORD precision as the source
     that has its twelve backing vocals, and none of them.
@@ -151,7 +168,7 @@ def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
         return True
     if new.precision != best.precision:
         return new.precision > best.precision
-    return any(new.backing) and not any(best.backing)
+    return _staged(new) and not _staged(best)
 
 
 def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) -> bool:
@@ -180,10 +197,10 @@ def _may_add_backing(best: Lyrics | None,
     the other source has for it. The first answer to arrive had won a race it
     should not have been allowed to end.
 
-    Asked only of the sources, never of the readings of a name: `backing` is a
+    Asked only of the sources, never of the readings of a name: this is a
     property of where the words came from, not of what they were asked for.
     """
-    if best is None or any(best.backing):
+    if best is None or _staged(best):
         return False
     return any(getattr(p, "carries_backing", False) for p in pending)
 
