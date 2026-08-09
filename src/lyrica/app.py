@@ -506,7 +506,7 @@ class Overlay:
         self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
 
     def _lay_out_card(self, title: str, artists: str) -> None:
-        """Place the card's parts and centre the group."""
+        """Place the card's parts against the panel's left margin."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
         # Measured once per pair of strings. `measure` is a round trip into Tk
@@ -517,20 +517,24 @@ class Overlay:
             self._card_measured = key
             self._card_width = max(title_font.measure(title),
                                    artist_font.measure(artists))
-        text_width = self._card_width
         # The cover's space is reserved whether or not it has arrived, so the
         # card does not shuffle sideways the moment it does.
         cover = self._thumb_size + gap
-        block = cover + text_width
 
-        # Halved the same way the window's own position is, so the two cancel
-        # exactly. The window sits at `centre - width // 2` and the card at
-        # `width // 2 - block // 2`, which puts the card at `centre - block // 2`
-        # on screen — the same pixel at every width. Written as
-        # `(width - block) // 2` the two roundings disagree for odd widths, and
-        # the card shuffled a pixel back and forth on every frame of a resize,
-        # repainting every antialiased glyph as it went. That was the flicker.
-        left = max(self.chrome.px(12), self.width // 2 - block // 2)
+        # Against the left margin, at every width. Centred, the card had to
+        # travel three hundred and seventy-five pixels across an expansion to
+        # stay in the middle of a panel that was growing under it — and while
+        # the window was moving to keep its own centre, the two had to cancel in
+        # the same repaint to look still. They cancelled arithmetically and not
+        # visually, and the card shook. Now the window holds its left edge
+        # through a move and the card holds its distance from it, so there is
+        # nothing to cancel and nothing that can disagree.
+        #
+        # It is also what the compact panel already did: its width is measured
+        # from this block, so `(width - block) // 2` landed on the margin
+        # anyway. The two sizes now put the card in the same place instead of
+        # two.
+        left = self.chrome.px(12)
         top = self._card_y
 
         self.canvas.coords(self._thumb_item, left, top,
@@ -720,14 +724,15 @@ class Overlay:
             self._collapse = None
             self._resize_window(*target)
             return
-        # The anchor is taken once, here, and every frame of the move is
-        # measured from it. Asking Tk where the window is on each frame mixed a
-        # position it had not applied yet with a width that had already changed,
-        # and the centre the move is supposed to hold slid sideways and came
-        # back — a panel that jumped left and then grew into place.
+        # The left edge, held for the whole move, and taken once. Holding the
+        # centre meant the window travelled left while the card travelled right
+        # inside it by exactly as much — two movers, applied by two different
+        # things, that have to cancel in the same repaint to look still. The
+        # arithmetic cancelled and the repaints did not, and the card shook.
+        # Nothing cancels now: the window stays where it is and unfolds to the
+        # right, and the only thing moving is the card finding its place.
         self._collapse = (self.width, self.height, *target, time.monotonic(),
-                          self.root.winfo_x() + self.width // 2,
-                          self.root.winfo_y())
+                          self.root.winfo_x(), self.root.winfo_y())
         # One region for the whole move, big enough for either end of it. A
         # region wider than the window clips nothing, so the panel is never cut
         # short of itself; the corners are square while it travels and rounded
@@ -739,14 +744,14 @@ class Overlay:
         """Move one frame along the collapse. True while it is still going."""
         if self._collapse is None:
             return False
-        from_w, from_h, to_w, to_h, started, centre, top = self._collapse
+        from_w, from_h, to_w, to_h, started, left, top = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
         self._resize_window(round(from_w + (to_w - from_w) * t),
                             round(from_h + (to_h - from_h) * t), settling=done,
-                            anchor=(centre, top))
+                            anchor=(left, top))
         if not done:
             return True
         self._collapse = None
@@ -763,18 +768,23 @@ class Overlay:
         """
         if (width, height) == (self.width, self.height):
             return
-        # From the caller when there is a move in progress, because Tk cannot
-        # be asked where the window is faster than it puts it there.
-        centre, top = anchor or (self.root.winfo_x() + self.width // 2,
-                                 self.root.winfo_y())
+        # A move in progress passes its own anchor: the left edge it started
+        # from, held for the whole of it. Anything else is a one-off, and keeps
+        # the horizontal centre — a panel that changes size once should stay
+        # where it looked like it was.
+        if anchor is None:
+            keep = self.root.winfo_x() + self.width // 2 - width // 2
+            top = self.root.winfo_y()
+        else:
+            keep, top = anchor
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
         # The whole desktop, not the primary monitor. Clamping to
         # `winfo_screenwidth` teleported the panel back from a second screen
         # every time a track with no lyrics collapsed it — measured here, a
         # 4480 px desktop against a 1920 px primary.
-        left, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
-        x = max(left, min(centre - width // 2, left + dwidth - width))
+        edge, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
+        x = max(edge, min(keep, edge + dwidth - width))
         top = max(dtop, top)
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)

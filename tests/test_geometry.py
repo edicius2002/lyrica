@@ -273,12 +273,12 @@ def test_the_region_covers_both_ends_of_a_move_before_it_starts(monkeypatch):
         f"one region covering the whole move, not {asked}")
 
 
-def test_the_card_holds_the_same_pixel_through_a_resize():
-    # The window moves left exactly as far as the card moves right inside it,
-    # so the card should not move on screen at all. Written with the two halves
-    # rounded independently they disagreed for odd widths, and the card shuffled
-    # a pixel back and forth on every frame — repainting every antialiased glyph
-    # as it went, which is what the flicker was.
+def test_the_card_does_not_move_at_all_when_the_panel_resizes():
+    # Centred, it had to travel three hundred and seventy-five pixels across an
+    # expansion to stay in the middle of a panel growing under it, while the
+    # window moved to keep its own centre — two movers that had to cancel in the
+    # same repaint to look still. They cancelled arithmetically and not
+    # visually. Against the left margin there is nothing to cancel.
     from lyrica import app as A
 
     class Panel:
@@ -286,7 +286,6 @@ def test_the_card_holds_the_same_pixel_through_a_resize():
                                      A.glass.PANEL)
         _thumb_size = 78
         _card_y = 20
-
         _thumb_image = None
 
         def __init__(self, width):
@@ -300,22 +299,14 @@ def test_the_card_holds_the_same_pixel_through_a_resize():
             if self.placed is None:
                 self.placed = box[0]
 
-    gap = Panel(0).chrome.px(10)
-    block = 78 + gap + 300                         # cover + gap + text
-    # From the width at which the card fits with its margin — narrower than
-    # that it is pinned to the left edge, which is the compact panel's own
-    # width by construction and not a size a resize passes through.
-    first = 2 * (block // 2 + Panel(0).chrome.px(12))
     seen = set()
-    for width in range(first, 1200, 7):            # odd and even alike
+    for width in range(325, 1200, 7):              # compact through full
         panel = Panel(width)
         panel._title_font = panel._artist_font = _Metrics(300)
         panel._thumb_item = panel._title_item = panel._artist_item = object()
         A.Overlay._lay_out_card(panel, "title", "artist")
-        centre = 960                               # held by `_resize_window`
-        seen.add(centre - width // 2 + panel.placed)
-    assert len(seen) == 1, f"the card moved between widths: {sorted(seen)}"
-    assert seen == {960 - block // 2}
+        seen.add(panel.placed)
+    assert seen == {Panel(0).chrome.px(12)}, f"the card moved: {sorted(seen)}"
 
 
 class _Metrics:
