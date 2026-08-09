@@ -169,15 +169,27 @@ def grown(char: str, spec: tuple, step: int, colour: tuple):
 
 
 def offset(char: str, spec: tuple, step: int) -> tuple:
-    """How far to move a grown glyph so it swells about its own centre."""
+    """Where a grown glyph's *image* goes, relative to the letter's own corner.
+
+    Two things have to be undone at once and the first attempt did neither
+    properly, which put every growing word twelve pixels down and to the right
+    instead of swelling in place.
+
+    The image carries `PAD` of transparent margin so the halo has room to fall
+    off, and that margin is resampled along with everything else — so the glyph
+    sits `PAD * scale` inside the image, not `PAD`. And the glyph should swell
+    about its own centre, which means moving it back by half of what it gained;
+    that half is of the *letter's* width, not of the padded image's.
+    """
     font = _pil_font(spec)
     if font is None or step <= 0:
         return (0.0, 0.0)
     ascent, descent = font.getmetrics()
-    width = max(1, int(font.getlength(char))) + PAD * 2
-    height = ascent + descent + PAD * 2
+    width = max(1, int(font.getlength(char)))
+    height = ascent + descent
     scale = 1.0 + GROWTH * min(step, SCALES) / SCALES
-    return (-PAD - width * (scale - 1) / 2, -PAD - height * (scale - 1) / 2)
+    return (-width * (scale - 1) / 2 - PAD * scale,
+            -height * (scale - 1) / 2 - PAD * scale)
 
 
 def blurred_ready(char: str, spec: tuple, level: int,

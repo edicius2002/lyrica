@@ -249,10 +249,24 @@ def test_a_growing_letter_swells_about_its_own_centre():
     small = bloom_mod.grown("a", spec, 1, (255, 255, 255))
     big = bloom_mod.grown("a", spec, bloom_mod.SCALES, (255, 255, 255))
     assert big.width() > small.width() and big.height() > small.height()
-    # Moved left and up by half of what it gained, or it would grow rightwards.
-    dx1, dy1 = bloom_mod.offset("a", spec, 1)
-    dx8, dy8 = bloom_mod.offset("a", spec, bloom_mod.SCALES)
-    assert dx8 < dx1 and dy8 < dy1
+    # And the letter's centre must not move at all, which is what growing about
+    # its own centre means. The first attempt used the padded width where the
+    # letter's was wanted and did not resample the padding, which put every
+    # growing word twelve pixels down and to the right instead of swelling.
+    font = bloom_mod._pil_font(spec)
+    width = max(1, int(font.getlength("a")))
+    height = sum(font.getmetrics())
+    centres = set()
+    for step in range(bloom_mod.SCALES + 1):
+        scale = 1.0 + bloom_mod.GROWTH * min(step, bloom_mod.SCALES) / bloom_mod.SCALES
+        dx, dy = bloom_mod.offset("a", spec, step)
+        if step == 0:
+            corner = (0.0, 0.0)
+        else:
+            corner = (dx + bloom_mod.PAD * scale, dy + bloom_mod.PAD * scale)
+        centres.add((round(corner[0] + width * scale / 2, 3),
+                     round(corner[1] + height * scale / 2, 3)))
+    assert len(centres) == 1, f"the letter drifted: {sorted(centres)}"
 
 
 def test_the_letter_is_swapped_for_its_stand_in_and_back(view):

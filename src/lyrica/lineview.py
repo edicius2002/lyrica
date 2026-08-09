@@ -438,7 +438,7 @@ class LineView:
             return
         x, y = self.canvas.coords(text)
         dx, dy = bloom.offset(char, self._font, step)
-        self.canvas.coords(item, x + dx + bloom.PAD, y + dy + bloom.PAD)
+        self.canvas.coords(item, x + dx, y + dy)
         self.canvas.itemconfigure(item, image=image, state="normal")
         self.canvas.itemconfigure(text, state="hidden")
         self._showing[index] = want
