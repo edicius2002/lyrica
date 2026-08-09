@@ -41,8 +41,18 @@ def _overlay_once(tk_root):
     `image "pyimage1" doesn't exist`.
     """
 
+    import sys
+
     from lyrica import app as A
     from lyrica import config
+    if sys.platform != "win32":
+        # It builds a visible, borderless, always-on-top window and asks the
+        # platform for a tray icon, a global hotkey and an output meter. On the
+        # macOS runner that hangs rather than failing, which is worse: the job
+        # sat in progress for seven minutes where it usually takes twenty
+        # seconds. What these tests cover that is not Windows-first is covered
+        # by the modules' own tests, which do run there.
+        pytest.skip("the overlay is Windows-first")
     config.load()
     made = A.Overlay()
     # Handed straight back, because making a second root steals the default and
