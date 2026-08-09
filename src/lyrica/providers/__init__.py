@@ -72,6 +72,13 @@ OVERALL_TIMEOUT_S = 12.0
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
                  "queried")
 
+# What shape the entries on disk are. Raised whenever a result carries
+# something an older entry could not, so the older ones are fetched again
+# rather than answering with a hole: backing vocals were parsed, cached
+# without, and every replay came back with none of them, because nothing else
+# would ever have refreshed an entry whose providers had all been asked.
+CACHE_VERSION = 2
+
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
     key = f"{artist.lower()}|{title.lower()}|{int(duration)}"
@@ -93,6 +100,10 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     know whether a better source had been asked.
     """
     d = json.loads(path.read_text(encoding="utf-8"))
+    if d.get("v") != CACHE_VERSION:
+        # Written by an older shape. Reported as a miss nobody has been asked
+        # about, which is what sends it round the providers again.
+        return None, []
     asked = d.get("asked", [])
     if d.get("miss"):
         return None, asked
@@ -105,14 +116,19 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     # indistinguishable from a live one.
     lyr.words = [[tuple(w) for w in line] for line in d.get("words", [])]
     lyr.queried = tuple(lyr.queried)     # JSON has no tuples
+    lyr.backing = list(d.get("backing", []))
+    lyr.backing_words = [[tuple(w) for w in line]
+                         for line in d.get("backing_words", [])]
     return lyr, asked
 
 
 def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
     if result is None:
-        payload = {"miss": True, "asked": asked}
+        payload = {"miss": True, "asked": asked, "v": CACHE_VERSION}
     else:
-        payload = {"lines": result.lines, "words": result.words, "asked": asked}
+        payload = {"lines": result.lines, "words": result.words, "asked": asked,
+                   "backing": result.backing, "backing_words": result.backing_words,
+                   "v": CACHE_VERSION}
         payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
