@@ -227,3 +227,78 @@ def test_the_rise_is_shaped_rather_than_linear():
     assert _lift_shape(LIFT_ATTACK * 0.5) > 0.5
     middle = (1.0 + LIFT_ATTACK) / 2
     assert 0.3 < _lift_shape(middle) < 0.7
+
+
+# --- the word grows ----------------------------------------------------------
+
+def test_a_letter_at_rest_is_drawn_as_text_not_as_an_image():
+    # Step zero is what an ordinary text item already draws, so nothing is made
+    # for it and the ramp keeps its full sixty-four colours.
+    from lyrica import bloom as bloom_mod
+
+    assert bloom_mod.grown("a", ("Segoe UI", -30, "bold"), 0, (255, 255, 255)) is None
+    assert bloom_mod.offset("a", ("Segoe UI", -30, "bold"), 0) == (0.0, 0.0)
+
+
+def test_a_growing_letter_swells_about_its_own_centre():
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -30, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    small = bloom_mod.grown("a", spec, 1, (255, 255, 255))
+    big = bloom_mod.grown("a", spec, bloom_mod.SCALES, (255, 255, 255))
+    assert big.width() > small.width() and big.height() > small.height()
+    # Moved left and up by half of what it gained, or it would grow rightwards.
+    dx1, dy1 = bloom_mod.offset("a", spec, 1)
+    dx8, dy8 = bloom_mod.offset("a", spec, bloom_mod.SCALES)
+    assert dx8 < dx1 and dy8 < dy1
+
+
+def test_the_letter_is_swapped_for_its_stand_in_and_back(view):
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+
+    from lyrica.lineview import LIFT_ATTACK
+    view.advance_bloom(when + span * LIFT_ATTACK)
+    assert view._showing, "nothing grew"
+    index = next(iter(view._showing))
+    assert view.canvas.itemcget(view._items[index][2], "state") == "hidden"
+
+    view.advance_bloom(when + span + 1e-3)
+    assert not view._showing, "the stand-ins never went away"
+    assert view.canvas.itemcget(view._items[index][2], "state") == "normal"
+
+
+def test_only_so_many_new_sizes_are_built_in_one_frame(view):
+    # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
+    # size every frame overran on its first play: measured at 24 ms.
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import LIFT_ATTACK, NEW_SIZES_PER_FRAME
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    bloom_mod._cache.clear()
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+    view.advance_bloom(when + span * LIFT_ATTACK)
+    assert len(bloom_mod._cache) <= NEW_SIZES_PER_FRAME
+
+
+def test_a_line_no_longer_active_leaves_no_stand_ins(view):
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+    from lyrica.lineview import LIFT_ATTACK
+    view.advance_bloom(when + span * LIFT_ATTACK)
+    view.set_active(False)
+    assert not view._showing
+    # Tk answers "" for a state never set, which is what an untouched letter has.
+    assert all(view.canvas.itemcget(e[2], "state") in ("", "normal")
+               for e in view._items)
