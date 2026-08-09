@@ -273,12 +273,13 @@ def test_the_region_covers_both_ends_of_a_move_before_it_starts(monkeypatch):
         f"one region covering the whole move, not {asked}")
 
 
-def test_the_card_does_not_move_at_all_when_the_panel_resizes():
-    # Centred, it had to travel three hundred and seventy-five pixels across an
-    # expansion to stay in the middle of a panel growing under it, while the
-    # window moved to keep its own centre — two movers that had to cancel in the
-    # same repaint to look still. They cancelled arithmetically and not
-    # visually. Against the left margin there is nothing to cancel.
+def test_the_card_slides_to_the_middle_as_the_panel_opens():
+    # And back to the margin as it shuts. It is the only thing moving: the
+    # window holds the left edge it started from for the whole of a move, where
+    # holding its centre meant it travelled left while the card travelled right
+    # inside it by exactly as much — two movers, applied by two different
+    # things, that had to cancel in the same repaint to look still. They
+    # cancelled arithmetically and not visually.
     from lyrica import app as A
 
     class Panel:
@@ -299,14 +300,21 @@ def test_the_card_does_not_move_at_all_when_the_panel_resizes():
             if self.placed is None:
                 self.placed = box[0]
 
-    seen = set()
-    for width in range(325, 1200, 7):              # compact through full
+    def at(width):
         panel = Panel(width)
         panel._title_font = panel._artist_font = _Metrics(300)
         panel._thumb_item = panel._title_item = panel._artist_item = object()
         A.Overlay._lay_out_card(panel, "title", "artist")
-        seen.add(panel.placed)
-    assert seen == {Panel(0).chrome.px(12)}, f"the card moved: {sorted(seen)}"
+        return panel.placed
+
+    margin = Panel(0).chrome.px(12)
+    block = 78 + Panel(0).chrome.px(10) + 300
+    assert at(block + margin * 2) == margin, "compact sits against the margin"
+    assert at(1125) == 1125 // 2 - block // 2, "and full sits in the middle"
+
+    # Monotonic the whole way, so it slides rather than jumping about.
+    places = [at(w) for w in range(block + margin * 2, 1200, 7)]
+    assert places == sorted(places)
 
 
 class _Metrics:

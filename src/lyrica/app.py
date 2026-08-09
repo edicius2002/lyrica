@@ -506,7 +506,7 @@ class Overlay:
         self._content_top = self._card_y + self._thumb_size + self.chrome.px(12)
 
     def _lay_out_card(self, title: str, artists: str) -> None:
-        """Place the card's parts against the panel's left margin."""
+        """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
         # Measured once per pair of strings. `measure` is a round trip into Tk
@@ -521,20 +521,19 @@ class Overlay:
         # card does not shuffle sideways the moment it does.
         cover = self._thumb_size + gap
 
-        # Against the left margin, at every width. Centred, the card had to
-        # travel three hundred and seventy-five pixels across an expansion to
-        # stay in the middle of a panel that was growing under it — and while
-        # the window was moving to keep its own centre, the two had to cancel in
-        # the same repaint to look still. They cancelled arithmetically and not
-        # visually, and the card shook. Now the window holds its left edge
-        # through a move and the card holds its distance from it, so there is
-        # nothing to cancel and nothing that can disagree.
+        # Centred in the panel, and free to be again. The trembling this went
+        # through was never the centring: it was the *window* travelling left to
+        # hold its own centre while the card travelled right inside it by
+        # exactly as much, two movers applied by two different things that had
+        # to cancel in the same repaint. The window holds its left edge through
+        # a move now, so the card is the only thing moving and has nothing to
+        # cancel against — it simply slides to the middle as the panel opens,
+        # and back to the margin as it shuts.
         #
-        # It is also what the compact panel already did: its width is measured
-        # from this block, so `(width - block) // 2` landed on the margin
-        # anyway. The two sizes now put the card in the same place instead of
-        # two.
-        left = self.chrome.px(12)
+        # Halved the same way the window's is anyway, so the two agree at every
+        # width instead of disagreeing by a pixel on the odd ones.
+        block = self._thumb_size + gap + self._card_width
+        left = max(self.chrome.px(12), self.width // 2 - block // 2)
         top = self._card_y
 
         self.canvas.coords(self._thumb_item, left, top,
