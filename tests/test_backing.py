@@ -5,26 +5,17 @@ from lyrica.lyrics import Lyrics
 
 
 @pytest.fixture
-def panel():
+def panel(overlay):
     from lyrica import app as A
-    from lyrica import bloom, config
-    # An `ImageTk.PhotoImage` belongs to the interpreter that made it, and the
-    # bloom's cache outlives any one of them. The overlay has a single root for
-    # its whole life; a test suite does not.
-    bloom._cache.clear()
-    bloom._fonts.clear()
-    config.load()
-    o = A.Overlay()
-    o.lyrics = Lyrics(
+    overlay.lyrics = Lyrics(
         lines=[(0.0, "I need you all night")],
         words=[[(0.0, 0.4, "I"), (0.4, 0.9, "need"), (0.9, 1.6, "you"),
                 (1.6, 2.0, "all"), (2.0, 2.6, "night")]],
         synced=True, backing=["(You)"], backing_words=[[(1.0, 1.7, "(You)")]])
-    o._lyrics_state = A.LYRICS_PRESENT
-    o._go_to_line(0, o.lyrics)
-    o.root.update()
-    yield o
-    o.root.destroy()
+    overlay._lyrics_state = A.LYRICS_PRESENT
+    overlay._go_to_line(0, overlay.lyrics)
+    overlay.root.update()
+    return overlay
 
 
 def _shown(panel):

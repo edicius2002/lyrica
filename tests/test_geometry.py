@@ -186,8 +186,8 @@ def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch)
     assert asked == [full], f"built for {asked}, not the full {full}"
 
 
-def test_only_the_landing_frame_pays_for_the_flush_and_the_border(monkeypatch):
-    # The flush and the border are what took a resize frame past its budget.
+def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
+    # They are what took a resize frame past its budget.
     # The clipping region is not deferrable with them: it decides what of the
     # window is painted at all, and holding it back showed a panel clipped to
     # the size it used to be while it had already moved and grown.
@@ -230,9 +230,12 @@ def test_only_the_landing_frame_pays_for_the_flush_and_the_border(monkeypatch):
                         lambda _root: (0, 0, 3000, 2000))
     panel = Panel()
     A.Overlay._resize_window(panel, 880, 290, settling=False)
-    assert done == [], f"a frame in flight did {done}"
+    assert done == ["beam"], (
+        "the border is geometry: left behind it stays drawn around the outline "
+        f"the panel is leaving. This did {done}")
+    done.clear()
     A.Overlay._resize_window(panel, 860, 280, settling=True)
-    assert done == ["shape", "flush", "beam"]
+    assert done == ["beam", "shape", "flush"]
 
 
 

@@ -755,25 +755,25 @@ class Overlay:
         top = max(dtop, top)
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)
+        # The border is rebuilt every frame, because it is geometry and not
+        # decoration: its segments are laid out for a particular width, so one
+        # left behind stays drawn around the panel's old outline while the panel
+        # grows away from it — which reads as the border sliding left. It costs
+        # about a millisecond and a half, which is affordable; the two below
+        # were what took a resize frame to 30.8 ms against a budget of 16.
+        if self.beam is not None:
+            self.beam.reshape(width, height,
+                              self.chrome.px(chrome_mod.CORNER_RADIUS))
         if settling:
-            # The region, the flush and the border all wait for the frame that
-            # lands. Between them they took a resize frame to 30.8 ms against a
-            # budget of 16 — a window being asked to change size faster than it
-            # can be repainted, which is what the flicker was. `SetWindowRgn`
-            # is most of it on its own: it repaints the whole window
-            # synchronously.
-            #
-            # The region cannot simply be left stale, though, because it is what
-            # the window is *clipped to* — held at the old compact shape while
-            # the window had moved and grown, it showed a small box at the new
-            # left edge that snapped open on landing. A region larger than the
-            # window clips nothing, so `_retarget_size` sets one big enough for
-            # the whole move before it starts, and this puts the exact one back.
+            # `SetWindowRgn` repaints the whole window synchronously and is most
+            # of that cost on its own. It cannot simply be left stale either,
+            # because it is what the window is *clipped to*: held at the shape
+            # the panel was leaving, it showed a small box at the new left edge
+            # that snapped open on landing. A region larger than the window
+            # clips nothing, so `_retarget_size` sets one big enough for the
+            # whole move before it starts, and this puts the exact one back.
             chrome_mod.shape(self.root, self.chrome, width, height)
             self.root.update_idletasks()
-            if self.beam is not None:
-                self.beam.reshape(width, height,
-                                  self.chrome.px(chrome_mod.CORNER_RADIUS))
         title, artists = self._card_text or ("", "")
         self._lay_out_card(title, artists)
         self._place_thumb()

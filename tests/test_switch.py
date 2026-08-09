@@ -18,24 +18,18 @@ def _snap(title, artist, key):
 
 
 @pytest.fixture
-def panel():
+def panel(overlay):
     from lyrica import app as A
-    from lyrica import bloom, config
-    bloom._cache.clear()
-    bloom._fonts.clear()
-    config.load()
-    o = A.Overlay()
     first = A.Track(
         gen=1, snapshot=_snap("Traductor", "Tiago PZK", "k|A"),
         lyrics=Lyrics(lines=[(0.0, "first of A"), (5.0, "last of A")],
                       words=[[], []], synced=True),
         lyrics_state=A.LYRICS_PRESENT, searched=True, cover=b"x")
-    o._loading = first
-    o._promote()
-    o._go_to_line(1, o.lyrics)
-    o.root.update()
-    yield o
-    o.root.destroy()
+    overlay._loading = first
+    overlay._promote()
+    overlay._go_to_line(1, overlay.lyrics)
+    overlay.root.update()
+    return overlay
 
 
 def _line(panel):
