@@ -709,18 +709,14 @@ class Overlay:
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
         self._resize_window(round(from_w + (to_w - from_w) * t),
-                            round(from_h + (to_h - from_h) * t))
+                            round(from_h + (to_h - from_h) * t), settling=done)
         if not done:
             return True
         self._collapse = None
-        # The wash was built for the size the window used to be. Rebuilt once,
-        # at the end: doing it per frame costs 5-12 ms a time, and a slightly
-        # mis-scaled backdrop for a third of a second is not visible while the
-        # panel is still moving.
-        self._reshape_art()
         return False
 
-    def _resize_window(self, width: int, height: int) -> None:
+    def _resize_window(self, width: int, height: int,
+                       settling: bool = True) -> None:
         """Put the window at a size, keeping the card exactly where it is.
 
         The top edge and the horizontal centre are held. The card lives at the
@@ -742,11 +738,18 @@ class Overlay:
         top = max(dtop, top)
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)
-        self.root.update_idletasks()
-        chrome_mod.shape(self.root, self.chrome, width, height)
-        if self.beam is not None:
-            self.beam.reshape(width, height,
-                              self.chrome.px(chrome_mod.CORNER_RADIUS))
+        if settling:
+            # Only on the frame that lands. Between them these three cost more
+            # than the whole frame budget — `_resize_window` measured 30.8 ms
+            # against 16, and 84 at worst — and a window resizing faster than it
+            # can be repainted is what the flicker was. The corner mask and the
+            # border are a frame or two stale while the panel is still moving,
+            # which nothing can see at that speed.
+            self.root.update_idletasks()
+            chrome_mod.shape(self.root, self.chrome, width, height)
+            if self.beam is not None:
+                self.beam.reshape(width, height,
+                                  self.chrome.px(chrome_mod.CORNER_RADIUS))
         title, artists = self._card_text or ("", "")
         self._lay_out_card(title, artists)
         self._place_thumb()
@@ -1014,7 +1017,12 @@ class Overlay:
             artwork.make_thumbnail(data, self._thumb_size),
             # The backdrop only makes sense where the panel has a body to wash;
             # over a colour key it would be a dark rectangle.
-            artwork.make_backdrop(data, self.width, self.height)
+            # Always at the panel's full size, never at whatever it is right
+            # now. The wash is clipped by the window, so an oversized one costs
+            # nothing — where one built while compact leaves bare panel showing
+            # for the whole of the next expansion, which is the flicker.
+            artwork.make_backdrop(data, self.chrome.px(WIDTH),
+                                  self.chrome.px(HEIGHT))
             if self.chrome.washed else None,
             # Measured here rather than on the render thread: it costs a couple
             # of milliseconds, and whichever thread calls this has them.

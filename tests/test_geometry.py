@@ -161,3 +161,73 @@ def test_a_line_moves_to_the_new_centre_when_the_window_widens(tk_root):
     view.recentre(504)                      # idempotent
     assert abs(centre(view) - 504) < 1
     view.destroy()
+
+
+
+def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch):
+    # One built while the panel is compact leaves bare panel showing for the
+    # whole of the next expansion. The window clips it, so oversized is free.
+    from lyrica import app as A
+
+    asked = []
+    monkeypatch.setattr(A.artwork, "make_backdrop",
+                        lambda data, w, h: asked.append((w, h)))
+    monkeypatch.setattr(A.artwork, "make_thumbnail", lambda data, size: None)
+    monkeypatch.setattr(A.songcolour, "extract", lambda data: None)
+
+    class Panel:
+        chrome = A.chrome_mod.Chrome(A.chrome_mod.ChromeMode.PANEL, "#000",
+                                     A.glass.PANEL)
+        width, height = 325, 114          # compact
+        _thumb_size = 64
+
+    A.Overlay._build_art(Panel(), b"x")
+    full = (Panel.chrome.px(A.WIDTH), Panel.chrome.px(A.HEIGHT))
+    assert asked == [full], f"built for {asked}, not the full {full}"
+
+
+def test_only_the_landing_frame_pays_for_the_mask_and_the_border(monkeypatch):
+    # Deferring these is the whole fix: they are what took a resize frame past
+    # its budget, and a mask a frame or two stale is invisible at that speed.
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    done = []
+    monkeypatch.setattr(chrome_mod, "shape",
+                        lambda *a: done.append("shape"))
+
+    class Beam:
+        def reshape(self, *a):
+            done.append("beam")
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 900, 300
+        anchor_y = 0.0
+        beam = Beam()
+        _card_text = ("t", "a")
+        line_index = -1
+
+        def __init__(self):
+            self.root = self.canvas = self
+            self._views = {}
+
+        # everything `_resize_window` touches, answered flatly
+        def winfo_x(self): return 0
+        def winfo_y(self): return 0
+        def geometry(self, _s): pass
+        def configure(self, **_k): pass
+        def update_idletasks(self): done.append("flush")
+        def _lay_out_card(self, *_a): pass
+        def _place_thumb(self): pass
+        def _retarget(self, *_a, **_k): pass
+        def _visible_indices(self, _n): return []
+
+    monkeypatch.setattr(chrome_mod, "desktop_bounds",
+                        lambda _root: (0, 0, 3000, 2000))
+    panel = Panel()
+    A.Overlay._resize_window(panel, 880, 290, settling=False)
+    assert done == [], f"a frame in flight did {done}"
+    A.Overlay._resize_window(panel, 860, 280, settling=True)
+    assert done == ["flush", "shape", "beam"]
