@@ -17,7 +17,7 @@ import os
 import threading
 import time
 import tkinter as tk
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tkinter import font as tkfont
 from typing import ClassVar
@@ -180,6 +180,45 @@ def _between(low: tuple, high: str, k: float) -> str:
                               zip(low, glass.rgb_of(high), strict=True)))
 
 
+@dataclass
+class Track:
+    """Everything one song owns while it is being assembled.
+
+    The point is that a worker writes here and nowhere else, into an object the
+    render thread is not looking at. The guards this replaces were all of the
+    form `if gen == self.fetch_gen: <store>` — a check and a store with nothing
+    between them, six of them, each written on a different day, and any of them
+    able to lose a race the interpreter is free to schedule. There is nothing to
+    guard now: a stale worker fills a `Track` that is simply never put up.
+
+    `searched` is not `cover is not None`. "The search is over" and "the search
+    found something" are different facts, and treating them as one is what let a
+    song with no cover of its own wear the previous song's for its whole
+    duration.
+    """
+
+    gen: int = 0
+    snapshot: Snapshot = field(default_factory=Snapshot)
+    offset: float = 0.0
+    lyrics: Lyrics | None = None
+    lyrics_state: str = LYRICS_UNKNOWN
+    identified: artwork.Release = field(default_factory=artwork.Release)
+    cuts: sponsorblock.Cuts = field(default_factory=sponsorblock.Cuts)
+    cover: bytes | None = None
+    art: tuple | None = None
+    searched: bool = False
+    # How long this song may take before it goes up with whatever it has. Its
+    # own, not the overlay's: a deadline left outside meant a track assembled
+    # after another one was already overdue inherited an expired one and went
+    # up half-made.
+    deadline: float = 0.0
+
+    @property
+    def whole(self) -> bool:
+        """Whether this song is ready to be put up as one thing."""
+        return self.searched and self.lyrics_state != LYRICS_UNKNOWN
+
+
 def should_animate(step: int | None, dragging: bool) -> bool:
     """Whether a move between lines should glide or simply land.
 
@@ -277,11 +316,11 @@ class Overlay:
         # Read once and set on the module, because it decides what the cached
         # images *are* rather than how they are used.
         bloom_mod.GROWTH = config.growth_factor()
-        self._art_done = True
+        self._shown = Track(searched=True, lyrics_state=LYRICS_ABSENT)
+        self._loading = self._shown
+        self._fetching_key = ""
         self._cuts = sponsorblock.Cuts()
         self._cuts_checked = None
-        self._revealed = True
-        self._reveal_by = 0.0
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -846,29 +885,30 @@ class Overlay:
 
     # --- lyrics ---
     def _start_fetch(self, snap: Snapshot):
+        """Begin assembling the track that is now playing.
+
+        Nothing on screen changes here. The workers fill a `Track` of their own
+        that nothing is rendering, and the tick puts it up in one move once it
+        is whole — which is what lets the outgoing song keep its last line, and
+        what makes a half-changed panel impossible rather than unlikely.
+        """
         self.fetch_gen += 1
-        gen = self.fetch_gen
-        self.lyrics = None
-        self._identified = artwork.Release()
-        self._lyrics_state = LYRICS_UNKNOWN
-        self._art_done = False
-        self._revealed = False
-        self._cuts = sponsorblock.Cuts()
-        self._cuts_checked = None
-        self._reveal_by = time.monotonic() + REVEAL_WAIT_S
-        self._clear_views()
+        loading = Track(gen=self.fetch_gen, snapshot=snap,
+                        offset=config.saved_offset(self.track_key))
+        loading.deadline = time.monotonic() + REVEAL_WAIT_S
+        self._loading = loading
 
         def work():
-            lyr = fetch_for_candidates(snap.lookup_candidates(), snap.duration, snap.album)
-            if gen == self.fetch_gen:
-                self.lyrics = lyr
-                self._lyrics_state = lyrics_state(lyr)
+            found = fetch_for_candidates(snap.lookup_candidates(), snap.duration,
+                                         snap.album)
+            loading.lyrics = found
+            loading.lyrics_state = lyrics_state(found)
 
         threading.Thread(target=work, daemon=True).start()
-        self._start_artwork(gen, snap)
-        self._start_cuts(gen, snap)
+        self._start_artwork(loading)
+        self._start_cuts(loading)
 
-    def _start_cuts(self, gen: int, snap: Snapshot) -> None:
+    def _start_cuts(self, loading: "Track") -> None:
         """Find out which parts of this video are not the song.
 
         A lyric timeline is anchored to the release; a music video opens with a
@@ -876,10 +916,10 @@ class Overlay:
         the only thing in the process that knows how many, and it knows because
         somebody wrote it down.
 
-        Off the render thread and never waited for: the card does not depend on
-        it, and a track whose answer arrives late is a track whose lyrics jump
-        once into place, which is better than a card held back for it.
+        Not waited for. A track whose answer arrives late is a track whose
+        lyrics jump once into place, which is better than a card held back.
         """
+        snap = loading.snapshot
         if not snap.is_browser or not youtube.api_key():
             return
         title, duration = snap.title, snap.duration
@@ -889,25 +929,26 @@ class Overlay:
             if not video_id:
                 return
             found = sponsorblock.cuts_for(video_id)
-            if found is None or gen != self.fetch_gen:
+            if found is None:
                 return
-            self._cuts = found
+            loading.cuts = found
             if found.intro:
                 logger.info("%s opens with %.1fs that is not the song",
                             video_id, found.intro)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _start_artwork(self, gen: int, snap: Snapshot) -> None:
+    def _start_artwork(self, loading: "Track") -> None:
         """Fetch and prepare the cover off the render thread.
 
         Decoding an image takes long enough to drop frames if it happened
         inline, and it only needs doing once a track.
         """
         if not artwork.available():
-            self._art_done = True
+            loading.searched = True
             return
 
+        snap = loading.snapshot
         candidates = snap.lookup_candidates()
         album = snap.album
 
@@ -921,26 +962,21 @@ class Overlay:
             data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
                     or self.reader.read_artwork())
             # After the cover, because the search both need has then run and its
-            # answer is on disk. Assigned even when no cover was found: a track
-            # can be named by a catalogue that has no picture of it.
+            # answer is on disk. Kept even when no cover was found: a track can
+            # be named by a catalogue that has no picture of it.
             named = artwork.identify(candidates, album)
-            if gen == self.fetch_gen and named:
-                self._identified = named
+            if named:
+                loading.identified = named
                 logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
                             named.album or "no album")
-            if gen == self.fetch_gen:
-                # Last, and whatever the outcome: this says the search is over,
-                # not that it found anything.
-                self._art_done = True
-            if not data or gen != self.fetch_gen:
-                return
-            # The bytes first, so a resize that arrives from here on finds them
-            # and rebuilds; then the mark, so one that arrives mid-build is
-            # noticed and this thread's stale images are dropped instead of
-            # overwriting the resize's.
-            self._cover_data = data
-            shape = self._shape_gen
-            self._offer_art(gen, shape, self._build_art(data))
+            loading.cover = data
+            if data:
+                loading.art = self._build_art(data)
+            # Last, and whatever the outcome. Saying the search is over is not
+            # the same as saying it found something, and conflating the two is
+            # what let a track with no cover of its own keep the last one's for
+            # as long as it played.
+            loading.searched = True
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1066,6 +1102,50 @@ class Overlay:
         if len(box) >= 2:
             self.canvas.coords(self._thumb_image, box[0], box[1])
 
+    def _promote(self) -> None:
+        """Put the assembled track up — all of it, in one assignment each.
+
+        The panel used to switch four times: the card on one clock, the lyric
+        column on another, the panel's size on a third and the collapse on a
+        fourth. Everything a song owns changes here and nowhere else, so there
+        is no interval in which two songs are on screen at once.
+        """
+        track = self._loading
+        self._shown = track
+        self.track_key = track.snapshot.track_key()
+        self.offset = track.offset
+        self.lyrics = track.lyrics
+        self._lyrics_state = track.lyrics_state
+        self._identified = track.identified
+        self._cuts, self._cuts_checked = track.cuts, None
+        self._cover_data = track.cover
+        self._pending_art = track.art
+        # A seek belongs to the song it was made on. Left behind, the target of
+        # a click near the end of one track drove the next one's clock and did
+        # not converge until that track had played as long.
+        self._awaiting_seek = None
+        self._clear_views()
+        self.line_index = -1
+        self._card_raw = None       # so the card re-derives against the new song
+        if track.art is None:
+            self._forget_cover()
+        logger.info("now showing %s", self.track_key)
+
+    def _forget_cover(self) -> None:
+        """Drop the last song's cover, for a song that has none of its own.
+
+        Its own case rather than a silent absence. Leaving the images up was
+        indistinguishable from a slow answer, so a track no catalogue has wore
+        the previous track's sleeve, wash, palette and border for as long as it
+        played.
+        """
+        if self._backdrop_item is not None:
+            self.canvas.delete(self._backdrop_item)
+            self._backdrop_item = self._backdrop_photo = None
+        self._thumb_image = self._thumb_photo = None
+        self._place_thumb()
+        self._adopt_palette(palette_mod.for_song(self.chrome, None))
+
     def _ready_to_show(self) -> bool:
         """Whether this track's card may go up yet.
 
@@ -1084,10 +1164,8 @@ class Overlay:
         The deadline is what keeps a source that never answers — no network, no
         cover anywhere — from holding the panel on the last song forever.
         """
-        if not self._revealed:
-            settled = self._art_done and self._lyrics_state != LYRICS_UNKNOWN
-            self._revealed = settled or time.monotonic() >= self._reveal_by
-        return self._revealed
+        return (self._loading.whole
+                or time.monotonic() >= self._loading.deadline)
 
     def _settle_cuts(self, lyr: Lyrics, snap: Snapshot) -> None:
         """Refuse a set of cuts the recording cannot fit inside the video.
@@ -1374,24 +1452,28 @@ class Overlay:
             return
 
         snap = self.reader.snapshot
-        if snap.ok and snap.track_key() != self.track_key:
-            self.track_key = snap.track_key()
-            self.line_index = -1
-            # Before the fetch, so a track with a remembered nudge is right from
-            # its first frame rather than jumping once the lyrics land.
-            self.offset = config.saved_offset(self.track_key)
+        if snap.ok and snap.track_key() != self._fetching_key:
+            # Only starts the assembling. Nothing on screen moves until the new
+            # song is whole, so the one playing keeps its thumbnail, its name
+            # and its last line until there is a complete one to replace them.
+            self._fetching_key = snap.track_key()
             self._start_fetch(snap)
+        if self._loading is not self._shown and self._ready_to_show():
+            self._promote()
 
-        if self._ready_to_show():
-            self._apply_art()
-            card = self._card_for(snap)
-            if card != self._card_text:
-                self._card_text = card
-                title, artists = card
-                self.canvas.itemconfigure(self._title_item, text=title)
-                self.canvas.itemconfigure(self._artist_item, text=artists)
-                self._lay_out_card(title, artists)
-                self._place_thumb()
+        # No longer gated: the gate moved to the promotion, which is the only
+        # place a song's data changes now. What is on screen is whatever was
+        # last promoted, and it is always one song's worth.
+        self._apply_art()
+        card = self._card_for(self._shown.snapshot if self._shown.snapshot.ok
+                              else snap)
+        if card != self._card_text:
+            self._card_text = card
+            title, artists = card
+            self.canvas.itemconfigure(self._title_item, text=title)
+            self.canvas.itemconfigure(self._artist_item, text=artists)
+            self._lay_out_card(title, artists)
+            self._place_thumb()
 
         interval = SLOW_TICK_MS
         if self._advance_beam():
