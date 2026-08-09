@@ -46,7 +46,7 @@ from lyrica import (
 )
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
-from lyrica.lyrics import Lyrics
+from lyrica.lyrics import Lyrics, progress_in
 from lyrica.overlay_text import EDGE_MARGIN
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
@@ -271,6 +271,7 @@ class Overlay:
         self._views_width = 0
         self._echo = None
         self._echo_line = -1
+        self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
         # Read once and set on the module, because it decides what the cached
@@ -1221,65 +1222,76 @@ class Overlay:
         a backing vocal answers the line while the line is still being sung, and
         the two overlap rather than following one another.
         """
+        # Its own window before the current line's. A backing vocal that is
+        # still leaving stopped belonging to whichever line is active by then —
+        # it was answering the one before, and an ad-lib usually answers the end
+        # of a phrase, so the line moves on exactly as it is fading. Tying it to
+        # the line is what made it vanish mid-fade instead of sinking away.
+        if self._echo is not None and self._advance_backing(pos):
+            return
+        self._clear_backing()
+
         text, words = lyr.backing_at(self.line_index)
         active = self._views.get(self.line_index)
         if not text or not words or active is None or not self._views:
-            self._clear_backing()
             return
-        # Its own window, not the line's. A backing vocal answers a phrase; the
-        # line it answers may run for seconds either side of it, and leaving the
-        # words sitting there for all of that would make them furniture rather
-        # than a voice.
-        opens, closes = words[0][0] - ECHO_FADE_S, words[-1][1] + ECHO_FADE_S
+        if not words[0][0] - ECHO_FADE_S <= pos <= words[-1][1] + ECHO_FADE_S:
+            return
+        self._echo = LineView(
+            self.canvas, self.width // 2, _below(active), text, words,
+            font=self.f_echo, wrap=self.wrap // 2,
+            palette=self.palette.dimmed(ECHO_KEEP),
+            scale=self.chrome.scale, bloom=self._bloom)
+        self._echo_line, self._echo_words = self.line_index, words
+        # Built centred and then moved, because where it goes depends on how
+        # wide it came out. Nothing is refused: it sits below the line's last
+        # row rather than beside it, so the two cannot meet however wide the
+        # line is.
+        span = self._echo._row_spans[0]
+        wide = span[1] - span[0]
+        self._echo.recentre(self.width - self.chrome.px(EDGE_MARGIN) - wide / 2)
+        self._advance_backing(pos)
+
+    def _advance_backing(self, pos: float) -> bool:
+        """Carry the backing through its own window. False once it is spent.
+
+        It follows the line it answers for as long as that line is still on
+        screen, and holds where it is once the line has gone — which is what
+        lets it finish leaving after the column has moved on without it.
+        """
+        words = self._echo_words
+        if not words:
+            return False
+        opens = words[0][0] - ECHO_FADE_S
+        closes = words[-1][1] + ECHO_FADE_S
         if not opens <= pos <= closes:
-            self._clear_backing()
-            return
-        if self._echo_line != self.line_index:
-            self._clear_backing()
-            self._echo = LineView(
-                self.canvas, self.width // 2,
-                _below(active), text, words,
-                font=self.f_echo, wrap=self.wrap // 2,
-                palette=self.palette.dimmed(ECHO_KEEP),
-                scale=self.chrome.scale,
-                bloom=self._bloom)
-            self._echo_line = self.line_index
-            # Built centred and then moved, because where it goes depends on how
-            # wide it came out. Nothing is refused any more: it sits below the
-            # line's last row rather than beside it, so the two cannot meet
-            # however wide the line is. The check that used to guard that
-            # compared against the widest row, which meant a line long enough to
-            # wrap refused its backing every time.
-            span = self._echo._row_spans[0]
-            wide = span[1] - span[0]
-            self._echo.recentre(self.width - self.chrome.px(EDGE_MARGIN)
-                                - wide / 2)
-        self._echo.move_to(_below(active))
+            return False
+        anchor = self._views.get(self._echo_line)
+        if anchor is not None:
+            self._echo.move_to(_below(anchor))
         pal = self._echo.palette
         if pos < words[0][0]:
-            # Arriving: up out of the wash, so it is legible by the time it is
-            # sung rather than appearing already lit.
             self._echo.set_active(False)
-            self._echo.show_inactive(_between(
-                pal.backdrop, pal.unsung,
-                (pos - opens) / ECHO_FADE_S))
+            self._echo.show_inactive(_between(pal.backdrop, pal.unsung,
+                                              (pos - opens) / ECHO_FADE_S))
         elif pos > words[-1][1]:
-            # Leaving. Struck first, so `set_active(False)` puts back any letter
-            # still standing in for itself before the colour takes over.
+            # Struck first, so `set_active(False)` puts back any letter still
+            # standing in for itself before the colour takes over.
             self._echo.set_active(False)
-            self._echo.show_inactive(_between(
-                pal.backdrop, pal.sung,
-                (closes - pos) / ECHO_FADE_S))
+            self._echo.show_inactive(_between(pal.backdrop, pal.sung,
+                                              (closes - pos) / ECHO_FADE_S))
         else:
             self._echo.set_active(True)
-            word, fraction = lyr.backing_progress_at(self.line_index, pos)
+            word, fraction = progress_in(words, pos)
             self._echo.show_sweep(word, fraction)
             self._echo.advance_bloom(time.monotonic())
+        return True
 
     def _clear_backing(self) -> None:
         if self._echo is not None:
             self._echo.destroy()
         self._echo, self._echo_line = None, -1
+        self._echo_words: list = []
 
     def _refit_views(self) -> None:
         """Keep the lines centred on the window they are actually in.

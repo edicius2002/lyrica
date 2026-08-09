@@ -77,13 +77,18 @@ def test_it_sits_below_the_line_and_off_at_the_right_margin(panel):
     assert left > max(e for _s, e in line._row_spans), "and not touch it"
 
 
-def test_a_line_with_nothing_behind_it_takes_the_last_one_down(panel):
+def test_its_own_window_is_what_takes_it_down(panel):
+    # Not the line. A line with nothing behind it used to kill it on the spot,
+    # which is what cut its fade short; what has to end it is running out of
+    # window, and that still has to happen with nothing else changing.
     panel._show_backing(panel.lyrics, 1.3)
     assert panel._echo is not None
     panel.lyrics = Lyrics(lines=[(0.0, "solo")], words=[[(0.0, 1.0, "solo")]],
                           synced=True)
     panel._show_backing(panel.lyrics, 1.3)
-    assert panel._echo is None, "it would otherwise hang over the wrong line"
+    assert panel._echo is not None, "it was still being sung"
+    panel._show_backing(panel.lyrics, 9.0)
+    assert panel._echo is None, "and it does have to end"
 
 
 def test_a_resize_takes_it_down_with_the_rest(panel):
@@ -93,3 +98,42 @@ def test_a_resize_takes_it_down_with_the_rest(panel):
     assert panel._echo is not None
     panel._apply_scale()
     assert panel._echo is None
+
+
+def test_it_finishes_leaving_after_the_line_has_moved_on(panel):
+    # An ad-lib usually answers the end of a phrase, so the line advances
+    # exactly while it is fading. Tying it to the line made it vanish mid-fade.
+    from lyrica.app import ECHO_FADE_S
+    from lyrica.glass import rgb_of
+
+    panel._show_backing(panel.lyrics, 1.3)
+    assert panel._echo is not None
+    still = panel._echo
+
+    # The column moves to a line that has nothing behind it.
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "I need you all night"), (2.6, "on and on")],
+        words=[[(0.0, 2.6, "x")], [(2.6, 3.4, "y")]], synced=True,
+        backing=["(You)", ""], backing_words=[[(1.0, 1.7, "(You)")], []])
+    panel.line_index = 1
+
+    panel._show_backing(panel.lyrics, 1.7 + ECHO_FADE_S * 0.4)
+    assert panel._echo is still, "it was killed by a line it does not belong to"
+    fading = max(sum(c * w for c, w in zip(rgb_of(x), (0.2126, 0.7152, 0.0722),
+                                           strict=True))
+                 for x in {panel.canvas.itemcget(e[2], "fill")
+                           for e in panel._echo._items})
+    assert fading > 0
+
+    panel._show_backing(panel.lyrics, 1.7 + ECHO_FADE_S * 1.5)
+    assert panel._echo is None, "and it does have to end"
+
+
+def test_it_holds_where_it_was_once_its_line_is_gone(panel):
+    from lyrica.app import ECHO_FADE_S
+
+    panel._show_backing(panel.lyrics, 1.3)
+    where = panel._echo.y
+    panel._views.clear()          # the line it answered has scrolled away
+    panel._show_backing(panel.lyrics, 1.7 + ECHO_FADE_S * 0.4)
+    assert panel._echo is not None and panel._echo.y == where
