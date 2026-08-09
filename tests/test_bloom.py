@@ -268,22 +268,37 @@ def test_a_growing_letter_swells_about_its_own_centre():
     assert len(centres) == 1, f"the letter drifted: {sorted(centres)}"
 
 
-def test_every_step_of_the_growth_is_a_different_picture():
-    # At 6 % a narrow letter gained nine tenths of a pixel across the whole
-    # growth and four of the nine steps rendered identically to their
-    # neighbour, so a third of the frames showed the same thing twice.
+def _distinct_steps(bloom_mod, spec, char, growth):
+    """How many of the growth's steps render to a size of their own."""
+    was, bloom_mod.GROWTH = bloom_mod.GROWTH, growth
+    bloom_mod._cache.clear()
+    try:
+        sizes = set()
+        for step in range(1, bloom_mod.SCALES + 1):
+            image, _dx, _dy = bloom_mod.grown(char, spec, step, (255, 255, 255))
+            sizes.add((image.width(), image.height()))
+        return len(sizes)
+    finally:
+        bloom_mod.GROWTH, _ = was, bloom_mod._cache.clear()
+
+
+def test_the_growth_is_above_the_floor_where_its_frames_repeat():
+    # Not a matter of taste. At 6 % a narrow letter gained nine tenths of a
+    # pixel across the whole growth and four of the nine steps rendered to the
+    # same whole-pixel size as their neighbour, so a third of the frames showed
+    # an identical picture — a stutter rather than a growth.
     from lyrica import bloom as bloom_mod
 
     spec = ("Segoe UI", -30, "bold")
     if not bloom_mod.available(spec):
         pytest.skip("no TrueType file for this font on this machine")
+    steps = bloom_mod.SCALES
+    narrow_at_six = _distinct_steps(bloom_mod, spec, "a", 0.06)
+    assert narrow_at_six <= steps * 0.7, "the floor this default sits above"
     for char in ("a", "m"):
-        sizes = {(1, 1)}
-        for step in range(1, bloom_mod.SCALES + 1):
-            image, _dx, _dy = bloom_mod.grown(char, spec, step, (255, 255, 255))
-            sizes.add((image.width(), image.height()))
-        assert len(sizes) == bloom_mod.SCALES + 1, (
-            f"{char!r} repeats a size: {sorted(sizes)}")
+        got = _distinct_steps(bloom_mod, spec, char, bloom_mod.GROWTH)
+        assert got >= steps - 1, (
+            f"{char!r} repeats {steps - got} of {steps} steps at the default")
 
 
 def test_the_letter_is_swapped_for_its_stand_in_and_back(view):

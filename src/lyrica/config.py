@@ -184,7 +184,7 @@ def lift_factor() -> float:
 # matter of taste: below about a tenth, several of the growth's steps render to
 # the same whole-pixel size and a third of its frames show an identical picture.
 GROWTH_MIN, GROWTH_MAX = 0.0, 0.35
-GROWTH_DEFAULT = 0.12
+GROWTH_DEFAULT = 0.11
 
 
 def growth_factor() -> float:

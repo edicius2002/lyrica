@@ -36,7 +36,7 @@ RADIUS = 4
 # four of the nine steps rendered to the same integer size as their neighbour,
 # so a third of the frames showed an identical picture. Measured, every step
 # earns a different image from about 10 % up.
-GROWTH = 0.12          # replaced at startup from the environment
+GROWTH = 0.11          # replaced at startup from the environment
 
 # Room for the blur to fall off inside the image, or it is cut square at the
 # edges and the halo has corners.
