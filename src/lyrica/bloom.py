@@ -47,7 +47,7 @@ _fonts: dict = {}
 _missing: set = set()
 
 
-def _font_file(family: str, weight: str) -> Path | None:
+def _font_file(family: str, weight: str, slant: str = "roman") -> Path | None:
     """The TrueType file behind a Tk font family, or None if it cannot be found.
 
     Only Windows is answered directly. Elsewhere the caller falls back to the
@@ -59,8 +59,16 @@ def _font_file(family: str, weight: str) -> Path | None:
     root = Path("C:/Windows/Fonts")
     stem = family.lower().replace(" ", "")
     bold = weight.lower() == "bold"
-    for name in ([f"{stem}b.ttf", f"{stem}bd.ttf"] if bold else []) + [f"{stem}.ttf"]:
-        path = root / name
+    italic = slant.lower() == "italic"
+    # Windows names the four faces by one letter. Tried in order of how well
+    # each matches, so a family missing its italic falls back to its roman
+    # rather than to nothing at all.
+    endings = {(True, True): ["z", "bi", "b", "i", ""],
+               (True, False): ["b", "bd", ""],
+               (False, True): ["i", ""],
+               (False, False): [""]}[(bold, italic)]
+    for suffix in endings:
+        path = root / f"{stem}{suffix}.ttf"
         if path.exists():
             return path
     return None
@@ -77,7 +85,8 @@ def _pil_font(spec: tuple):
 
         measured = tkfont.Font(font=spec)
         actual = measured.actual()
-        path = _font_file(actual["family"], actual.get("weight", "normal"))
+        path = _font_file(actual["family"], actual.get("weight", "normal"),
+                          actual.get("slant", "roman"))
         if path is None:
             loaded = None
         else:

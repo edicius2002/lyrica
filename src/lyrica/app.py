@@ -17,7 +17,7 @@ import os
 import threading
 import time
 import tkinter as tk
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tkinter import font as tkfont
 from typing import ClassVar
@@ -26,6 +26,7 @@ from lyrica import (
     artwork,
     autostart,
     config,
+    glass,
     hotkeys,
     motion,
     songcolour,
@@ -45,7 +46,8 @@ from lyrica import (
 )
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
-from lyrica.lyrics import Lyrics
+from lyrica.lyrics import Lyrics, progress_in
+from lyrica.overlay_text import EDGE_MARGIN
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -77,6 +79,27 @@ THUMB_SIZE = 62
 # reading as louder or quieter rather than bigger or smaller is what the
 # reference does anyway.
 FONT_LINE = ("Segoe UI", -30, "bold")
+
+# What a backing vocal is drawn in. Smaller and, through `Palette.quieter`, a
+# rung further down the ladder — it is being sung by somebody standing behind
+# the singer, and it should look it.
+FONT_ECHO = ("Segoe UI", -20, "italic")
+
+# How far below the line it answers a backing vocal sits, as a fraction of the
+# line's own height, and how much of the palette's light it keeps. Both exist
+# because neither alone was enough: on the same baseline it read as part of the
+# line, and a rung down the ladder gave it the exact colour of the main line's
+# unsung half.
+# Measured against the render this was chosen from, where the drop was one
+# font size: a line's height is its linespace, half again as much, so the same
+# look asks for two thirds of it.
+ECHO_DROP = 0.66
+ECHO_KEEP = 0.72
+
+# How long a backing line takes to arrive and to leave, in seconds. It has its
+# own window inside the line — it answers a phrase rather than lasting as long
+# as one — so it comes and goes on that window rather than on the line's.
+ECHO_FADE_S = 0.30
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
@@ -138,6 +161,62 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
+
+
+def _below(view) -> float:
+    """Where a backing line's top goes, under the line it answers.
+
+    From the *last* row rather than the first: a line long enough to wrap has
+    two, and dropping from the top would land the backing inside the second one.
+    """
+    return (view.y + view.height - view.line_height
+            + view.line_height * ECHO_DROP)
+
+
+def _between(low: tuple, high: str, k: float) -> str:
+    """A colour `k` of the way from a backdrop to one of the palette's own."""
+    k = max(0.0, min(1.0, k))
+    return glass.hex_of(tuple(a + (b - a) * k for a, b in
+                              zip(low, glass.rgb_of(high), strict=True)))
+
+
+@dataclass
+class Track:
+    """Everything one song owns while it is being assembled.
+
+    The point is that a worker writes here and nowhere else, into an object the
+    render thread is not looking at. The guards this replaces were all of the
+    form `if gen == self.fetch_gen: <store>` — a check and a store with nothing
+    between them, six of them, each written on a different day, and any of them
+    able to lose a race the interpreter is free to schedule. There is nothing to
+    guard now: a stale worker fills a `Track` that is simply never put up.
+
+    `searched` is not `cover is not None`. "The search is over" and "the search
+    found something" are different facts, and treating them as one is what let a
+    song with no cover of its own wear the previous song's for its whole
+    duration.
+    """
+
+    gen: int = 0
+    snapshot: Snapshot = field(default_factory=Snapshot)
+    offset: float = 0.0
+    lyrics: Lyrics | None = None
+    lyrics_state: str = LYRICS_UNKNOWN
+    identified: artwork.Release = field(default_factory=artwork.Release)
+    cuts: sponsorblock.Cuts = field(default_factory=sponsorblock.Cuts)
+    cover: bytes | None = None
+    art: tuple | None = None
+    searched: bool = False
+    # How long this song may take before it goes up with whatever it has. Its
+    # own, not the overlay's: a deadline left outside meant a track assembled
+    # after another one was already overdue inherited an expired one and went
+    # up half-made.
+    deadline: float = 0.0
+
+    @property
+    def whole(self) -> bool:
+        """Whether this song is ready to be put up as one thing."""
+        return self.searched and self.lyrics_state != LYRICS_UNKNOWN
 
 
 def should_animate(step: int | None, dragging: bool) -> bool:
@@ -221,6 +300,8 @@ class Overlay:
         self._thumb_image = None
         self._thumb_photo = None
         self._card_text = None
+        self._card_measured = None
+        self._card_width = 0
         self._card_raw = None
         self._awaiting_seek = None
         self._hidden = False
@@ -229,16 +310,19 @@ class Overlay:
         self._compact = False
         self._collapse = None
         self._views_width = 0
+        self._echo = None
+        self._echo_line = -1
+        self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
         # Read once and set on the module, because it decides what the cached
         # images *are* rather than how they are used.
         bloom_mod.GROWTH = config.growth_factor()
-        self._art_done = True
+        self._shown = Track(searched=True, lyrics_state=LYRICS_ABSENT)
+        self._loading = self._shown
+        self._fetching_key = ""
         self._cuts = sponsorblock.Cuts()
         self._cuts_checked = None
-        self._revealed = True
-        self._reveal_by = 0.0
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -270,6 +354,7 @@ class Overlay:
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
+        self.f_echo = _scaled_font(FONT_ECHO, scale)
         # Made once. Creating a Font is a round trip into Tk, and these were
         # being rebuilt on every tick just to measure a string.
         self._title_font = tkfont.Font(font=self.f_title)
@@ -424,17 +509,41 @@ class Overlay:
         """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
-        text_width = max(title_font.measure(title), artist_font.measure(artists))
+        # Measured once per pair of strings. `measure` is a round trip into Tk
+        # for an answer that cannot change while the words do not, and this runs
+        # on every frame of a resize.
+        key = (title, artists)
+        if key != self._card_measured:
+            self._card_measured = key
+            self._card_width = max(title_font.measure(title),
+                                   artist_font.measure(artists))
         # The cover's space is reserved whether or not it has arrived, so the
         # card does not shuffle sideways the moment it does.
         cover = self._thumb_size + gap
-        block = cover + text_width
 
-        left = max(self.chrome.px(12), (self.width - block) // 2)
+        # Centred in the panel, and free to be again. The trembling this went
+        # through was never the centring: it was the *window* travelling left to
+        # hold its own centre while the card travelled right inside it by
+        # exactly as much, two movers applied by two different things that had
+        # to cancel in the same repaint. The window holds its left edge through
+        # a move now, so the card is the only thing moving and has nothing to
+        # cancel against — it simply slides to the middle as the panel opens,
+        # and back to the margin as it shuts.
+        #
+        # Halved the same way the window's is anyway, so the two agree at every
+        # width instead of disagreeing by a pixel on the odd ones.
+        block = self._thumb_size + gap + self._card_width
+        left = max(self.chrome.px(12), self.width // 2 - block // 2)
         top = self._card_y
 
         self.canvas.coords(self._thumb_item, left, top,
                            left + self._thumb_size, top + self._thumb_size)
+        # Placed from the number that was just computed, not read back out of
+        # the canvas. Asking where the slot ended up is a round trip whose
+        # answer can lag by a frame, which put the cover a step behind the box
+        # it belongs in every time the panel was moving.
+        if self._thumb_image is not None:
+            self.canvas.coords(self._thumb_image, left, top)
         text_x = left + cover
         # Both text rows share the cover's vertical centre, so the pair reads as
         # one block rather than as two lines that happen to sit near a square.
@@ -614,30 +723,42 @@ class Overlay:
             self._collapse = None
             self._resize_window(*target)
             return
-        self._collapse = (self.width, self.height, *target, time.monotonic())
+        # The left edge, held for the whole move, and taken once. Holding the
+        # centre meant the window travelled left while the card travelled right
+        # inside it by exactly as much — two movers, applied by two different
+        # things, that have to cancel in the same repaint to look still. The
+        # arithmetic cancelled and the repaints did not, and the card shook.
+        # Nothing cancels now: the window stays where it is and unfolds to the
+        # right, and the only thing moving is the card finding its place.
+        self._collapse = (self.width, self.height, *target, time.monotonic(),
+                          self.root.winfo_x(), self.root.winfo_y())
+        # One region for the whole move, big enough for either end of it. A
+        # region wider than the window clips nothing, so the panel is never cut
+        # short of itself; the corners are square while it travels and rounded
+        # again the moment it lands.
+        chrome_mod.shape(self.root, self.chrome,
+                         max(self.width, target[0]), max(self.height, target[1]))
 
     def _advance_collapse(self) -> bool:
         """Move one frame along the collapse. True while it is still going."""
         if self._collapse is None:
             return False
-        from_w, from_h, to_w, to_h, started = self._collapse
+        from_w, from_h, to_w, to_h, started, left, top = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
         self._resize_window(round(from_w + (to_w - from_w) * t),
-                            round(from_h + (to_h - from_h) * t))
+                            round(from_h + (to_h - from_h) * t), settling=done,
+                            anchor=(left, top))
         if not done:
             return True
         self._collapse = None
-        # The wash was built for the size the window used to be. Rebuilt once,
-        # at the end: doing it per frame costs 5-12 ms a time, and a slightly
-        # mis-scaled backdrop for a third of a second is not visible while the
-        # panel is still moving.
-        self._reshape_art()
         return False
 
-    def _resize_window(self, width: int, height: int) -> None:
+    def _resize_window(self, width: int, height: int,
+                       settling: bool = True,
+                       anchor: tuple | None = None) -> None:
         """Put the window at a size, keeping the card exactly where it is.
 
         The top edge and the horizontal centre are held. The card lives at the
@@ -646,24 +767,45 @@ class Overlay:
         """
         if (width, height) == (self.width, self.height):
             return
-        centre = self.root.winfo_x() + self.width // 2
-        top = self.root.winfo_y()
+        # A move in progress passes its own anchor: the left edge it started
+        # from, held for the whole of it. Anything else is a one-off, and keeps
+        # the horizontal centre — a panel that changes size once should stay
+        # where it looked like it was.
+        if anchor is None:
+            keep = self.root.winfo_x() + self.width // 2 - width // 2
+            top = self.root.winfo_y()
+        else:
+            keep, top = anchor
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
         # The whole desktop, not the primary monitor. Clamping to
         # `winfo_screenwidth` teleported the panel back from a second screen
         # every time a track with no lyrics collapsed it — measured here, a
         # 4480 px desktop against a 1920 px primary.
-        left, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
-        x = max(left, min(centre - width // 2, left + dwidth - width))
+        edge, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
+        x = max(edge, min(keep, edge + dwidth - width))
         top = max(dtop, top)
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)
-        self.root.update_idletasks()
-        chrome_mod.shape(self.root, self.chrome, width, height)
+        # The border is rebuilt every frame, because it is geometry and not
+        # decoration: its segments are laid out for a particular width, so one
+        # left behind stays drawn around the panel's old outline while the panel
+        # grows away from it — which reads as the border sliding left. It costs
+        # about a millisecond and a half, which is affordable; the two below
+        # were what took a resize frame to 30.8 ms against a budget of 16.
         if self.beam is not None:
             self.beam.reshape(width, height,
                               self.chrome.px(chrome_mod.CORNER_RADIUS))
+        if settling:
+            # `SetWindowRgn` repaints the whole window synchronously and is most
+            # of that cost on its own. It cannot simply be left stale either,
+            # because it is what the window is *clipped to*: held at the shape
+            # the panel was leaving, it showed a small box at the new left edge
+            # that snapped open on landing. A region larger than the window
+            # clips nothing, so `_retarget_size` sets one big enough for the
+            # whole move before it starts, and this puts the exact one back.
+            chrome_mod.shape(self.root, self.chrome, width, height)
+            self.root.update_idletasks()
         title, artists = self._card_text or ("", "")
         self._lay_out_card(title, artists)
         self._place_thumb()
@@ -736,6 +878,7 @@ class Overlay:
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
+        self.f_echo = _scaled_font(FONT_ECHO, scale)
         self._title_font = tkfont.Font(font=self.f_title)
         self._artist_font = tkfont.Font(font=self.f_artist)
         self._card_y = self.chrome.px(14)
@@ -784,6 +927,7 @@ class Overlay:
         # out once, at the font and wrap width it was built with. Dropping them
         # and forgetting which line was current makes the next tick rebuild and
         # place them without animating, which is what a resize should look like.
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -800,29 +944,30 @@ class Overlay:
 
     # --- lyrics ---
     def _start_fetch(self, snap: Snapshot):
+        """Begin assembling the track that is now playing.
+
+        Nothing on screen changes here. The workers fill a `Track` of their own
+        that nothing is rendering, and the tick puts it up in one move once it
+        is whole — which is what lets the outgoing song keep its last line, and
+        what makes a half-changed panel impossible rather than unlikely.
+        """
         self.fetch_gen += 1
-        gen = self.fetch_gen
-        self.lyrics = None
-        self._identified = artwork.Release()
-        self._lyrics_state = LYRICS_UNKNOWN
-        self._art_done = False
-        self._revealed = False
-        self._cuts = sponsorblock.Cuts()
-        self._cuts_checked = None
-        self._reveal_by = time.monotonic() + REVEAL_WAIT_S
-        self._clear_views()
+        loading = Track(gen=self.fetch_gen, snapshot=snap,
+                        offset=config.saved_offset(self.track_key))
+        loading.deadline = time.monotonic() + REVEAL_WAIT_S
+        self._loading = loading
 
         def work():
-            lyr = fetch_for_candidates(snap.lookup_candidates(), snap.duration, snap.album)
-            if gen == self.fetch_gen:
-                self.lyrics = lyr
-                self._lyrics_state = lyrics_state(lyr)
+            found = fetch_for_candidates(snap.lookup_candidates(), snap.duration,
+                                         snap.album)
+            loading.lyrics = found
+            loading.lyrics_state = lyrics_state(found)
 
         threading.Thread(target=work, daemon=True).start()
-        self._start_artwork(gen, snap)
-        self._start_cuts(gen, snap)
+        self._start_artwork(loading)
+        self._start_cuts(loading)
 
-    def _start_cuts(self, gen: int, snap: Snapshot) -> None:
+    def _start_cuts(self, loading: "Track") -> None:
         """Find out which parts of this video are not the song.
 
         A lyric timeline is anchored to the release; a music video opens with a
@@ -830,10 +975,10 @@ class Overlay:
         the only thing in the process that knows how many, and it knows because
         somebody wrote it down.
 
-        Off the render thread and never waited for: the card does not depend on
-        it, and a track whose answer arrives late is a track whose lyrics jump
-        once into place, which is better than a card held back for it.
+        Not waited for. A track whose answer arrives late is a track whose
+        lyrics jump once into place, which is better than a card held back.
         """
+        snap = loading.snapshot
         if not snap.is_browser or not youtube.api_key():
             return
         title, duration = snap.title, snap.duration
@@ -843,25 +988,26 @@ class Overlay:
             if not video_id:
                 return
             found = sponsorblock.cuts_for(video_id)
-            if found is None or gen != self.fetch_gen:
+            if found is None:
                 return
-            self._cuts = found
+            loading.cuts = found
             if found.intro:
                 logger.info("%s opens with %.1fs that is not the song",
                             video_id, found.intro)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _start_artwork(self, gen: int, snap: Snapshot) -> None:
+    def _start_artwork(self, loading: "Track") -> None:
         """Fetch and prepare the cover off the render thread.
 
         Decoding an image takes long enough to drop frames if it happened
         inline, and it only needs doing once a track.
         """
         if not artwork.available():
-            self._art_done = True
+            loading.searched = True
             return
 
+        snap = loading.snapshot
         candidates = snap.lookup_candidates()
         album = snap.album
 
@@ -875,26 +1021,21 @@ class Overlay:
             data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
                     or self.reader.read_artwork())
             # After the cover, because the search both need has then run and its
-            # answer is on disk. Assigned even when no cover was found: a track
-            # can be named by a catalogue that has no picture of it.
+            # answer is on disk. Kept even when no cover was found: a track can
+            # be named by a catalogue that has no picture of it.
             named = artwork.identify(candidates, album)
-            if gen == self.fetch_gen and named:
-                self._identified = named
+            if named:
+                loading.identified = named
                 logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
                             named.album or "no album")
-            if gen == self.fetch_gen:
-                # Last, and whatever the outcome: this says the search is over,
-                # not that it found anything.
-                self._art_done = True
-            if not data or gen != self.fetch_gen:
-                return
-            # The bytes first, so a resize that arrives from here on finds them
-            # and rebuilds; then the mark, so one that arrives mid-build is
-            # noticed and this thread's stale images are dropped instead of
-            # overwriting the resize's.
-            self._cover_data = data
-            shape = self._shape_gen
-            self._offer_art(gen, shape, self._build_art(data))
+            loading.cover = data
+            if data:
+                loading.art = self._build_art(data)
+            # Last, and whatever the outcome. Saying the search is over is not
+            # the same as saying it found something, and conflating the two is
+            # what let a track with no cover of its own keep the last one's for
+            # as long as it played.
+            loading.searched = True
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -932,7 +1073,12 @@ class Overlay:
             artwork.make_thumbnail(data, self._thumb_size),
             # The backdrop only makes sense where the panel has a body to wash;
             # over a colour key it would be a dark rectangle.
-            artwork.make_backdrop(data, self.width, self.height)
+            # Always at the panel's full size, never at whatever it is right
+            # now. The wash is clipped by the window, so an oversized one costs
+            # nothing — where one built while compact leaves bare panel showing
+            # for the whole of the next expansion, which is the flicker.
+            artwork.make_backdrop(data, self.chrome.px(WIDTH),
+                                  self.chrome.px(HEIGHT))
             if self.chrome.washed else None,
             # Measured here rather than on the render thread: it costs a couple
             # of milliseconds, and whichever thread calls this has them.
@@ -1002,6 +1148,10 @@ class Overlay:
         self.palette = pal
         logger.debug("palette hue=%.0f strength=%.2f sweep dE=%.1f",
                      pal.hue, pal.strength, pal.sweep_de)
+        # The backing line is coloured from the palette too, and was not being
+        # switched over: it kept the outgoing song's tint after the new cover
+        # had already repainted everything else.
+        self._clear_backing()
         self.canvas.itemconfigure(self._title_item, fill=pal.title)
         self.canvas.itemconfigure(self._artist_item, fill=pal.artist)
         for view in self._views.values():
@@ -1015,6 +1165,53 @@ class Overlay:
         box = self.canvas.coords(self._thumb_item)
         if len(box) >= 2:
             self.canvas.coords(self._thumb_image, box[0], box[1])
+
+    def _promote(self) -> None:
+        """Put the assembled track up — all of it, in one assignment each.
+
+        The panel used to switch four times: the card on one clock, the lyric
+        column on another, the panel's size on a third and the collapse on a
+        fourth. Everything a song owns changes here and nowhere else, so there
+        is no interval in which two songs are on screen at once.
+        """
+        track = self._loading
+        self._shown = track
+        self.track_key = track.snapshot.track_key()
+        self.offset = track.offset
+        # Also read afresh from `_shown` on every tick, because an answer can
+        # land after the promotion. Set here as well so the size and the column
+        # are right on the frame the song goes up, rather than on the next one.
+        self.lyrics = track.lyrics
+        self._lyrics_state = track.lyrics_state
+        self._identified = track.identified
+        self._cuts, self._cuts_checked = track.cuts, None
+        self._cover_data = track.cover
+        self._pending_art = track.art
+        # A seek belongs to the song it was made on. Left behind, the target of
+        # a click near the end of one track drove the next one's clock and did
+        # not converge until that track had played as long.
+        self._awaiting_seek = None
+        self._clear_views()
+        self.line_index = -1
+        self._card_raw = None       # so the card re-derives against the new song
+        if track.art is None:
+            self._forget_cover()
+        logger.info("now showing %s", self.track_key)
+
+    def _forget_cover(self) -> None:
+        """Drop the last song's cover, for a song that has none of its own.
+
+        Its own case rather than a silent absence. Leaving the images up was
+        indistinguishable from a slow answer, so a track no catalogue has wore
+        the previous track's sleeve, wash, palette and border for as long as it
+        played.
+        """
+        if self._backdrop_item is not None:
+            self.canvas.delete(self._backdrop_item)
+            self._backdrop_item = self._backdrop_photo = None
+        self._thumb_image = self._thumb_photo = None
+        self._place_thumb()
+        self._adopt_palette(palette_mod.for_song(self.chrome, None))
 
     def _ready_to_show(self) -> bool:
         """Whether this track's card may go up yet.
@@ -1034,10 +1231,8 @@ class Overlay:
         The deadline is what keeps a source that never answers — no network, no
         cover anywhere — from holding the panel on the last song forever.
         """
-        if not self._revealed:
-            settled = self._art_done and self._lyrics_state != LYRICS_UNKNOWN
-            self._revealed = settled or time.monotonic() >= self._reveal_by
-        return self._revealed
+        return (self._loading.whole
+                or time.monotonic() >= self._loading.deadline)
 
     def _settle_cuts(self, lyr: Lyrics, snap: Snapshot) -> None:
         """Refuse a set of cuts the recording cannot fit inside the video.
@@ -1117,6 +1312,7 @@ class Overlay:
 
     # --- the line pool ---
     def _clear_views(self):
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -1158,6 +1354,90 @@ class Overlay:
                 bloom=self._bloom)
         self._views_width = self.width
 
+    def _show_backing(self, lyr: Lyrics, pos: float) -> None:
+        """Draw what is sung behind the active line, off at the right margin.
+
+        Not under the line and not beside it: the gap between rows is eleven
+        pixels against the twenty-seven a second row would need, so anywhere
+        below pushes the whole column about every time a backing vocal comes and
+        goes. The right margin is empty, it is where a voice standing behind the
+        singer belongs, and nothing has to move for it.
+
+        It sweeps on its own timings, which the source gives it, and it has to:
+        a backing vocal answers the line while the line is still being sung, and
+        the two overlap rather than following one another.
+        """
+        # Its own window before the current line's. A backing vocal that is
+        # still leaving stopped belonging to whichever line is active by then —
+        # it was answering the one before, and an ad-lib usually answers the end
+        # of a phrase, so the line moves on exactly as it is fading. Tying it to
+        # the line is what made it vanish mid-fade instead of sinking away.
+        if self._echo is not None and self._advance_backing(pos):
+            return
+        self._clear_backing()
+
+        text, words = lyr.backing_at(self.line_index)
+        active = self._views.get(self.line_index)
+        if not text or not words or active is None or not self._views:
+            return
+        if not words[0][0] - ECHO_FADE_S <= pos <= words[-1][1] + ECHO_FADE_S:
+            return
+        self._echo = LineView(
+            self.canvas, self.width // 2, _below(active), text, words,
+            font=self.f_echo, wrap=self.wrap // 2,
+            palette=self.palette.dimmed(ECHO_KEEP),
+            scale=self.chrome.scale, bloom=self._bloom)
+        self._echo_line, self._echo_words = self.line_index, words
+        # Built centred and then moved, because where it goes depends on how
+        # wide it came out. Nothing is refused: it sits below the line's last
+        # row rather than beside it, so the two cannot meet however wide the
+        # line is.
+        span = self._echo._row_spans[0]
+        wide = span[1] - span[0]
+        self._echo.recentre(self.width - self.chrome.px(EDGE_MARGIN) - wide / 2)
+        self._advance_backing(pos)
+
+    def _advance_backing(self, pos: float) -> bool:
+        """Carry the backing through its own window. False once it is spent.
+
+        It follows the line it answers for as long as that line is still on
+        screen, and holds where it is once the line has gone — which is what
+        lets it finish leaving after the column has moved on without it.
+        """
+        words = self._echo_words
+        if not words:
+            return False
+        opens = words[0][0] - ECHO_FADE_S
+        closes = words[-1][1] + ECHO_FADE_S
+        if not opens <= pos <= closes:
+            return False
+        anchor = self._views.get(self._echo_line)
+        if anchor is not None:
+            self._echo.move_to(_below(anchor))
+        pal = self._echo.palette
+        if pos < words[0][0]:
+            self._echo.set_active(False)
+            self._echo.show_inactive(_between(pal.backdrop, pal.unsung,
+                                              (pos - opens) / ECHO_FADE_S))
+        elif pos > words[-1][1]:
+            # Struck first, so `set_active(False)` puts back any letter still
+            # standing in for itself before the colour takes over.
+            self._echo.set_active(False)
+            self._echo.show_inactive(_between(pal.backdrop, pal.sung,
+                                              (closes - pos) / ECHO_FADE_S))
+        else:
+            self._echo.set_active(True)
+            word, fraction = progress_in(words, pos)
+            self._echo.show_sweep(word, fraction)
+            self._echo.advance_bloom(time.monotonic())
+        return True
+
+    def _clear_backing(self) -> None:
+        if self._echo is not None:
+            self._echo.destroy()
+        self._echo, self._echo_line = None, -1
+        self._echo_words: list = []
+
     def _refit_views(self) -> None:
         """Keep the lines centred on the window they are actually in.
 
@@ -1173,6 +1453,7 @@ class Overlay:
                 view.recentre(self.width // 2)
             return
         self._views_width = self.width
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -1238,24 +1519,36 @@ class Overlay:
             return
 
         snap = self.reader.snapshot
-        if snap.ok and snap.track_key() != self.track_key:
-            self.track_key = snap.track_key()
-            self.line_index = -1
-            # Before the fetch, so a track with a remembered nudge is right from
-            # its first frame rather than jumping once the lyrics land.
-            self.offset = config.saved_offset(self.track_key)
+        if snap.ok and snap.track_key() != self._fetching_key:
+            # Only starts the assembling. Nothing on screen moves until the new
+            # song is whole, so the one playing keeps its thumbnail, its name
+            # and its last line until there is a complete one to replace them.
+            self._fetching_key = snap.track_key()
             self._start_fetch(snap)
+        if self._loading is not self._shown and self._ready_to_show():
+            self._promote()
+        # Read from the shown track rather than kept as a copy of it. A song put
+        # up on the deadline goes up not knowing whether it has words, and its
+        # answer lands in the same `Track` a moment later — copied at the
+        # promotion, that answer was written where nobody looked, and a song
+        # with no lyrics stayed expanded until the next track change. It is the
+        # same song, so there is nothing crossed about hearing it out.
+        self.lyrics = self._shown.lyrics
+        self._lyrics_state = self._shown.lyrics_state
 
-        if self._ready_to_show():
-            self._apply_art()
-            card = self._card_for(snap)
-            if card != self._card_text:
-                self._card_text = card
-                title, artists = card
-                self.canvas.itemconfigure(self._title_item, text=title)
-                self.canvas.itemconfigure(self._artist_item, text=artists)
-                self._lay_out_card(title, artists)
-                self._place_thumb()
+        # No longer gated: the gate moved to the promotion, which is the only
+        # place a song's data changes now. What is on screen is whatever was
+        # last promoted, and it is always one song's worth.
+        self._apply_art()
+        card = self._card_for(self._shown.snapshot if self._shown.snapshot.ok
+                              else snap)
+        if card != self._card_text:
+            self._card_text = card
+            title, artists = card
+            self.canvas.itemconfigure(self._title_item, text=title)
+            self.canvas.itemconfigure(self._artist_item, text=artists)
+            self._lay_out_card(title, artists)
+            self._place_thumb()
 
         interval = SLOW_TICK_MS
         if self._advance_beam():
@@ -1321,6 +1614,9 @@ class Overlay:
                 # No word timing for this line: light all of it. Leaving it dim
                 # would say none of it has been sung, about the line playing.
                 active.show_lit()
+            # Outside every branch, so a line with no word timings takes its
+            # backing down instead of leaving the last one frozen over it.
+            self._show_backing(lyr, pos + WORD_LEAD_S)
 
         self.root.after(interval, self._tick)
 

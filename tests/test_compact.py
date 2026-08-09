@@ -102,11 +102,8 @@ class Reveal:
     """The readiness rule, without the rest of the overlay."""
 
     def __init__(self, now=0.0):
-        from lyrica.app import LYRICS_UNKNOWN
-        self._art_done = False
-        self._revealed = False
-        self._reveal_by = 100.0
-        self._lyrics_state = LYRICS_UNKNOWN
+        from lyrica.app import Track
+        self._loading = Track(deadline=100.0)
         self.now = now
 
     def ready(self):
@@ -120,39 +117,37 @@ class Reveal:
             _time.monotonic = real
 
 
-def test_the_card_waits_for_every_part_of_itself():
+def test_a_song_goes_up_only_when_all_of_it_has_arrived():
     from lyrica.app import LYRICS_ABSENT, LYRICS_PRESENT
 
     r = Reveal()
     assert not r.ready(), "nothing has arrived"
-    r._art_done = True
+    r._loading.searched = True
     assert not r.ready(), "the lyrics are still out"
-    r._lyrics_state = LYRICS_PRESENT
+    r._loading.lyrics_state = LYRICS_PRESENT
     assert r.ready()
 
     r = Reveal()
-    r._lyrics_state = LYRICS_ABSENT
-    assert not r.ready(), "the cover is still out"
-    r._art_done = True
+    r._loading.lyrics_state = LYRICS_ABSENT
+    assert not r.ready(), "the cover search is still out"
+    r._loading.searched = True
     assert r.ready()
+
+
+def test_the_search_being_over_is_not_the_search_having_found_something():
+    # Conflating the two is what let a song with no cover of its own wear the
+    # previous song's for as long as it played.
+    from lyrica.app import LYRICS_PRESENT, Track
+
+    empty = Track(searched=True, lyrics_state=LYRICS_PRESENT)
+    assert empty.cover is None and empty.art is None
+    assert empty.whole, "a song without a cover is still a whole song"
 
 
 def test_a_source_that_never_answers_does_not_strand_the_panel():
     r = Reveal()
-    r._reveal_by = 50.0
+    r._loading.deadline = 50.0
     r.now = 49.0
     assert not r.ready()
     r.now = 50.0
     assert r.ready(), "the deadline has to release it"
-
-
-def test_once_shown_it_stays_shown():
-    # The state that decides readiness keeps moving after the card goes up, and
-    # a card that could un-reveal itself would flicker.
-    from lyrica.app import LYRICS_PRESENT, LYRICS_UNKNOWN
-
-    r = Reveal()
-    r._art_done, r._lyrics_state = True, LYRICS_PRESENT
-    assert r.ready()
-    r._lyrics_state = LYRICS_UNKNOWN
-    assert r.ready()

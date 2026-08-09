@@ -161,3 +161,170 @@ def test_a_line_moves_to_the_new_centre_when_the_window_widens(tk_root):
     view.recentre(504)                      # idempotent
     assert abs(centre(view) - 504) < 1
     view.destroy()
+
+
+
+def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch):
+    # One built while the panel is compact leaves bare panel showing for the
+    # whole of the next expansion. The window clips it, so oversized is free.
+    from lyrica import app as A
+
+    asked = []
+    monkeypatch.setattr(A.artwork, "make_backdrop",
+                        lambda data, w, h: asked.append((w, h)))
+    monkeypatch.setattr(A.artwork, "make_thumbnail", lambda data, size: None)
+    monkeypatch.setattr(A.songcolour, "extract", lambda data: None)
+
+    class Panel:
+        chrome = A.chrome_mod.Chrome(A.chrome_mod.ChromeMode.PANEL, "#000",
+                                     A.glass.PANEL)
+        width, height = 325, 114          # compact
+        _thumb_size = 64
+
+    A.Overlay._build_art(Panel(), b"x")
+    full = (Panel.chrome.px(A.WIDTH), Panel.chrome.px(A.HEIGHT))
+    assert asked == [full], f"built for {asked}, not the full {full}"
+
+
+def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
+    # They are what took a resize frame past its budget.
+    # The clipping region is not deferrable with them: it decides what of the
+    # window is painted at all, and holding it back showed a panel clipped to
+    # the size it used to be while it had already moved and grown.
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    done = []
+    monkeypatch.setattr(chrome_mod, "shape",
+                        lambda *a: done.append("shape"))
+
+    class Beam:
+        def reshape(self, *a):
+            done.append("beam")
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 900, 300
+        anchor_y = 0.0
+        beam = Beam()
+        _card_text = ("t", "a")
+        line_index = -1
+
+        def __init__(self):
+            self.root = self.canvas = self
+            self._views = {}
+
+        # everything `_resize_window` touches, answered flatly
+        def winfo_x(self): return 0
+        def winfo_y(self): return 0
+        def geometry(self, _s): pass
+        def configure(self, **_k): pass
+        def update_idletasks(self): done.append("flush")
+        def _lay_out_card(self, *_a): pass
+        def _place_thumb(self): pass
+        def _retarget(self, *_a, **_k): pass
+        def _visible_indices(self, _n): return []
+
+    monkeypatch.setattr(chrome_mod, "desktop_bounds",
+                        lambda _root: (0, 0, 3000, 2000))
+    panel = Panel()
+    A.Overlay._resize_window(panel, 880, 290, settling=False)
+    assert done == ["beam"], (
+        "the border is geometry: left behind it stays drawn around the outline "
+        f"the panel is leaving. This did {done}")
+    done.clear()
+    A.Overlay._resize_window(panel, 860, 280, settling=True)
+    assert done == ["beam", "shape", "flush"]
+
+
+
+
+def test_the_region_covers_both_ends_of_a_move_before_it_starts(monkeypatch):
+    # It is what the window is clipped to. Left at the size the panel is
+    # leaving, it showed a small box at the new left edge that snapped open on
+    # landing; remade every frame, `SetWindowRgn` repaints the whole window
+    # synchronously and costs 32 ms of a 16 ms budget. One region, big enough
+    # for either end of the move, and the exact one when it lands.
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    asked = []
+    monkeypatch.setattr(chrome_mod, "shape",
+                        lambda _r, _c, w, h: asked.append((w, h)))
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 325, 114        # compact, about to expand
+        _collapse = None
+        _compact = False
+
+        def __init__(self):
+            self.root = self
+
+        def winfo_x(self): return 800
+        def winfo_y(self): return 100
+        def _want_compact(self): return False
+        def _target_size(self): return (1125, 375)
+
+    A.Overlay._retarget_size(Panel())
+    assert asked == [(1125, 375)], (
+        f"one region covering the whole move, not {asked}")
+
+
+def test_the_card_slides_to_the_middle_as_the_panel_opens():
+    # And back to the margin as it shuts. It is the only thing moving: the
+    # window holds the left edge it started from for the whole of a move, where
+    # holding its centre meant it travelled left while the card travelled right
+    # inside it by exactly as much — two movers, applied by two different
+    # things, that had to cancel in the same repaint to look still. They
+    # cancelled arithmetically and not visually.
+    from lyrica import app as A
+
+    class Panel:
+        chrome = A.chrome_mod.Chrome(A.chrome_mod.ChromeMode.PANEL, "#000",
+                                     A.glass.PANEL)
+        _thumb_size = 78
+        _card_y = 20
+        _thumb_image = None
+
+        def __init__(self, width):
+            self.width = width
+            self.placed = None
+            self.canvas = self
+            self._card_measured = None
+            self._card_width = 0
+
+        def coords(self, _item, *box):
+            if self.placed is None:
+                self.placed = box[0]
+
+    def at(width):
+        panel = Panel(width)
+        panel._title_font = panel._artist_font = _Metrics(300)
+        panel._thumb_item = panel._title_item = panel._artist_item = object()
+        A.Overlay._lay_out_card(panel, "title", "artist")
+        return panel.placed
+
+    margin = Panel(0).chrome.px(12)
+    block = 78 + Panel(0).chrome.px(10) + 300
+    assert at(block + margin * 2) == margin, "compact sits against the margin"
+    assert at(1125) == 1125 // 2 - block // 2, "and full sits in the middle"
+
+    # Monotonic the whole way, so it slides rather than jumping about.
+    places = [at(w) for w in range(block + margin * 2, 1200, 7)]
+    assert places == sorted(places)
+
+
+class _Metrics:
+    """Just what `_lay_out_card` asks a font."""
+
+    def __init__(self, width):
+        self._width = width
+
+    def measure(self, _text):
+        return self._width
+
+    def metrics(self, _what):
+        return 20

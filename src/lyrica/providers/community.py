@@ -73,6 +73,7 @@ def _score(rec: dict, artist: str, title: str, duration: float) -> float:
 class CommunityTtmlProvider(LyricsProvider):
     name = "community-ttml"
     max_precision = Precision.WORD
+    carries_backing = True
 
     MIN_SCORE = 3.0
 

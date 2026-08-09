@@ -47,6 +47,20 @@ class Lyrics:
     # worked is worth keeping: it is the closest thing to a correct name for the
     # song that anything in the process knows.
     queried: tuple = ()
+    # What was sung behind each line, index-matched to `lines`, and empty where
+    # there was nothing. Apart from `words` rather than folded into it because
+    # the two overlap in time: a backing vocal answers a line while it is still
+    # being sung, so one sequence would interleave them into nonsense.
+    backing: list = field(default_factory=list)
+    backing_words: list = field(default_factory=list)
+
+    def backing_at(self, line_index: int) -> tuple:
+        """(text, words) sung behind a line, or ("", []) where nothing was."""
+        if 0 <= line_index < len(self.backing) and self.backing[line_index]:
+            words = (self.backing_words[line_index]
+                     if line_index < len(self.backing_words) else [])
+            return self.backing[line_index], words
+        return "", []
 
     @property
     def precision(self) -> Precision:
@@ -61,6 +75,10 @@ class Lyrics:
         if 0 <= line_index < len(self.words):
             return self.words[line_index]
         return []
+
+    def backing_progress_at(self, line_index: int, t: float) -> tuple[int, float]:
+        """The same as `word_progress_at`, for what was sung behind the line."""
+        return progress_in(self.backing_at(line_index)[1], t)
 
     def word_index_at(self, line_index: int, t: float) -> int:
         """Index of the word being sung at time t within a line.
@@ -77,21 +95,8 @@ class Lyrics:
         return idx
 
     def word_progress_at(self, line_index: int, t: float) -> tuple[int, float]:
-        """The active word and how far through it playback is, from 0 to 1.
-
-        The fraction is what lets a renderer sweep across a word instead of
-        switching it on, and it saturates at 1 once the word's end has passed —
-        so a gap before the next word holds the sweep complete rather than
-        letting it run on.
-        """
-        i = self.word_index_at(line_index, t)
-        if i < 0:
-            return -1, 0.0
-        start, end, _ = self.words_at(line_index)[i]
-        span = end - start
-        if span <= 0:
-            return i, 1.0
-        return i, max(0.0, min(1.0, (t - start) / span))
+        """The active word and how far through it playback is, from 0 to 1."""
+        return progress_in(self.words_at(line_index), t)
 
     @property
     def is_definitive(self) -> bool:
@@ -116,6 +121,30 @@ class Lyrics:
             else:
                 break
         return idx
+
+
+def progress_in(words: list, t: float) -> tuple[int, float]:
+    """The active word in a sequence and how far through it playback is.
+
+    The fraction is what lets a renderer sweep across a word instead of
+    switching it on, and it saturates at 1 once the word's end has passed — so
+    a gap before the next word holds the sweep complete rather than letting it
+    run on. -1 before the first word starts, so a line can appear in full before
+    anything is highlighted.
+    """
+    i = -1
+    for k, (start, _end, _text) in enumerate(words):
+        if start <= t:
+            i = k
+        else:
+            break
+    if i < 0:
+        return -1, 0.0
+    start, end, _ = words[i]
+    span = end - start
+    if span <= 0:
+        return i, 1.0
+    return i, max(0.0, min(1.0, (t - start) / span))
 
 
 def parse_lrc(lrc: str) -> list:

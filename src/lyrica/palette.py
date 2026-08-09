@@ -422,6 +422,28 @@ class Palette:
         """
         return self.side if distance <= 1 else self.far
 
+    def dimmed(self, keep: float) -> "Palette":
+        """The same palette pulled `keep` of the way from the wash to itself.
+
+        For a voice standing behind the singer. Not a step down this ladder,
+        which was the first attempt and was too clever by half: the rung below
+        `sung` *is* `unsung`, so a fully sung backing line came out at exactly
+        `#acb3ba` — the same string as the half of the main line that had not
+        been sung yet. Wherever the sweep happened to be, one of them matched.
+
+        Pulled toward the backdrop instead, which lands between the ladder's
+        rungs rather than on one.
+        """
+        def pull(colour: str) -> str:
+            return hex_of(tuple(
+                back + (front - back) * keep
+                for front, back in zip(rgb_of(colour), self.backdrop, strict=True)))
+
+        sung, unsung = pull(self.sung), pull(self.unsung)
+        return replace(self, sung=sung, unsung=unsung, side=pull(self.side),
+                       far=pull(self.far), ramp=_blend_ramp(unsung, sung),
+                       _fades={}, _blooms={})
+
     def bloom(self, level: float) -> str:
         """The halo behind a struck character, at 0..1 of its strength.
 

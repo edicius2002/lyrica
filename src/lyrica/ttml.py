@@ -13,9 +13,14 @@ Every span states both `begin` and `end`, so unlike Musixmatch's richsync there
 is nothing to infer — a gap between two words is real silence and stays silent.
 
 Background vocals arrive as spans nested inside a wrapper marked
-`ttm:role="x-bg"`. They are dropped: they overlap the main line in time rather
-than following it, so folding them into one sequence would interleave two
-simultaneous vocals into nonsense.
+`ttm:role="x-bg"`, carrying their own word timings and their own parentheses:
+
+    <span ttm:role="x-bg"><span begin="42.688" end="43.406">(You)</span></span>
+
+They are kept apart rather than dropped. They cannot join the main sequence —
+their times overlap it rather than following it, and interleaving two
+simultaneous vocals gives nonsense — so they come back as a line of their own,
+to be shown somewhere of its own.
 """
 import re
 import xml.etree.ElementTree as ET
@@ -93,6 +98,24 @@ def _collect_spans(node: ET.Element) -> list:
             spans.extend(_collect_spans(child))
             carry(child.tail or "")
     return spans
+
+
+def _backing_spans(node: ET.Element) -> list:
+    """The timed spans of every background wrapper under a line, in order.
+
+    Their own tails come with them, for the same reason the main line's do: a
+    source that splits below the word — "(You, the moon" and "light)" — needs
+    them to be put back together as it wrote them.
+    """
+    found: list = []
+    for child in node:
+        if _local(child.tag) != "span":
+            continue
+        if _is_background(child):
+            found.extend(_collect_spans(child))
+        else:
+            found.extend(_backing_spans(child))
+    return found
 
 
 def _words(spans: list) -> list:
@@ -176,6 +199,8 @@ def parse_ttml(body: str) -> Lyrics | None:
 
     lines: list = []
     words: list = []
+    backing: list = []
+    backing_words: list = []
     for p in root.iter():
         if _local(p.tag) != "p":
             continue
@@ -189,6 +214,9 @@ def parse_ttml(body: str) -> Lyrics | None:
             continue
         lines.append((start, text))
         words.append(line_words)
+        echo = _backing_spans(p)
+        backing.append(" ".join("".join(x + tail for _s, _e, x, tail in echo).split()))
+        backing_words.append(_words(echo))
 
     if not lines:
         return None
@@ -198,8 +226,11 @@ def parse_ttml(body: str) -> Lyrics | None:
     order = sorted(range(len(lines)), key=lambda i: lines[i][0])
     lines = [lines[i] for i in order]
     words = [words[i] for i in order]
+    backing = [backing[i] for i in order]
+    backing_words = [backing_words[i] for i in order]
 
-    return Lyrics(lines=lines, words=words, synced=True)
+    return Lyrics(lines=lines, words=words, synced=True,
+                  backing=backing, backing_words=backing_words)
 
 
 def declared_timing(body: str) -> str:

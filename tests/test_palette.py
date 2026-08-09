@@ -393,3 +393,20 @@ def test_the_beam_keeps_a_dark_ground_to_travel_through():
     for song in (NEUTRAL, *COLOURED):
         p = pal_mod.for_song(ch, song)
         assert lum(p.beam) < lum(p.unsung) * 0.85
+
+
+def test_a_dimmed_palette_lands_between_the_rungs_it_came_from():
+    # The first attempt took the step below, and the rung below `sung` *is*
+    # `unsung` — so a fully sung backing line came out the exact colour of the
+    # half of the main line that had not been sung yet, and wherever the sweep
+    # happened to be, one of them matched.
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+
+    loud = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#101014", PANEL), NEUTRAL)
+    quiet = loud.dimmed(0.8)
+    assert quiet.sung not in (loud.sung, loud.unsung, loud.side)
+    assert quiet.unsung not in (loud.sung, loud.unsung, loud.side)
+    assert lum(loud.sung) > lum(quiet.sung) > lum(loud.unsung), "between two rungs"
+    assert lum(quiet.sung) > lum(quiet.unsung) > lum(quiet.side), "still a ladder"
+    assert quiet.ramp[0] == quiet.unsung and quiet.ramp[-1] == quiet.sung

@@ -251,3 +251,51 @@ def test_candidates_stop_at_a_definitive_answer(monkeypatch):
 def test_no_candidates_returns_none(monkeypatch):
     use(monkeypatch, Fake("x", synced()))
     assert providers.fetch_for_candidates([]) is None
+
+
+# --- what the cache is allowed to lose --------------------------------------
+
+def test_backing_vocals_survive_the_cache(tmp_path, monkeypatch):
+    # They did not. Backing was parsed, written to disk by a payload that
+    # enumerates its fields by hand, and every replay came back with none of
+    # them — which is every play after the first.
+    from lyrica import providers
+    from lyrica.lyrics import Lyrics
+
+    monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
+    fresh = Lyrics(lines=[(0.0, "I need you all night")],
+                   words=[[(0.0, 1.0, "I")]], synced=True, source="stub",
+                   backing=["(You)"], backing_words=[[(0.5, 0.9, "(You)")]])
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda *a: (fresh, providers._provider_names()))
+    providers.fetch_lyrics("Dua Lipa", "Levitating")
+
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda *a: pytest.fail("the cache should have answered"))
+    again = providers.fetch_lyrics("Dua Lipa", "Levitating")
+    assert again.backing_at(0) == ("(You)", [(0.5, 0.9, "(You)")])
+
+
+def test_an_entry_of_an_older_shape_is_fetched_again(tmp_path, monkeypatch):
+    # Nothing else would refresh it: the rule that revisits an entry asks
+    # whether a provider was never asked, and these had all been asked.
+    import json
+
+    from lyrica import providers
+    from lyrica.lyrics import Lyrics
+
+    monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
+    stale = providers._cache_path("A", "B", 0.0)
+    stale.write_text(json.dumps({
+        "lines": [[0.0, "old"]], "words": [[]], "synced": True, "source": "old",
+        "asked": providers._provider_names(),
+    }), encoding="utf-8")
+
+    asked = []
+    monkeypatch.setattr(providers, "_ask_providers",
+                        lambda *a: asked.append(1) or (
+                            Lyrics(lines=[(0.0, "new")], words=[[]], synced=True),
+                            providers._provider_names()))
+    got = providers.fetch_lyrics("A", "B")
+    assert asked, "an entry without a version has to be fetched again"
+    assert got.lines[0][1] == "new"
