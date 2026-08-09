@@ -15,6 +15,12 @@ class LyricsProvider(ABC):
     # went unasked, or query every source on every track to find out.
     max_precision: Precision = Precision.LINE
 
+    # Whether this source states what was sung *behind* a line. Only one does,
+    # and it is the reason the cascade cannot simply keep the first word-timed
+    # answer that arrives: two sources can agree on precision and disagree on
+    # whether there is anything there at all.
+    carries_backing: bool = False
+
     @abstractmethod
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:

@@ -77,7 +77,11 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 # rather than answering with a hole: backing vocals were parsed, cached
 # without, and every replay came back with none of them, because nothing else
 # would ever have refreshed an entry whose providers had all been asked.
-CACHE_VERSION = 2
+# 3: entries written while the cascade kept whichever word-timed answer
+#    arrived first. Those that lost a race hold a source with no backing
+#    vocals, and nothing in the entry says whether it lost one or the other
+#    source simply had nothing — so they are all asked again.
+CACHE_VERSION = 3
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -134,9 +138,20 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
 
 
 def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
+    """Whether `new` should replace `best`.
+
+    Precision first, and then whether anything was sung behind the line. That
+    second test is not a refinement: measured against a real cache, Levitating
+    was held as `musixmatch/richsync` — the same WORD precision as the source
+    that has its twelve backing vocals, and none of them.
+    """
     if new is None:
         return False
-    return best is None or new.precision > best.precision
+    if best is None:
+        return True
+    if new.precision != best.precision:
+        return new.precision > best.precision
+    return any(new.backing) and not any(best.backing)
 
 
 def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) -> bool:
@@ -152,6 +167,25 @@ def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) 
         return True
     ceiling = max((p.max_precision for p in remaining), default=Precision.NONE)
     return best.precision >= ceiling
+
+
+def _may_add_backing(best: Lyrics | None,
+                     pending: list[LyricsProvider]) -> bool:
+    """Whether something in flight knows what was sung behind the line.
+
+    Precision is not the whole question, which the first version assumed. Two
+    sources can agree on it and disagree on whether anything was sung behind the
+    line: measured against a real cache, Levitating was held as
+    `musixmatch/richsync` — word-timed, and without the twelve backing vocals
+    the other source has for it. The first answer to arrive had won a race it
+    should not have been allowed to end.
+
+    Asked only of the sources, never of the readings of a name: `backing` is a
+    property of where the words came from, not of what they were asked for.
+    """
+    if best is None or any(best.backing):
+        return False
+    return any(getattr(p, "carries_backing", False) for p in pending)
 
 
 def _ask_one(provider: LyricsProvider, artist: str, title: str,
@@ -221,7 +255,9 @@ def _ask_providers(artist: str, title: str, duration: float,
         pending.pop(provider.name, None)
         if _better(result, best):
             best = result
-        if _nothing_left_to_beat(best, list(pending.values())):
+        waiting = list(pending.values())
+        if _nothing_left_to_beat(best, waiting) and not _may_add_backing(
+                best, waiting):
             # Nothing still in flight could improve on this, so the track has
             # its lyrics now. The rest finish into a queue nobody reads.
             break

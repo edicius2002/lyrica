@@ -145,3 +145,42 @@ def test_candidates_keep_looking_for_word_level(monkeypatch):
                         lambda a, t, d=0.0, al="": answers.get((a, t)))
     result = providers.fetch_for_candidates([("A", "one"), ("A", "two")])
     assert result.precision is Precision.WORD
+
+
+# --- what precision does not say --------------------------------------------
+
+def test_a_word_answer_without_backing_waits_for_one_that_has_it():
+    # Measured against a real cache: Levitating was held as
+    # `musixmatch/richsync` — the same precision as the source that has its
+    # twelve backing vocals, and none of them. The first answer to arrive had
+    # won a race it should not have been allowed to end.
+    from lyrica.lyrics import Lyrics, Precision
+    from lyrica.providers import _may_add_backing
+
+    plain = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 1.0, "a")]], synced=True)
+    rich = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 1.0, "a")]], synced=True,
+                  backing=["(oh)"], backing_words=[[(0.5, 0.9, "(oh)")]])
+
+    class Bare:
+        max_precision = Precision.WORD
+        carries_backing = False
+
+    class Knows:
+        max_precision = Precision.WORD
+        carries_backing = True
+
+    assert _may_add_backing(plain, [Knows()]) is True
+    assert _may_add_backing(plain, [Bare()]) is False, "nothing to wait for"
+    assert _may_add_backing(rich, [Knows()]) is False, "already has it"
+    assert _may_add_backing(None, [Knows()]) is False
+
+
+def test_backing_breaks_a_tie_between_equal_precisions():
+    from lyrica.lyrics import Lyrics
+    from lyrica.providers import _better
+
+    plain = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 1.0, "a")]], synced=True)
+    rich = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 1.0, "a")]], synced=True,
+                  backing=["(oh)"], backing_words=[[(0.5, 0.9, "(oh)")]])
+    assert _better(rich, plain) is True
+    assert _better(plain, rich) is False, "and it does not swing back"

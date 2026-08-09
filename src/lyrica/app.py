@@ -90,7 +90,10 @@ FONT_ECHO = ("Segoe UI", -20, "italic")
 # because neither alone was enough: on the same baseline it read as part of the
 # line, and a rung down the ladder gave it the exact colour of the main line's
 # unsung half.
-ECHO_DROP = 1.0
+# Measured against the render this was chosen from, where the drop was one
+# font size: a line's height is its linespace, half again as much, so the same
+# look asks for two thirds of it.
+ECHO_DROP = 0.66
 ECHO_KEEP = 0.72
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
@@ -158,6 +161,16 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
+
+
+def _below(view) -> float:
+    """Where a backing line's top goes, under the line it answers.
+
+    From the *last* row rather than the first: a line long enough to wrap has
+    two, and dropping from the top would land the backing inside the second one.
+    """
+    return (view.y + view.height - view.line_height
+            + view.line_height * ECHO_DROP)
 
 
 def _between(low: tuple, high: str, k: float) -> str:
@@ -1225,23 +1238,23 @@ class Overlay:
             self._clear_backing()
             self._echo = LineView(
                 self.canvas, self.width // 2,
-                active.y + active.line_height * ECHO_DROP, text, words,
+                _below(active), text, words,
                 font=self.f_echo, wrap=self.wrap // 2,
                 palette=self.palette.dimmed(ECHO_KEEP),
                 scale=self.chrome.scale,
                 bloom=self._bloom)
             self._echo_line = self.line_index
             # Built centred and then moved, because where it goes depends on how
-            # wide it came out. Refused rather than overlapped when the line it
-            # answers is long enough to reach it.
+            # wide it came out. Nothing is refused any more: it sits below the
+            # line's last row rather than beside it, so the two cannot meet
+            # however wide the line is. The check that used to guard that
+            # compared against the widest row, which meant a line long enough to
+            # wrap refused its backing every time.
             span = self._echo._row_spans[0]
             wide = span[1] - span[0]
-            right = self.width - self.chrome.px(EDGE_MARGIN) - wide / 2
-            if right - wide / 2 <= max(e for _s, e in active._row_spans):
-                self._clear_backing()
-                return
-            self._echo.recentre(right)
-        self._echo.move_to(active.y + active.line_height * ECHO_DROP)
+            self._echo.recentre(self.width - self.chrome.px(EDGE_MARGIN)
+                                - wide / 2)
+        self._echo.move_to(_below(active))
         pal = self._echo.palette
         if pos < words[0][0]:
             # Arriving: up out of the wash, so it is legible by the time it is
