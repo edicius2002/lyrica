@@ -186,9 +186,11 @@ def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch)
     assert asked == [full], f"built for {asked}, not the full {full}"
 
 
-def test_only_the_landing_frame_pays_for_the_mask_and_the_border(monkeypatch):
-    # Deferring these is the whole fix: they are what took a resize frame past
-    # its budget, and a mask a frame or two stale is invisible at that speed.
+def test_only_the_landing_frame_pays_for_the_flush_and_the_border(monkeypatch):
+    # The flush and the border are what took a resize frame past its budget.
+    # The clipping region is not deferrable with them: it decides what of the
+    # window is painted at all, and holding it back showed a panel clipped to
+    # the size it used to be while it had already moved and grown.
     from lyrica import app as A
     from lyrica import chrome as chrome_mod
 
@@ -230,4 +232,39 @@ def test_only_the_landing_frame_pays_for_the_mask_and_the_border(monkeypatch):
     A.Overlay._resize_window(panel, 880, 290, settling=False)
     assert done == [], f"a frame in flight did {done}"
     A.Overlay._resize_window(panel, 860, 280, settling=True)
-    assert done == ["flush", "shape", "beam"]
+    assert done == ["shape", "flush", "beam"]
+
+
+
+
+def test_the_region_covers_both_ends_of_a_move_before_it_starts(monkeypatch):
+    # It is what the window is clipped to. Left at the size the panel is
+    # leaving, it showed a small box at the new left edge that snapped open on
+    # landing; remade every frame, `SetWindowRgn` repaints the whole window
+    # synchronously and costs 32 ms of a 16 ms budget. One region, big enough
+    # for either end of the move, and the exact one when it lands.
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    asked = []
+    monkeypatch.setattr(chrome_mod, "shape",
+                        lambda _r, _c, w, h: asked.append((w, h)))
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 325, 114        # compact, about to expand
+        _collapse = None
+        _compact = False
+
+        def __init__(self):
+            self.root = self
+
+        def winfo_x(self): return 800
+        def winfo_y(self): return 100
+        def _want_compact(self): return False
+        def _target_size(self): return (1125, 375)
+
+    A.Overlay._retarget_size(Panel())
+    assert asked == [(1125, 375)], (
+        f"one region covering the whole move, not {asked}")

@@ -697,26 +697,41 @@ class Overlay:
             self._collapse = None
             self._resize_window(*target)
             return
-        self._collapse = (self.width, self.height, *target, time.monotonic())
+        # The anchor is taken once, here, and every frame of the move is
+        # measured from it. Asking Tk where the window is on each frame mixed a
+        # position it had not applied yet with a width that had already changed,
+        # and the centre the move is supposed to hold slid sideways and came
+        # back — a panel that jumped left and then grew into place.
+        self._collapse = (self.width, self.height, *target, time.monotonic(),
+                          self.root.winfo_x() + self.width // 2,
+                          self.root.winfo_y())
+        # One region for the whole move, big enough for either end of it. A
+        # region wider than the window clips nothing, so the panel is never cut
+        # short of itself; the corners are square while it travels and rounded
+        # again the moment it lands.
+        chrome_mod.shape(self.root, self.chrome,
+                         max(self.width, target[0]), max(self.height, target[1]))
 
     def _advance_collapse(self) -> bool:
         """Move one frame along the collapse. True while it is still going."""
         if self._collapse is None:
             return False
-        from_w, from_h, to_w, to_h, started = self._collapse
+        from_w, from_h, to_w, to_h, started, centre, top = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
         self._resize_window(round(from_w + (to_w - from_w) * t),
-                            round(from_h + (to_h - from_h) * t), settling=done)
+                            round(from_h + (to_h - from_h) * t), settling=done,
+                            anchor=(centre, top))
         if not done:
             return True
         self._collapse = None
         return False
 
     def _resize_window(self, width: int, height: int,
-                       settling: bool = True) -> None:
+                       settling: bool = True,
+                       anchor: tuple | None = None) -> None:
         """Put the window at a size, keeping the card exactly where it is.
 
         The top edge and the horizontal centre are held. The card lives at the
@@ -725,8 +740,10 @@ class Overlay:
         """
         if (width, height) == (self.width, self.height):
             return
-        centre = self.root.winfo_x() + self.width // 2
-        top = self.root.winfo_y()
+        # From the caller when there is a move in progress, because Tk cannot
+        # be asked where the window is faster than it puts it there.
+        centre, top = anchor or (self.root.winfo_x() + self.width // 2,
+                                 self.root.winfo_y())
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
         # The whole desktop, not the primary monitor. Clamping to
@@ -739,14 +756,21 @@ class Overlay:
         self.root.geometry(f"{width}x{height}+{x}+{top}")
         self.canvas.configure(width=width, height=height)
         if settling:
-            # Only on the frame that lands. Between them these three cost more
-            # than the whole frame budget — `_resize_window` measured 30.8 ms
-            # against 16, and 84 at worst — and a window resizing faster than it
-            # can be repainted is what the flicker was. The corner mask and the
-            # border are a frame or two stale while the panel is still moving,
-            # which nothing can see at that speed.
-            self.root.update_idletasks()
+            # The region, the flush and the border all wait for the frame that
+            # lands. Between them they took a resize frame to 30.8 ms against a
+            # budget of 16 — a window being asked to change size faster than it
+            # can be repainted, which is what the flicker was. `SetWindowRgn`
+            # is most of it on its own: it repaints the whole window
+            # synchronously.
+            #
+            # The region cannot simply be left stale, though, because it is what
+            # the window is *clipped to* — held at the old compact shape while
+            # the window had moved and grown, it showed a small box at the new
+            # left edge that snapped open on landing. A region larger than the
+            # window clips nothing, so `_retarget_size` sets one big enough for
+            # the whole move before it starts, and this puts the exact one back.
             chrome_mod.shape(self.root, self.chrome, width, height)
+            self.root.update_idletasks()
             if self.beam is not None:
                 self.beam.reshape(width, height,
                                   self.chrome.px(chrome_mod.CORNER_RADIUS))
