@@ -26,6 +26,7 @@ from lyrica import (
     artwork,
     autostart,
     config,
+    glass,
     hotkeys,
     motion,
     songcolour,
@@ -82,15 +83,20 @@ FONT_LINE = ("Segoe UI", -30, "bold")
 # What a backing vocal is drawn in. Smaller and, through `Palette.quieter`, a
 # rung further down the ladder — it is being sung by somebody standing behind
 # the singer, and it should look it.
-FONT_ECHO = ("Segoe UI", -19, "bold")
+FONT_ECHO = ("Segoe UI", -20, "italic")
 
 # How far below the line it answers a backing vocal sits, as a fraction of the
 # line's own height, and how much of the palette's light it keeps. Both exist
 # because neither alone was enough: on the same baseline it read as part of the
 # line, and a rung down the ladder gave it the exact colour of the main line's
 # unsung half.
-ECHO_DROP = 0.52
-ECHO_KEEP = 0.80
+ECHO_DROP = 1.0
+ECHO_KEEP = 0.72
+
+# How long a backing line takes to arrive and to leave, in seconds. It has its
+# own window inside the line — it answers a phrase rather than lasting as long
+# as one — so it comes and goes on that window rather than on the line's.
+ECHO_FADE_S = 0.30
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
@@ -152,6 +158,13 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
+
+
+def _between(low: tuple, high: str, k: float) -> str:
+    """A colour `k` of the way from a backdrop to one of the palette's own."""
+    k = max(0.0, min(1.0, k))
+    return glass.hex_of(tuple(a + (b - a) * k for a, b in
+                              zip(low, glass.rgb_of(high), strict=True)))
 
 
 def should_animate(step: int | None, dragging: bool) -> bool:
@@ -802,6 +815,7 @@ class Overlay:
         # out once, at the font and wrap width it was built with. Dropping them
         # and forgetting which line was current makes the next tick rebuild and
         # place them without animating, which is what a resize should look like.
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -1020,6 +1034,10 @@ class Overlay:
         self.palette = pal
         logger.debug("palette hue=%.0f strength=%.2f sweep dE=%.1f",
                      pal.hue, pal.strength, pal.sweep_de)
+        # The backing line is coloured from the palette too, and was not being
+        # switched over: it kept the outgoing song's tint after the new cover
+        # had already repainted everything else.
+        self._clear_backing()
         self.canvas.itemconfigure(self._title_item, fill=pal.title)
         self.canvas.itemconfigure(self._artist_item, fill=pal.artist)
         for view in self._views.values():
@@ -1192,7 +1210,15 @@ class Overlay:
         """
         text, words = lyr.backing_at(self.line_index)
         active = self._views.get(self.line_index)
-        if not text or active is None or not self._views:
+        if not text or not words or active is None or not self._views:
+            self._clear_backing()
+            return
+        # Its own window, not the line's. A backing vocal answers a phrase; the
+        # line it answers may run for seconds either side of it, and leaving the
+        # words sitting there for all of that would make them furniture rather
+        # than a voice.
+        opens, closes = words[0][0] - ECHO_FADE_S, words[-1][1] + ECHO_FADE_S
+        if not opens <= pos <= closes:
             self._clear_backing()
             return
         if self._echo_line != self.line_index:
@@ -1216,10 +1242,26 @@ class Overlay:
                 return
             self._echo.recentre(right)
         self._echo.move_to(active.y + active.line_height * ECHO_DROP)
-        self._echo.set_active(True)
-        word, fraction = lyr.backing_progress_at(self.line_index, pos)
-        self._echo.show_sweep(word, fraction)
-        self._echo.advance_bloom(time.monotonic())
+        pal = self._echo.palette
+        if pos < words[0][0]:
+            # Arriving: up out of the wash, so it is legible by the time it is
+            # sung rather than appearing already lit.
+            self._echo.set_active(False)
+            self._echo.show_inactive(_between(
+                pal.backdrop, pal.unsung,
+                (pos - opens) / ECHO_FADE_S))
+        elif pos > words[-1][1]:
+            # Leaving. Struck first, so `set_active(False)` puts back any letter
+            # still standing in for itself before the colour takes over.
+            self._echo.set_active(False)
+            self._echo.show_inactive(_between(
+                pal.backdrop, pal.sung,
+                (closes - pos) / ECHO_FADE_S))
+        else:
+            self._echo.set_active(True)
+            word, fraction = lyr.backing_progress_at(self.line_index, pos)
+            self._echo.show_sweep(word, fraction)
+            self._echo.advance_bloom(time.monotonic())
 
     def _clear_backing(self) -> None:
         if self._echo is not None:
@@ -1378,7 +1420,6 @@ class Overlay:
                 # nothing has been sung yet, and that is precisely what it says.
                 active.show_inactive(self.palette.unsung)
             elif active.words:
-                self._show_backing(lyr, pos + WORD_LEAD_S)
                 word, fraction = lyr.word_progress_at(self.line_index,
                                                       pos + WORD_LEAD_S)
                 active.show_sweep(word, fraction)
@@ -1391,6 +1432,9 @@ class Overlay:
                 # No word timing for this line: light all of it. Leaving it dim
                 # would say none of it has been sung, about the line playing.
                 active.show_lit()
+            # Outside every branch, so a line with no word timings takes its
+            # backing down instead of leaving the last one frozen over it.
+            self._show_backing(lyr, pos + WORD_LEAD_S)
 
         self.root.after(interval, self._tick)
 
