@@ -158,40 +158,6 @@ def test_the_words_partition_the_characters(view):
     assert covered == list(range(len(view._items)))
 
 
-def test_the_letters_themselves_rise_and_settle(view):
-    # A halo behind text that is not reacting reads as an effect laid over the
-    # words. There is no room to brighten them instead — the sung colour is
-    # already at 253 of 255 — so they move.
-    view.set_active(True)
-    view.show_sweep(0, 0.6)
-    when = min(w for w, _ in view._hit.values())
-
-    span = next(iter(view._hit.values()))[1]
-    from lyrica.lineview import LIFT_ATTACK
-
-    view.advance_bloom(when)
-    assert not any(view._lift.values()), "the rise has to take time, not a frame"
-
-    view.advance_bloom(when + span * LIFT_ATTACK)
-    raised = dict(view._lift)
-    assert max(raised.values()) > 0, "the word did not rise"
-
-    view.advance_bloom(when + span * 0.6)
-    assert 0 < max(view._lift.values()) < max(raised.values()), "it did not settle"
-
-    view.advance_bloom(when + span + 1e-3)
-    assert not any(view._lift.values()), "it never came back down"
-
-
-def test_a_line_that_stops_being_active_puts_its_letters_back(view):
-    view.set_active(True)
-    view.show_sweep(0, 0.6)
-    when, span = next(iter(view._hit.values()))
-    from lyrica.lineview import LIFT_ATTACK
-    view.advance_bloom(when + span * LIFT_ATTACK)
-    assert any(view._lift.values())
-    view.set_active(False)
-    assert not any(view._lift.values())
 
 
 def test_the_halo_is_the_same_size_and_sits_on_the_same_baseline():
@@ -214,19 +180,19 @@ def test_the_halo_is_the_same_size_and_sits_on_the_same_baseline():
     assert abs(pil.getlength("acuerdo") - width_tk) / width_tk < 0.05
 
 
-def test_the_rise_is_shaped_rather_than_linear():
+def test_the_strike_is_shaped_rather_than_linear():
     # Three designed pixels came to 3.4 real ones on the machine this was tuned
     # on, so a linear fall over eighteen frames visited four positions and read
     # as a staircase.
-    from lyrica.lineview import LIFT_ATTACK, _lift_shape
+    from lyrica.lineview import STRIKE_ATTACK, _strike_shape
 
-    assert _lift_shape(0.0) == 0.0
-    assert _lift_shape(LIFT_ATTACK) == pytest.approx(1.0, abs=0.02)
-    assert _lift_shape(1.0) == pytest.approx(0.0, abs=0.02)
+    assert _strike_shape(0.0) == 0.0
+    assert _strike_shape(STRIKE_ATTACK) == pytest.approx(1.0, abs=0.02)
+    assert _strike_shape(1.0) == pytest.approx(0.0, abs=0.02)
     # Rising fast and leaving slowly, which being struck and relaxing are.
-    assert _lift_shape(LIFT_ATTACK * 0.5) > 0.5
-    middle = (1.0 + LIFT_ATTACK) / 2
-    assert 0.3 < _lift_shape(middle) < 0.7
+    assert _strike_shape(STRIKE_ATTACK * 0.5) > 0.5
+    middle = (1.0 + STRIKE_ATTACK) / 2
+    assert 0.3 < _strike_shape(middle) < 0.7
 
 
 # --- the word grows ----------------------------------------------------------
@@ -292,9 +258,10 @@ def test_the_growth_is_above_the_floor_where_its_frames_repeat():
     spec = ("Segoe UI", -30, "bold")
     if not bloom_mod.available(spec):
         pytest.skip("no TrueType file for this font on this machine")
+    # Only the default is asserted. Where the floor lands depends on the font's
+    # own pixel metrics, which differ between this machine and the runner — the
+    # 6 % measurement is recorded in the history rather than checked here.
     steps = bloom_mod.SCALES
-    narrow_at_six = _distinct_steps(bloom_mod, spec, "a", 0.06)
-    assert narrow_at_six <= steps * 0.7, "the floor this default sits above"
     for char in ("a", "m"):
         got = _distinct_steps(bloom_mod, spec, char, bloom_mod.GROWTH)
         assert got >= steps - 1, (
@@ -308,8 +275,8 @@ def test_the_letter_is_swapped_for_its_stand_in_and_back(view):
     view.show_sweep(0, 0.6)
     when, span = next(iter(view._hit.values()))
 
-    from lyrica.lineview import LIFT_ATTACK
-    view.advance_bloom(when + span * LIFT_ATTACK)
+    from lyrica.lineview import STRIKE_ATTACK
+    view.advance_bloom(when + span * STRIKE_ATTACK)
     assert view._showing, "nothing grew"
     index = next(iter(view._showing))
     assert view.canvas.itemcget(view._items[index][2], "state") == "hidden"
@@ -323,7 +290,7 @@ def test_only_so_many_new_sizes_are_built_in_one_frame(view):
     # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
     # size every frame overran on its first play: measured at 24 ms.
     from lyrica import bloom as bloom_mod
-    from lyrica.lineview import LIFT_ATTACK, NEW_SIZES_PER_FRAME
+    from lyrica.lineview import NEW_SIZES_PER_FRAME, STRIKE_ATTACK
 
     view.set_active(True)
     if not view._blurred:
@@ -331,7 +298,7 @@ def test_only_so_many_new_sizes_are_built_in_one_frame(view):
     bloom_mod._cache.clear()
     view.show_sweep(0, 0.6)
     when, span = next(iter(view._hit.values()))
-    view.advance_bloom(when + span * LIFT_ATTACK)
+    view.advance_bloom(when + span * STRIKE_ATTACK)
     assert len(bloom_mod._cache) <= NEW_SIZES_PER_FRAME
 
 
@@ -341,8 +308,8 @@ def test_a_line_no_longer_active_leaves_no_stand_ins(view):
         pytest.skip("no blurred glyphs on this machine")
     view.show_sweep(0, 0.6)
     when, span = next(iter(view._hit.values()))
-    from lyrica.lineview import LIFT_ATTACK
-    view.advance_bloom(when + span * LIFT_ATTACK)
+    from lyrica.lineview import STRIKE_ATTACK
+    view.advance_bloom(when + span * STRIKE_ATTACK)
     view.set_active(False)
     assert not view._showing
     # Tk answers "" for a state never set, which is what an untouched letter has.

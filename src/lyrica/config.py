@@ -154,32 +154,6 @@ def bloom_factor() -> float:
     return max(BLOOM_MIN, min(BLOOM_MAX, value))
 
 
-# How far a struck word rises, as a multiple of the designed travel. Kept small
-# on purpose: a vertical shift is a stand-in for the scaling the effect being
-# imitated actually does, and a stand-in that moves too far stops reading as
-# emphasis and starts reading as a bounce.
-LIFT_MIN, LIFT_MAX = 0.0, 3.0
-LIFT_DEFAULT = 1.0
-
-
-def lift_factor() -> float:
-    """How much of the designed rise a struck word takes."""
-    raw = os.environ.get("LYRICA_LIFT", "").strip()
-    if not raw:
-        return LIFT_DEFAULT
-    if raw.lower() in ("off", "none", "no"):
-        return 0.0
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("LYRICA_LIFT=%r is not a number; using %s", raw, LIFT_DEFAULT)
-        return LIFT_DEFAULT
-    if not LIFT_MIN <= value <= LIFT_MAX:
-        logger.warning("LYRICA_LIFT=%s is outside %s-%s; clamping",
-                       value, LIFT_MIN, LIFT_MAX)
-    return max(LIFT_MIN, min(LIFT_MAX, value))
-
-
 # How much larger a struck word gets, as a fraction. Has a floor that is not a
 # matter of taste: below about a tenth, several of the growth's steps render to
 # the same whole-pixel size and a third of its frames show an identical picture.

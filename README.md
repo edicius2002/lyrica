@@ -81,11 +81,18 @@ crossing a word is already on the word's own clock, and a constant put the two
 in disagreement, spent before a long word was half lit and still burning after a
 short one had gone. `off` removes it.
 
-The **lift** is the word rising and settling. `LYRICA_LIFT` scales it, default
-1.0, `off` to remove it. Deliberately small: it stands in for the scaling the
-effect it imitates actually does, and too much of it reads as a bounce rather
-than as emphasis. There is no room to brighten a word instead — the sung colour
-is already at 253 of 255.
+The **growth** is the word swelling and settling back. `LYRICA_GROWTH` sets it
+as a fraction, default 0.11, `off` to remove it. It has a floor that is not a
+matter of taste: below about a tenth, several of its steps render to the same
+whole-pixel size and a third of the frames show an identical picture. There is
+no room to brighten a word instead — the sung colour is already at 253 of 255 —
+so it grows.
+
+Tk cannot scale a text item: its font sizes are integers and a subtle growth
+lands on two or three of them. A growing letter is swapped for a resampled
+image and swapped back after, which is also why, for as long as a word is
+growing, its letters are either sung or unsung with nothing between — baking
+the ramp's sixty-four steps into images would have been 21,504 of them.
 
 The bloom is a real gaussian blur, drawn with PIL and handed to the canvas as an
 image rather than faked with offset copies of the glyph. That is not only

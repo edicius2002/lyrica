@@ -394,17 +394,6 @@ def test_a_wild_bloom_is_clamped_and_a_bad_one_ignored(store, monkeypatch):
     assert config.bloom_factor() == config.BLOOM_DEFAULT
 
 
-def test_the_lift_defaults_and_can_be_tuned(store, monkeypatch):
-    monkeypatch.delenv("LYRICA_LIFT", raising=False)
-    assert config.lift_factor() == config.LIFT_DEFAULT
-    monkeypatch.setenv("LYRICA_LIFT", "0.5")
-    assert config.lift_factor() == 0.5
-    monkeypatch.setenv("LYRICA_LIFT", "off")
-    assert config.lift_factor() == 0.0
-    monkeypatch.setenv("LYRICA_LIFT", "99")
-    assert config.lift_factor() == config.LIFT_MAX
-
-
 def test_the_growth_defaults_and_can_be_tuned(store, monkeypatch):
     monkeypatch.delenv("LYRICA_GROWTH", raising=False)
     assert config.growth_factor() == config.GROWTH_DEFAULT
