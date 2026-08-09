@@ -242,3 +242,66 @@ def test_a_background_chorus_keeps_the_space_that_followed_it():
     lyrics = ttml.parse_ttml(doc)
     assert lyrics.lines[0][1] == "canta conmigo"
     assert [w[2] for w in lyrics.words[0]] == ["canta", "conmigo"]
+
+
+# --- what is sung behind the line -------------------------------------------
+
+def test_a_backing_vocal_comes_back_apart_from_the_line():
+    # It cannot join the line's own sequence: its times overlap rather than
+    # follow, and interleaving two simultaneous vocals gives nonsense.
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml" '
+           'xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><body><div>'
+           '<p begin="41.684" end="44.193">'
+           '<span begin="41.684" end="41.901">I</span> '
+           '<span begin="41.901" end="42.172">need</span> '
+           '<span begin="42.172" end="42.737">you</span>'
+           '<span ttm:role="x-bg">'
+           '<span begin="42.688" end="43.406">(You)</span></span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert lyrics.lines[0][1] == "I need you"
+    assert [w[2] for w in lyrics.words[0]] == ["I", "need", "you"]
+    text, words = lyrics.backing_at(0)
+    assert text == "(You)"
+    assert words == [(42.688, 43.406, "(You)")]
+    # And it really does overlap what it answers.
+    assert words[0][0] < lyrics.words[0][-1][1]
+
+
+def test_a_backing_vocal_split_below_the_word_is_put_back_together():
+    # "(You, the moon" and "light)" arrive as separate spans with nothing
+    # between them, exactly as the main line's words do.
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml" '
+           'xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><body><div>'
+           '<p begin="46.775" end="50.301">'
+           '<span begin="46.775" end="47.335">You</span>'
+           '<span ttm:role="x-bg">'
+           '<span begin="48.517" end="48.895">(You,</span> '
+           '<span begin="48.895" end="49.061">the</span> '
+           '<span begin="49.061" end="49.482">moon</span>'
+           '<span begin="49.482" end="50.301">light)</span></span>'
+           '</p></div></body></tt>')
+    assert ttml.parse_ttml(doc).backing_at(0)[0] == "(You, the moonlight)"
+
+
+def test_a_line_with_nothing_behind_it_says_so():
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="3s"><span begin="0s" end="1s">solo</span></p>'
+           '</div></body></tt>')
+    assert ttml.parse_ttml(doc).backing_at(0) == ("", [])
+
+
+def test_backing_stays_matched_to_its_line_when_sections_are_out_of_order():
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml" '
+           'xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><body>'
+           '<div><p begin="10s" end="12s">'
+           '<span begin="10s" end="11s">segunda</span>'
+           '<span ttm:role="x-bg"><span begin="11s" end="12s">(dos)</span></span>'
+           '</p></div>'
+           '<div><p begin="0s" end="2s">'
+           '<span begin="0s" end="1s">primera</span>'
+           '<span ttm:role="x-bg"><span begin="1s" end="2s">(uno)</span></span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert [t for _s, t in lyrics.lines] == ["primera", "segunda"]
+    assert [lyrics.backing_at(i)[0] for i in (0, 1)] == ["(uno)", "(dos)"]

@@ -46,6 +46,7 @@ from lyrica import (
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
 from lyrica.lyrics import Lyrics
+from lyrica.overlay_text import EDGE_MARGIN
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -77,6 +78,11 @@ THUMB_SIZE = 62
 # reading as louder or quieter rather than bigger or smaller is what the
 # reference does anyway.
 FONT_LINE = ("Segoe UI", -30, "bold")
+
+# What a backing vocal is drawn in. Smaller and, through `Palette.quieter`, a
+# rung further down the ladder — it is being sung by somebody standing behind
+# the singer, and it should look it.
+FONT_ECHO = ("Segoe UI", -19, "bold")
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
@@ -229,6 +235,8 @@ class Overlay:
         self._compact = False
         self._collapse = None
         self._views_width = 0
+        self._echo = None
+        self._echo_line = -1
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
         # Read once and set on the module, because it decides what the cached
@@ -270,6 +278,7 @@ class Overlay:
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
+        self.f_echo = _scaled_font(FONT_ECHO, scale)
         # Made once. Creating a Font is a round trip into Tk, and these were
         # being rebuilt on every tick just to measure a string.
         self._title_font = tkfont.Font(font=self.f_title)
@@ -736,6 +745,7 @@ class Overlay:
         self.f_title = _scaled_font(FONT_TITLE, scale)
         self.f_artist = _scaled_font(FONT_ARTIST, scale)
         self.f_line = _scaled_font(FONT_LINE, scale)
+        self.f_echo = _scaled_font(FONT_ECHO, scale)
         self._title_font = tkfont.Font(font=self.f_title)
         self._artist_font = tkfont.Font(font=self.f_artist)
         self._card_y = self.chrome.px(14)
@@ -1117,6 +1127,7 @@ class Overlay:
 
     # --- the line pool ---
     def _clear_views(self):
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -1158,6 +1169,53 @@ class Overlay:
                 bloom=self._bloom)
         self._views_width = self.width
 
+    def _show_backing(self, lyr: Lyrics, pos: float) -> None:
+        """Draw what is sung behind the active line, off at the right margin.
+
+        Not under the line and not beside it: the gap between rows is eleven
+        pixels against the twenty-seven a second row would need, so anywhere
+        below pushes the whole column about every time a backing vocal comes and
+        goes. The right margin is empty, it is where a voice standing behind the
+        singer belongs, and nothing has to move for it.
+
+        It sweeps on its own timings, which the source gives it, and it has to:
+        a backing vocal answers the line while the line is still being sung, and
+        the two overlap rather than following one another.
+        """
+        text, words = lyr.backing_at(self.line_index)
+        active = self._views.get(self.line_index)
+        if not text or active is None or not self._views:
+            self._clear_backing()
+            return
+        if self._echo_line != self.line_index:
+            self._clear_backing()
+            self._echo = LineView(
+                self.canvas, self.width // 2, active.y, text, words,
+                font=self.f_echo, wrap=self.wrap // 2,
+                palette=self.palette.quieter(), scale=self.chrome.scale,
+                bloom=self._bloom)
+            self._echo_line = self.line_index
+            # Built centred and then moved, because where it goes depends on how
+            # wide it came out. Refused rather than overlapped when the line it
+            # answers is long enough to reach it.
+            span = self._echo._row_spans[0]
+            wide = span[1] - span[0]
+            right = self.width - self.chrome.px(EDGE_MARGIN) - wide / 2
+            if right - wide / 2 <= max(e for _s, e in active._row_spans):
+                self._clear_backing()
+                return
+            self._echo.recentre(right)
+        self._echo.move_to(active.y)
+        self._echo.set_active(True)
+        word, fraction = lyr.backing_progress_at(self.line_index, pos)
+        self._echo.show_sweep(word, fraction)
+        self._echo.advance_bloom(time.monotonic())
+
+    def _clear_backing(self) -> None:
+        if self._echo is not None:
+            self._echo.destroy()
+        self._echo, self._echo_line = None, -1
+
     def _refit_views(self) -> None:
         """Keep the lines centred on the window they are actually in.
 
@@ -1173,6 +1231,7 @@ class Overlay:
                 view.recentre(self.width // 2)
             return
         self._views_width = self.width
+        self._clear_backing()
         for view in self._views.values():
             view.destroy()
         self._views.clear()
@@ -1309,6 +1368,7 @@ class Overlay:
                 # nothing has been sung yet, and that is precisely what it says.
                 active.show_inactive(self.palette.unsung)
             elif active.words:
+                self._show_backing(lyr, pos + WORD_LEAD_S)
                 word, fraction = lyr.word_progress_at(self.line_index,
                                                       pos + WORD_LEAD_S)
                 active.show_sweep(word, fraction)

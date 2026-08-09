@@ -422,6 +422,17 @@ class Palette:
         """
         return self.side if distance <= 1 else self.far
 
+    def quieter(self) -> "Palette":
+        """The same palette a rung further down its own ladder.
+
+        For text that is being sung by somebody standing behind the singer: the
+        ladder already expresses "less foreground than that", so a backing line
+        takes the step below rather than a colour invented for it.
+        """
+        return replace(self, sung=self.unsung, unsung=self.side, side=self.far,
+                       far=self.far, ramp=_blend_ramp(self.side, self.unsung),
+                       _fades={}, _blooms={})
+
     def bloom(self, level: float) -> str:
         """The halo behind a struck character, at 0..1 of its strength.
 

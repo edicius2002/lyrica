@@ -393,3 +393,19 @@ def test_the_beam_keeps_a_dark_ground_to_travel_through():
     for song in (NEUTRAL, *COLOURED):
         p = pal_mod.for_song(ch, song)
         assert lum(p.beam) < lum(p.unsung) * 0.85
+
+
+def test_a_quieter_palette_is_the_same_ladder_one_rung_down():
+    # For text sung by somebody standing behind the singer. The ladder already
+    # expresses "less foreground than that", so it takes the step below rather
+    # than a colour invented for it.
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+
+    loud = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#101014", PANEL), NEUTRAL)
+    quiet = loud.quieter()
+    assert quiet.sung == loud.unsung
+    assert quiet.unsung == loud.side
+    assert lum(quiet.sung) > lum(quiet.unsung) > lum(quiet.side), "still a ladder"
+    assert lum(quiet.sung) < lum(loud.sung), "and quieter than the line it answers"
+    assert quiet.ramp[0] == quiet.unsung and quiet.ramp[-1] == quiet.sung
