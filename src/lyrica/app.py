@@ -84,6 +84,14 @@ FONT_LINE = ("Segoe UI", -30, "bold")
 # the singer, and it should look it.
 FONT_ECHO = ("Segoe UI", -19, "bold")
 
+# How far below the line it answers a backing vocal sits, as a fraction of the
+# line's own height, and how much of the palette's light it keeps. Both exist
+# because neither alone was enough: on the same baseline it read as part of the
+# line, and a rung down the ladder gave it the exact colour of the main line's
+# unsung half.
+ECHO_DROP = 0.52
+ECHO_KEEP = 0.80
+
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
 
@@ -1190,9 +1198,11 @@ class Overlay:
         if self._echo_line != self.line_index:
             self._clear_backing()
             self._echo = LineView(
-                self.canvas, self.width // 2, active.y, text, words,
+                self.canvas, self.width // 2,
+                active.y + active.line_height * ECHO_DROP, text, words,
                 font=self.f_echo, wrap=self.wrap // 2,
-                palette=self.palette.quieter(), scale=self.chrome.scale,
+                palette=self.palette.dimmed(ECHO_KEEP),
+                scale=self.chrome.scale,
                 bloom=self._bloom)
             self._echo_line = self.line_index
             # Built centred and then moved, because where it goes depends on how
@@ -1205,7 +1215,7 @@ class Overlay:
                 self._clear_backing()
                 return
             self._echo.recentre(right)
-        self._echo.move_to(active.y)
+        self._echo.move_to(active.y + active.line_height * ECHO_DROP)
         self._echo.set_active(True)
         word, fraction = lyr.backing_progress_at(self.line_index, pos)
         self._echo.show_sweep(word, fraction)
