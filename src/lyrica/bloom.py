@@ -30,6 +30,14 @@ LEVELS = 8
 # as a glow around the letter rather than as a thicker letter.
 RADIUS = 4
 
+# How much larger a word gets at the peak of its strike. What is being imitated
+# is subtle, but subtle has a floor here that is not a matter of taste: at 6 %
+# a narrow letter gained nine tenths of a pixel across the whole growth, and
+# four of the nine steps rendered to the same integer size as their neighbour,
+# so a third of the frames showed an identical picture. Measured, every step
+# earns a different image from about 10 % up.
+GROWTH = 0.11          # replaced at startup from the environment
+
 # Room for the blur to fall off inside the image, or it is cut square at the
 # edges and the halo has corners.
 PAD = 12
@@ -99,6 +107,93 @@ def _pil_font(spec: tuple):
 def available(spec: tuple) -> bool:
     """Whether blurred glyphs can be made for this font."""
     return _pil_font(spec) is not None
+
+
+# How many sizes a growing word is quantised to. PIL resamples, so the steps are
+# only a cache limit and not the staircase that changing a Tk font size is: a
+# 4 % growth there gives two integer sizes and nothing between them.
+SCALES = 8
+
+
+def _rendered(char: str, font, colour: tuple, scale: float):
+    """The glyph drawn at `colour`, grown by `scale` about its own centre."""
+    from PIL import Image, ImageDraw
+
+    width = max(1, int(font.getlength(char)))
+    ascent, descent = font.getmetrics()
+    height = ascent + descent
+    img = Image.new("RGBA", (width + PAD * 2, height + PAD * 2), (0, 0, 0, 0))
+    ImageDraw.Draw(img).text((PAD, PAD), char, font=font, fill=(*colour, 255))
+    if scale != 1.0:
+        big = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
+        img = img.resize(big, Image.LANCZOS)
+    return img
+
+
+def ready(char: str, spec: tuple, step: int, colour: tuple) -> bool:
+    """Whether this image already exists, so a caller can budget the building.
+
+    Each one costs about 0.7 ms and a frame is 16, so a word of seven letters
+    reaching for a new size every frame overran on its first play — measured at
+    24 ms. Nothing has to be built *this* frame, though: the size before it is
+    already on screen and a step of a sixth of six per cent is not a thing
+    anyone sees held for one frame longer.
+    """
+    return ("grown", char, spec, min(step, SCALES), colour) in _cache
+
+
+def grown(char: str, spec: tuple, step: int, colour: tuple):
+    """`char` grown by `step` of `SCALES`, as (image, dx, dy), or None.
+
+    `dx`/`dy` place the image relative to the letter's own top-left corner, and
+    they come back with it because they can only be right if they are derived
+    from the size the image actually came out — which is whole pixels, not the
+    fraction that was asked for. Working from the fraction instead leaves the
+    placement and the picture disagreeing by up to half a pixel, and the letter
+    trembles as it grows.
+
+    The image carries `PAD` of transparent margin so the halo has room to fall
+    off, and that margin is resampled with everything else, so the letter sits
+    `PAD * scale` inside rather than `PAD`. On top of that it has to move back
+    by half of what it gained, or it swells rightwards instead of in place.
+
+    Step 0 is the letter at its own size, which an ordinary text item already
+    draws, so it returns nothing and the caller shows the text. Nothing is ever
+    scaled down: a word only grows.
+    """
+    if step <= 0:
+        return None
+    key = ("grown", char, spec, min(step, SCALES), colour)
+    hit = _cache.get(key)
+    if hit is not None:
+        return hit
+    font = _pil_font(spec)
+    if font is None:
+        return None
+    try:
+        from PIL import ImageTk
+
+        asked = 1.0 + GROWTH * min(step, SCALES) / SCALES
+        img = _rendered(char, font, colour, asked)
+        width = max(1, int(font.getlength(char)))
+        height = sum(font.getmetrics())
+        # What the resampling actually delivered, per axis.
+        got_x = img.width / (width + PAD * 2)
+        got_y = img.height / (height + PAD * 2)
+        placed = (width / 2 - PAD * got_x - width * got_x / 2,
+                  height / 2 - PAD * got_y - height * got_y / 2)
+        made = (ImageTk.PhotoImage(img), *placed)
+    except Exception:
+        logger.debug("could not grow %r", char, exc_info=True)
+        return None
+    _cache[key] = made
+    return made
+
+
+def blurred_ready(char: str, spec: tuple, level: int,
+                  colour: tuple = (255, 255, 255)) -> bool:
+    """Whether this halo already exists. Budgeted for the same reason sizes are."""
+    return (char, spec, min(level, LEVELS), colour) in _cache
 
 
 def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):

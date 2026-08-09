@@ -20,6 +20,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from lyrica import bloom
+from lyrica.glass import rgb_of
 from lyrica.motion import STRIKE_DOWN, STRIKE_UP, cubic_bezier
 from lyrica.overlay_text import (
     EDGE_MARGIN,
@@ -54,29 +55,28 @@ GLOW_PEAK = 0.85
 # text that is not reacting to anything, which reads as an effect laid over the
 # words rather than as the words being sung. There is no room to brighten them
 # instead: the sung colour is already at 253 of 255.
-LIFT_PX = 3.0
-
-# How much of a word's light is spent rising rather than settling. The rise used
-# to take no time at all — one frame from nothing to the top, which is a
-# teleport, not a movement.
-LIFT_ATTACK = 0.16
+# How much of a word's light is spent growing rather than settling back. The
+# rise used to take no time at all — one frame from nothing to the top, which is
+# a teleport, not a movement.
+STRIKE_ATTACK = 0.16
 
 
-def _lift_shape(age: float) -> float:
-    """How high a struck word stands, 0..1, `age` through its light.
+def _strike_shape(age: float) -> float:
+    """How far into its strike a word stands, 0..1, `age` through its light.
 
-    Measured on the machine this was tuned on: three designed pixels came to
-    3.4 real ones, so a linear fall over eighteen frames visited four positions
-    and read as a staircase. The travel is wider now and the two halves are
-    shaped separately, because being struck and relaxing are not the same
-    gesture.
+    The two halves are shaped separately because being struck and relaxing are
+    not the same gesture: nearly there at once, then a long way back.
     """
     if age <= 0.0:
         return 0.0
-    if age < LIFT_ATTACK:
-        return cubic_bezier(age / LIFT_ATTACK, STRIKE_UP)
-    fall = (age - LIFT_ATTACK) / (1.0 - LIFT_ATTACK)
+    if age < STRIKE_ATTACK:
+        return cubic_bezier(age / STRIKE_ATTACK, STRIKE_UP)
+    fall = (age - STRIKE_ATTACK) / (1.0 - STRIKE_ATTACK)
     return 1.0 - cubic_bezier(min(1.0, fall), STRIKE_DOWN)
+
+
+NEW_SIZES_PER_FRAME = 3
+
 
 # How long a character keeps its bloom after the front reaches it. The effect
 # being copied blooms at the onset and relaxes; the old glow instead peaked
@@ -100,15 +100,13 @@ class LineView:
 
     def __init__(self, canvas: tk.Canvas, cx: int, y: float, text: str, words: list,
                  *, font, wrap: int, palette, scale: float = 1.0,
-                 feather: float = FEATHER_PX, bloom: float = BLOOM_S,
-                 lift: float = 1.0):
+                 feather: float = FEATHER_PX, bloom: float = BLOOM_S):
         self.canvas = canvas
         self.palette = palette
         self.words = words
         self.feather = feather * scale
         self.bloom = bloom
         self._scale = scale
-        self._lift_scale = scale * lift
         self.y = float(y)
         self._cx = float(cx)
         self._items: list = []      # [centre_x, row, item, colour]
@@ -123,7 +121,10 @@ class LineView:
         # again on the next frame, and every sung letter pulsed for ever.
         self._struck: set = set()
         self._blurred = False
-        self._lift: dict = {}       # char index -> pixels it is currently raised
+        self._grown: dict = {}      # char index -> its scaled stand-in
+        self._reached: list = []    # char index -> how far the front is past it
+        self._showing: dict = {}    # char index -> (step, colour) on screen
+        self._budget = 0            # new sizes still allowed this frame
         self._blooming = False
         self._active = False
         self._state = None
@@ -234,6 +235,9 @@ class LineView:
             yield entry[2]
         for items in self._glow.values():
             yield from items
+        # The grown stand-ins travel with the line too: one holding still at a
+        # constant size while its line glided would come adrift of its own word.
+        yield from self._grown.values()
 
     def destroy(self) -> None:
         for item in self.item_ids():
@@ -263,7 +267,7 @@ class LineView:
         if active:
             self._build_glow()
         else:
-            self._settle_lifts()
+            self._settle_grown()
             self._clear_glow()
             self._hit.clear()
             self._struck.clear()
@@ -290,6 +294,13 @@ class LineView:
                                                 anchor="nw", state="hidden")
                 self.canvas.tag_lower(item, entry[2])
                 self._glow[index] = [item]
+                # And a stand-in for the letter itself while it is growing. Tk
+                # cannot scale a text item: its font sizes are integers, and a
+                # 6 % growth lands on two of them, which is the staircase this
+                # is trying to avoid. An image resamples to any fraction.
+                stand_in = self.canvas.create_image(x, y, anchor="nw",
+                                                    state="hidden")
+                self._grown[index] = stand_in
                 continue
             items = [self.canvas.create_text(x + dx, y + dy, text=ch, anchor="nw",
                                              font=self._font,
@@ -347,6 +358,7 @@ class LineView:
                 self.canvas.itemconfigure(item, fill=colour)
                 entry[3] = colour
             reached[i] = t
+        self._reached = reached
 
         # A whole word at once, not each of its letters in turn. Lighting them
         # one by one made the line ripple, where what is being imitated strikes
@@ -367,21 +379,49 @@ class LineView:
                 for index in chars:
                     self._hit.pop(index, None)
 
-    def _raise_char(self, index: int, to: float) -> None:
-        """Hold a character `to` pixels above where it was laid out."""
-        current = self._lift.get(index, 0.0)
-        delta = round(to - current)
-        if not delta:
-            return
-        self._lift[index] = current + delta
-        self.canvas.move(self._items[index][2], 0, -delta)
-        for item in self._glow.get(index, ()):
-            self.canvas.move(item, 0, -delta)
+    def _grow_char(self, index: int, shape: float) -> None:
+        """Show a grown stand-in for a letter, or the letter itself at rest.
 
-    def _settle_lifts(self) -> None:
-        for index in list(self._lift):
-            self._raise_char(index, 0.0)
-        self._lift.clear()
+        While a word grows, its letters are either sung or unsung with nothing
+        between: the ramp lives in the front's own width, which is under one
+        character, so quantising it for the length of the strike costs a frame
+        of a boundary and buys the whole cache. Sixty-four ramp steps would have
+        been 21,504 images and a quarter of a gigabyte.
+        """
+        item = self._grown.get(index)
+        if item is None:
+            return
+        step = round(shape * bloom.SCALES)
+        text = self._items[index][2]
+        if step <= 0:
+            if self._showing.pop(index, None) is not None:
+                self.canvas.itemconfigure(item, state="hidden")
+                self.canvas.itemconfigure(text, state="normal")
+            return
+        sung = self._reached[index] >= 0.5 if index < len(self._reached) else True
+        colour = rgb_of(self.palette.sung if sung else self.palette.unsung)
+        want = (step, colour)
+        if self._showing.get(index) == want:
+            return
+        char = self.canvas.itemcget(text, "text")
+        if not bloom.ready(char, self._font, step, colour):
+            if self._budget <= 0:
+                return          # hold the size it has; the next frame may build
+            self._budget -= 1
+        made = bloom.grown(char, self._font, step, colour)
+        if made is None:
+            return
+        image, dx, dy = made
+        x, y = self.canvas.coords(text)
+        self.canvas.coords(item, x + dx, y + dy)
+        self.canvas.itemconfigure(item, image=image, state="normal")
+        self.canvas.itemconfigure(text, state="hidden")
+        self._showing[index] = want
+
+    def _settle_grown(self) -> None:
+        for index in list(self._showing):
+            self._grow_char(index, 0.0)
+        self._showing.clear()
 
     def advance_bloom(self, now: float) -> bool:
         """Fade each struck character's halo. True while any is still alight.
@@ -392,9 +432,10 @@ class LineView:
         light it leaves drains away.
         """
         if self.bloom <= 0 or not self._hit:
-            self._settle_lifts()
+            self._settle_grown()
             return False
         alight = False
+        self._budget = NEW_SIZES_PER_FRAME
         for index, (when, span) in list(self._hit.items()):
             age = (now - when) / span
             level = GLOW_PEAK * (1.0 - age) if age < 1.0 else 0.0
@@ -402,15 +443,19 @@ class LineView:
                 del self._hit[index]
             else:
                 alight = True
-            # The letters themselves, not only the light behind them. Highest
-            # at the strike and settling as the light drains, so a word visibly
-            # answers rather than being decorated.
-            self._raise_char(index, LIFT_PX * self._lift_scale * _lift_shape(age))
+            # The letters themselves, not only the light behind them: a halo
+            # behind text that is not reacting reads as an effect laid over the
+            # words rather than as the words being sung.
+            self._grow_char(index, _strike_shape(age))
             if not self._glow:
                 continue
             if self._blurred:
                 char = self.canvas.itemcget(self._items[index][2], "text")
                 step = int(level / GLOW_PEAK * bloom.LEVELS + 0.5)
+                if not bloom.blurred_ready(char, self._font, step):
+                    if self._budget <= 0:
+                        continue    # keep the halo it has for one more frame
+                    self._budget -= 1
                 image = bloom.glyph(char, self._font, step)
                 for item in self._glow.get(index, ()):
                     if image is None:

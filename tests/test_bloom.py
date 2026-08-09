@@ -158,40 +158,6 @@ def test_the_words_partition_the_characters(view):
     assert covered == list(range(len(view._items)))
 
 
-def test_the_letters_themselves_rise_and_settle(view):
-    # A halo behind text that is not reacting reads as an effect laid over the
-    # words. There is no room to brighten them instead — the sung colour is
-    # already at 253 of 255 — so they move.
-    view.set_active(True)
-    view.show_sweep(0, 0.6)
-    when = min(w for w, _ in view._hit.values())
-
-    span = next(iter(view._hit.values()))[1]
-    from lyrica.lineview import LIFT_ATTACK
-
-    view.advance_bloom(when)
-    assert not any(view._lift.values()), "the rise has to take time, not a frame"
-
-    view.advance_bloom(when + span * LIFT_ATTACK)
-    raised = dict(view._lift)
-    assert max(raised.values()) > 0, "the word did not rise"
-
-    view.advance_bloom(when + span * 0.6)
-    assert 0 < max(view._lift.values()) < max(raised.values()), "it did not settle"
-
-    view.advance_bloom(when + span + 1e-3)
-    assert not any(view._lift.values()), "it never came back down"
-
-
-def test_a_line_that_stops_being_active_puts_its_letters_back(view):
-    view.set_active(True)
-    view.show_sweep(0, 0.6)
-    when, span = next(iter(view._hit.values()))
-    from lyrica.lineview import LIFT_ATTACK
-    view.advance_bloom(when + span * LIFT_ATTACK)
-    assert any(view._lift.values())
-    view.set_active(False)
-    assert not any(view._lift.values())
 
 
 def test_the_halo_is_the_same_size_and_sits_on_the_same_baseline():
@@ -214,16 +180,138 @@ def test_the_halo_is_the_same_size_and_sits_on_the_same_baseline():
     assert abs(pil.getlength("acuerdo") - width_tk) / width_tk < 0.05
 
 
-def test_the_rise_is_shaped_rather_than_linear():
+def test_the_strike_is_shaped_rather_than_linear():
     # Three designed pixels came to 3.4 real ones on the machine this was tuned
     # on, so a linear fall over eighteen frames visited four positions and read
     # as a staircase.
-    from lyrica.lineview import LIFT_ATTACK, _lift_shape
+    from lyrica.lineview import STRIKE_ATTACK, _strike_shape
 
-    assert _lift_shape(0.0) == 0.0
-    assert _lift_shape(LIFT_ATTACK) == pytest.approx(1.0, abs=0.02)
-    assert _lift_shape(1.0) == pytest.approx(0.0, abs=0.02)
+    assert _strike_shape(0.0) == 0.0
+    assert _strike_shape(STRIKE_ATTACK) == pytest.approx(1.0, abs=0.02)
+    assert _strike_shape(1.0) == pytest.approx(0.0, abs=0.02)
     # Rising fast and leaving slowly, which being struck and relaxing are.
-    assert _lift_shape(LIFT_ATTACK * 0.5) > 0.5
-    middle = (1.0 + LIFT_ATTACK) / 2
-    assert 0.3 < _lift_shape(middle) < 0.7
+    assert _strike_shape(STRIKE_ATTACK * 0.5) > 0.5
+    middle = (1.0 + STRIKE_ATTACK) / 2
+    assert 0.3 < _strike_shape(middle) < 0.7
+
+
+# --- the word grows ----------------------------------------------------------
+
+def test_a_letter_at_rest_is_drawn_as_text_not_as_an_image():
+    # Step zero is what an ordinary text item already draws, so nothing is made
+    # for it and the ramp keeps its full sixty-four colours.
+    from lyrica import bloom as bloom_mod
+
+    assert bloom_mod.grown("a", ("Segoe UI", -30, "bold"), 0, (255, 255, 255)) is None
+
+
+def test_a_growing_letter_swells_about_its_own_centre():
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -30, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    small, _, _ = bloom_mod.grown("a", spec, 1, (255, 255, 255))
+    big, _, _ = bloom_mod.grown("a", spec, bloom_mod.SCALES, (255, 255, 255))
+    assert big.width() > small.width() and big.height() > small.height()
+    # And the letter's centre must not move at all, which is what growing about
+    # its own centre means. The first attempt used the padded width where the
+    # letter's was wanted and did not resample the padding, which put every
+    # growing word twelve pixels down and to the right instead of swelling.
+    font = bloom_mod._pil_font(spec)
+    width = max(1, int(font.getlength("a")))
+    height = sum(font.getmetrics())
+    centres = {(round(width / 2, 3), round(height / 2, 3))}    # the letter at rest
+    for step in range(1, bloom_mod.SCALES + 1):
+        image, dx, dy = bloom_mod.grown("a", spec, step, (255, 255, 255))
+        # Derived from the size the image actually came out, which is whole
+        # pixels: asking the fraction instead leaves placement and picture
+        # disagreeing by half a pixel and the letter trembles as it grows.
+        got_x = image.width() / (width + bloom_mod.PAD * 2)
+        got_y = image.height() / (height + bloom_mod.PAD * 2)
+        centres.add((round(dx + bloom_mod.PAD * got_x + width * got_x / 2, 3),
+                     round(dy + bloom_mod.PAD * got_y + height * got_y / 2, 3)))
+    assert len(centres) == 1, f"the letter drifted: {sorted(centres)}"
+
+
+def _distinct_steps(bloom_mod, spec, char, growth):
+    """How many of the growth's steps render to a size of their own."""
+    was, bloom_mod.GROWTH = bloom_mod.GROWTH, growth
+    bloom_mod._cache.clear()
+    try:
+        sizes = set()
+        for step in range(1, bloom_mod.SCALES + 1):
+            image, _dx, _dy = bloom_mod.grown(char, spec, step, (255, 255, 255))
+            sizes.add((image.width(), image.height()))
+        return len(sizes)
+    finally:
+        bloom_mod.GROWTH, _ = was, bloom_mod._cache.clear()
+
+
+def test_the_growth_is_above_the_floor_where_its_frames_repeat():
+    # Not a matter of taste. At 6 % a narrow letter gained nine tenths of a
+    # pixel across the whole growth and four of the nine steps rendered to the
+    # same whole-pixel size as their neighbour, so a third of the frames showed
+    # an identical picture — a stutter rather than a growth.
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -30, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    # Only the default is asserted. Where the floor lands depends on the font's
+    # own pixel metrics, which differ between this machine and the runner — the
+    # 6 % measurement is recorded in the history rather than checked here.
+    steps = bloom_mod.SCALES
+    for char in ("a", "m"):
+        got = _distinct_steps(bloom_mod, spec, char, bloom_mod.GROWTH)
+        assert got >= steps - 1, (
+            f"{char!r} repeats {steps - got} of {steps} steps at the default")
+
+
+def test_the_letter_is_swapped_for_its_stand_in_and_back(view):
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+
+    from lyrica.lineview import STRIKE_ATTACK
+    view.advance_bloom(when + span * STRIKE_ATTACK)
+    assert view._showing, "nothing grew"
+    index = next(iter(view._showing))
+    assert view.canvas.itemcget(view._items[index][2], "state") == "hidden"
+
+    view.advance_bloom(when + span + 1e-3)
+    assert not view._showing, "the stand-ins never went away"
+    assert view.canvas.itemcget(view._items[index][2], "state") == "normal"
+
+
+def test_only_so_many_new_sizes_are_built_in_one_frame(view):
+    # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
+    # size every frame overran on its first play: measured at 24 ms.
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import NEW_SIZES_PER_FRAME, STRIKE_ATTACK
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    bloom_mod._cache.clear()
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+    view.advance_bloom(when + span * STRIKE_ATTACK)
+    assert len(bloom_mod._cache) <= NEW_SIZES_PER_FRAME
+
+
+def test_a_line_no_longer_active_leaves_no_stand_ins(view):
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no blurred glyphs on this machine")
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+    from lyrica.lineview import STRIKE_ATTACK
+    view.advance_bloom(when + span * STRIKE_ATTACK)
+    view.set_active(False)
+    assert not view._showing
+    # Tk answers "" for a state never set, which is what an untouched letter has.
+    assert all(view.canvas.itemcget(e[2], "state") in ("", "normal")
+               for e in view._items)

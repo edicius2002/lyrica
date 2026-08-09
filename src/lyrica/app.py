@@ -36,6 +36,9 @@ from lyrica import (
 from lyrica import (
     beam as beam_mod,
 )
+from lyrica import (
+    bloom as bloom_mod,
+)
 from lyrica import chrome as chrome_mod
 from lyrica import (
     meter as meter_mod,
@@ -228,7 +231,9 @@ class Overlay:
         self._views_width = 0
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
-        self._lift = config.lift_factor()
+        # Read once and set on the module, because it decides what the cached
+        # images *are* rather than how they are used.
+        bloom_mod.GROWTH = config.growth_factor()
         self._art_done = True
         self._cuts = sponsorblock.Cuts()
         self._cuts_checked = None
@@ -1150,7 +1155,7 @@ class Overlay:
                 self.canvas, self.width // 2, start_y, text, words,
                 font=self.f_line, wrap=self.wrap, palette=self.palette,
                 scale=self.chrome.scale, feather=self._feather,
-                bloom=self._bloom, lift=self._lift)
+                bloom=self._bloom)
         self._views_width = self.width
 
     def _refit_views(self) -> None:
