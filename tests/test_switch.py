@@ -111,3 +111,37 @@ def test_a_worker_that_answers_late_writes_where_nobody_is_looking(panel):
     stale.searched = True
     assert not panel._ready_to_show(), "the abandoned track must not qualify"
     assert panel.lyrics is not stale.lyrics
+
+
+def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
+    # A song put up on the deadline goes up not knowing whether it has words,
+    # and its answer arrives in the same Track a moment later. Copied at the
+    # promotion, that answer was written where nobody looked — so a song with
+    # no lyrics stayed expanded until the next track change. Intermittent,
+    # because it needs the deadline to beat the provider.
+    from lyrica import app as A
+
+    late = A.Track(gen=2, snapshot=_snap("B", "b", "k|B"), searched=True,
+                   deadline=time.monotonic() - 1)
+    assert late.lyrics_state == A.LYRICS_UNKNOWN
+    panel._loading = late
+    assert panel._ready_to_show(), "the deadline has passed"
+    panel._promote()
+    panel._card_text = ("B", "b")
+    panel._retarget_size()
+    assert not panel._compact, "nothing is known yet, so nothing moves"
+
+    late.lyrics_state = A.LYRICS_ABSENT           # the provider answers
+    panel.lyrics = panel._shown.lyrics            # what the tick does
+    panel._lyrics_state = panel._shown.lyrics_state
+    panel._retarget_size()
+    assert panel._compact, "it has to act on an answer it asked for"
+
+
+def test_the_shown_track_is_the_state_rather_than_a_copy_of_it(panel):
+    from lyrica import app as A
+
+    assert panel._shown.lyrics is panel.lyrics
+    assert panel._shown.lyrics_state == panel._lyrics_state
+    assert panel._shown.gen == 1 and panel._loading is panel._shown
+    assert isinstance(panel._shown, A.Track)

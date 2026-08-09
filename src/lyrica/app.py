@@ -1178,6 +1178,9 @@ class Overlay:
         self._shown = track
         self.track_key = track.snapshot.track_key()
         self.offset = track.offset
+        # Also read afresh from `_shown` on every tick, because an answer can
+        # land after the promotion. Set here as well so the size and the column
+        # are right on the frame the song goes up, rather than on the next one.
         self.lyrics = track.lyrics
         self._lyrics_state = track.lyrics_state
         self._identified = track.identified
@@ -1524,6 +1527,14 @@ class Overlay:
             self._start_fetch(snap)
         if self._loading is not self._shown and self._ready_to_show():
             self._promote()
+        # Read from the shown track rather than kept as a copy of it. A song put
+        # up on the deadline goes up not knowing whether it has words, and its
+        # answer lands in the same `Track` a moment later — copied at the
+        # promotion, that answer was written where nobody looked, and a song
+        # with no lyrics stayed expanded until the next track change. It is the
+        # same song, so there is nothing crossed about hearing it out.
+        self.lyrics = self._shown.lyrics
+        self._lyrics_state = self._shown.lyrics_state
 
         # No longer gated: the gate moved to the promotion, which is the only
         # place a song's data changes now. What is on screen is whatever was
