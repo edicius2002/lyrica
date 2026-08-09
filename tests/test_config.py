@@ -403,3 +403,14 @@ def test_the_lift_defaults_and_can_be_tuned(store, monkeypatch):
     assert config.lift_factor() == 0.0
     monkeypatch.setenv("LYRICA_LIFT", "99")
     assert config.lift_factor() == config.LIFT_MAX
+
+
+def test_the_growth_defaults_and_can_be_tuned(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_GROWTH", raising=False)
+    assert config.growth_factor() == config.GROWTH_DEFAULT
+    monkeypatch.setenv("LYRICA_GROWTH", "0.2")
+    assert config.growth_factor() == 0.2
+    monkeypatch.setenv("LYRICA_GROWTH", "off")
+    assert config.growth_factor() == 0.0
+    monkeypatch.setenv("LYRICA_GROWTH", "5")
+    assert config.growth_factor() == config.GROWTH_MAX

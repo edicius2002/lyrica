@@ -31,10 +31,12 @@ LEVELS = 8
 RADIUS = 4
 
 # How much larger a word gets at the peak of its strike. What is being imitated
-# is subtle — past this it stops reading as emphasis and starts reading as a
-# word jumping — and it is small enough that the overlap with the neighbouring
-# words stays at a pixel or two.
-GROWTH = 0.06
+# is subtle, but subtle has a floor here that is not a matter of taste: at 6 %
+# a narrow letter gained nine tenths of a pixel across the whole growth, and
+# four of the nine steps rendered to the same integer size as their neighbour,
+# so a third of the frames showed an identical picture. Measured, every step
+# earns a different image from about 10 % up.
+GROWTH = 0.12          # replaced at startup from the environment
 
 # Room for the blur to fall off inside the image, or it is cut square at the
 # edges and the halo has corners.
@@ -141,11 +143,23 @@ def ready(char: str, spec: tuple, step: int, colour: tuple) -> bool:
 
 
 def grown(char: str, spec: tuple, step: int, colour: tuple):
-    """`char` at `step` of `SCALES` through the growth, as a Tk image, or None.
+    """`char` grown by `step` of `SCALES`, as (image, dx, dy), or None.
 
-    Step 0 is the letter at its own size, which is what an ordinary text item
-    already draws — so it returns nothing and the caller shows the text instead.
-    Nothing is scaled down: a word only ever grows.
+    `dx`/`dy` place the image relative to the letter's own top-left corner, and
+    they come back with it because they can only be right if they are derived
+    from the size the image actually came out — which is whole pixels, not the
+    fraction that was asked for. Working from the fraction instead leaves the
+    placement and the picture disagreeing by up to half a pixel, and the letter
+    trembles as it grows.
+
+    The image carries `PAD` of transparent margin so the halo has room to fall
+    off, and that margin is resampled with everything else, so the letter sits
+    `PAD * scale` inside rather than `PAD`. On top of that it has to move back
+    by half of what it gained, or it swells rightwards instead of in place.
+
+    Step 0 is the letter at its own size, which an ordinary text item already
+    draws, so it returns nothing and the caller shows the text. Nothing is ever
+    scaled down: a word only grows.
     """
     if step <= 0:
         return None
@@ -159,37 +173,21 @@ def grown(char: str, spec: tuple, step: int, colour: tuple):
     try:
         from PIL import ImageTk
 
-        scale = 1.0 + GROWTH * min(step, SCALES) / SCALES
-        photo = ImageTk.PhotoImage(_rendered(char, font, colour, scale))
+        asked = 1.0 + GROWTH * min(step, SCALES) / SCALES
+        img = _rendered(char, font, colour, asked)
+        width = max(1, int(font.getlength(char)))
+        height = sum(font.getmetrics())
+        # What the resampling actually delivered, per axis.
+        got_x = img.width / (width + PAD * 2)
+        got_y = img.height / (height + PAD * 2)
+        placed = (width / 2 - PAD * got_x - width * got_x / 2,
+                  height / 2 - PAD * got_y - height * got_y / 2)
+        made = (ImageTk.PhotoImage(img), *placed)
     except Exception:
         logger.debug("could not grow %r", char, exc_info=True)
         return None
-    _cache[key] = photo
-    return photo
-
-
-def offset(char: str, spec: tuple, step: int) -> tuple:
-    """Where a grown glyph's *image* goes, relative to the letter's own corner.
-
-    Two things have to be undone at once and the first attempt did neither
-    properly, which put every growing word twelve pixels down and to the right
-    instead of swelling in place.
-
-    The image carries `PAD` of transparent margin so the halo has room to fall
-    off, and that margin is resampled along with everything else — so the glyph
-    sits `PAD * scale` inside the image, not `PAD`. And the glyph should swell
-    about its own centre, which means moving it back by half of what it gained;
-    that half is of the *letter's* width, not of the padded image's.
-    """
-    font = _pil_font(spec)
-    if font is None or step <= 0:
-        return (0.0, 0.0)
-    ascent, descent = font.getmetrics()
-    width = max(1, int(font.getlength(char)))
-    height = ascent + descent
-    scale = 1.0 + GROWTH * min(step, SCALES) / SCALES
-    return (-width * (scale - 1) / 2 - PAD * scale,
-            -height * (scale - 1) / 2 - PAD * scale)
+    _cache[key] = made
+    return made
 
 
 def blurred_ready(char: str, spec: tuple, level: int,

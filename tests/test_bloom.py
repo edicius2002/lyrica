@@ -237,7 +237,6 @@ def test_a_letter_at_rest_is_drawn_as_text_not_as_an_image():
     from lyrica import bloom as bloom_mod
 
     assert bloom_mod.grown("a", ("Segoe UI", -30, "bold"), 0, (255, 255, 255)) is None
-    assert bloom_mod.offset("a", ("Segoe UI", -30, "bold"), 0) == (0.0, 0.0)
 
 
 def test_a_growing_letter_swells_about_its_own_centre():
@@ -246,8 +245,8 @@ def test_a_growing_letter_swells_about_its_own_centre():
     spec = ("Segoe UI", -30, "bold")
     if not bloom_mod.available(spec):
         pytest.skip("no TrueType file for this font on this machine")
-    small = bloom_mod.grown("a", spec, 1, (255, 255, 255))
-    big = bloom_mod.grown("a", spec, bloom_mod.SCALES, (255, 255, 255))
+    small, _, _ = bloom_mod.grown("a", spec, 1, (255, 255, 255))
+    big, _, _ = bloom_mod.grown("a", spec, bloom_mod.SCALES, (255, 255, 255))
     assert big.width() > small.width() and big.height() > small.height()
     # And the letter's centre must not move at all, which is what growing about
     # its own centre means. The first attempt used the padded width where the
@@ -256,17 +255,35 @@ def test_a_growing_letter_swells_about_its_own_centre():
     font = bloom_mod._pil_font(spec)
     width = max(1, int(font.getlength("a")))
     height = sum(font.getmetrics())
-    centres = set()
-    for step in range(bloom_mod.SCALES + 1):
-        scale = 1.0 + bloom_mod.GROWTH * min(step, bloom_mod.SCALES) / bloom_mod.SCALES
-        dx, dy = bloom_mod.offset("a", spec, step)
-        if step == 0:
-            corner = (0.0, 0.0)
-        else:
-            corner = (dx + bloom_mod.PAD * scale, dy + bloom_mod.PAD * scale)
-        centres.add((round(corner[0] + width * scale / 2, 3),
-                     round(corner[1] + height * scale / 2, 3)))
+    centres = {(round(width / 2, 3), round(height / 2, 3))}    # the letter at rest
+    for step in range(1, bloom_mod.SCALES + 1):
+        image, dx, dy = bloom_mod.grown("a", spec, step, (255, 255, 255))
+        # Derived from the size the image actually came out, which is whole
+        # pixels: asking the fraction instead leaves placement and picture
+        # disagreeing by half a pixel and the letter trembles as it grows.
+        got_x = image.width() / (width + bloom_mod.PAD * 2)
+        got_y = image.height() / (height + bloom_mod.PAD * 2)
+        centres.add((round(dx + bloom_mod.PAD * got_x + width * got_x / 2, 3),
+                     round(dy + bloom_mod.PAD * got_y + height * got_y / 2, 3)))
     assert len(centres) == 1, f"the letter drifted: {sorted(centres)}"
+
+
+def test_every_step_of_the_growth_is_a_different_picture():
+    # At 6 % a narrow letter gained nine tenths of a pixel across the whole
+    # growth and four of the nine steps rendered identically to their
+    # neighbour, so a third of the frames showed the same thing twice.
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -30, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    for char in ("a", "m"):
+        sizes = {(1, 1)}
+        for step in range(1, bloom_mod.SCALES + 1):
+            image, _dx, _dy = bloom_mod.grown(char, spec, step, (255, 255, 255))
+            sizes.add((image.width(), image.height()))
+        assert len(sizes) == bloom_mod.SCALES + 1, (
+            f"{char!r} repeats a size: {sorted(sizes)}")
 
 
 def test_the_letter_is_swapped_for_its_stand_in_and_back(view):

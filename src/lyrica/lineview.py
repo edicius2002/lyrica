@@ -433,11 +433,11 @@ class LineView:
             if self._budget <= 0:
                 return          # hold the size it has; the next frame may build
             self._budget -= 1
-        image = bloom.grown(char, self._font, step, colour)
-        if image is None:
+        made = bloom.grown(char, self._font, step, colour)
+        if made is None:
             return
+        image, dx, dy = made
         x, y = self.canvas.coords(text)
-        dx, dy = bloom.offset(char, self._font, step)
         self.canvas.coords(item, x + dx, y + dy)
         self.canvas.itemconfigure(item, image=image, state="normal")
         self.canvas.itemconfigure(text, state="hidden")
