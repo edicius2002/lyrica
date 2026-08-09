@@ -30,29 +30,56 @@ def canvas(tk_root):
     made.destroy()
 
 
-@pytest.fixture
-def overlay():
-    """An `Overlay` on an interpreter of its own, wired up so images land in it.
+@pytest.fixture(scope="session")
+def _overlay_once(tk_root):
+    """One `Overlay`, and one Tcl interpreter, for the whole suite.
 
-    `ImageTk.PhotoImage` binds to tkinter's *default* root, which in a suite is
-    the session one from `conftest`, while an Overlay makes its own. Images then
-    belong to one interpreter and are drawn on another, and Tk answers `image
-    "pyimage1" doesn't exist` — intermittently, because it depends which test
-    ran first. The bloom's cache outlives any single interpreter too, so it goes
-    with them.
+    Two reasons it cannot be per test. Tcl runs out of interpreters after a
+    dozen or so and answers `Can't find a usable tk.tcl` — intermittently,
+    which is worse than always. And `ImageTk.PhotoImage` binds to tkinter's
+    *default* root, so images made for one overlay and drawn on another give
+    `image "pyimage1" doesn't exist`.
     """
+
+    from lyrica import app as A
+    from lyrica import config
+    config.load()
+    made = A.Overlay()
+    # Handed straight back, because making a second root steals the default and
+    # every test that is not an overlay test wants the shared one. Which root is
+    # default decides which interpreter an `ImageTk.PhotoImage` belongs to, and
+    # that was deciding it by creation order.
+    tk._default_root = tk_root
+    yield made
+    made.root.destroy()
+
+
+@pytest.fixture
+def overlay(_overlay_once):
+    """The shared overlay, wound back to the state a fresh one would be in."""
     import tkinter as tk
 
     from lyrica import app as A
-    from lyrica import bloom, config
+    from lyrica import bloom
+    o = _overlay_once
+    # Only for as long as this test runs. Held for the session it would send
+    # every other test's images into the overlay's interpreter instead of the
+    # shared root's, which is the same fault the other way round.
+    was, tk._default_root = tk._default_root, o.root
     bloom._cache.clear()
     bloom._fonts.clear()
-    config.load()
-    o = A.Overlay()
-    was, tk._default_root = tk._default_root, o.root
+    o._clear_views()
+    o._collapse = None
+    o.line_index = -1
+    o.lyrics = None
+    o.offset = 0.0
+    o._awaiting_seek = None
+    o._card_text = o._card_raw = o._card_measured = None
+    o._shown = o._loading = A.Track(searched=True)
+    o._fetching_key = ""
+    o.root.update()
     try:
         yield o
     finally:
         tk._default_root = was
         bloom._cache.clear()
-        o.root.destroy()

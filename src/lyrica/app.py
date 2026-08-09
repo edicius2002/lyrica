@@ -300,6 +300,8 @@ class Overlay:
         self._thumb_image = None
         self._thumb_photo = None
         self._card_text = None
+        self._card_measured = None
+        self._card_width = 0
         self._card_raw = None
         self._awaiting_seek = None
         self._hidden = False
@@ -507,7 +509,15 @@ class Overlay:
         """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
-        text_width = max(title_font.measure(title), artist_font.measure(artists))
+        # Measured once per pair of strings. `measure` is a round trip into Tk
+        # for an answer that cannot change while the words do not, and this runs
+        # on every frame of a resize.
+        key = (title, artists)
+        if key != self._card_measured:
+            self._card_measured = key
+            self._card_width = max(title_font.measure(title),
+                                   artist_font.measure(artists))
+        text_width = self._card_width
         # The cover's space is reserved whether or not it has arrived, so the
         # card does not shuffle sideways the moment it does.
         cover = self._thumb_size + gap
@@ -525,6 +535,12 @@ class Overlay:
 
         self.canvas.coords(self._thumb_item, left, top,
                            left + self._thumb_size, top + self._thumb_size)
+        # Placed from the number that was just computed, not read back out of
+        # the canvas. Asking where the slot ended up is a round trip whose
+        # answer can lag by a frame, which put the cover a step behind the box
+        # it belongs in every time the panel was moving.
+        if self._thumb_image is not None:
+            self.canvas.coords(self._thumb_image, left, top)
         text_x = left + cover
         # Both text rows share the cover's vertical centre, so the pair reads as
         # one block rather than as two lines that happen to sit near a square.

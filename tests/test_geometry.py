@@ -287,10 +287,14 @@ def test_the_card_holds_the_same_pixel_through_a_resize():
         _thumb_size = 78
         _card_y = 20
 
+        _thumb_image = None
+
         def __init__(self, width):
             self.width = width
             self.placed = None
             self.canvas = self
+            self._card_measured = None
+            self._card_width = 0
 
         def coords(self, _item, *box):
             if self.placed is None:
