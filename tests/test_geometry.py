@@ -271,3 +271,57 @@ def test_the_region_covers_both_ends_of_a_move_before_it_starts(monkeypatch):
     A.Overlay._retarget_size(Panel())
     assert asked == [(1125, 375)], (
         f"one region covering the whole move, not {asked}")
+
+
+def test_the_card_holds_the_same_pixel_through_a_resize():
+    # The window moves left exactly as far as the card moves right inside it,
+    # so the card should not move on screen at all. Written with the two halves
+    # rounded independently they disagreed for odd widths, and the card shuffled
+    # a pixel back and forth on every frame — repainting every antialiased glyph
+    # as it went, which is what the flicker was.
+    from lyrica import app as A
+
+    class Panel:
+        chrome = A.chrome_mod.Chrome(A.chrome_mod.ChromeMode.PANEL, "#000",
+                                     A.glass.PANEL)
+        _thumb_size = 78
+        _card_y = 20
+
+        def __init__(self, width):
+            self.width = width
+            self.placed = None
+            self.canvas = self
+
+        def coords(self, _item, *box):
+            if self.placed is None:
+                self.placed = box[0]
+
+    gap = Panel(0).chrome.px(10)
+    block = 78 + gap + 300                         # cover + gap + text
+    # From the width at which the card fits with its margin — narrower than
+    # that it is pinned to the left edge, which is the compact panel's own
+    # width by construction and not a size a resize passes through.
+    first = 2 * (block // 2 + Panel(0).chrome.px(12))
+    seen = set()
+    for width in range(first, 1200, 7):            # odd and even alike
+        panel = Panel(width)
+        panel._title_font = panel._artist_font = _Metrics(300)
+        panel._thumb_item = panel._title_item = panel._artist_item = object()
+        A.Overlay._lay_out_card(panel, "title", "artist")
+        centre = 960                               # held by `_resize_window`
+        seen.add(centre - width // 2 + panel.placed)
+    assert len(seen) == 1, f"the card moved between widths: {sorted(seen)}"
+    assert seen == {960 - block // 2}
+
+
+class _Metrics:
+    """Just what `_lay_out_card` asks a font."""
+
+    def __init__(self, width):
+        self._width = width
+
+    def measure(self, _text):
+        return self._width
+
+    def metrics(self, _what):
+        return 20

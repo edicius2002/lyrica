@@ -513,7 +513,14 @@ class Overlay:
         cover = self._thumb_size + gap
         block = cover + text_width
 
-        left = max(self.chrome.px(12), (self.width - block) // 2)
+        # Halved the same way the window's own position is, so the two cancel
+        # exactly. The window sits at `centre - width // 2` and the card at
+        # `width // 2 - block // 2`, which puts the card at `centre - block // 2`
+        # on screen — the same pixel at every width. Written as
+        # `(width - block) // 2` the two roundings disagree for odd widths, and
+        # the card shuffled a pixel back and forth on every frame of a resize,
+        # repainting every antialiased glyph as it went. That was the flicker.
+        left = max(self.chrome.px(12), self.width // 2 - block // 2)
         top = self._card_y
 
         self.canvas.coords(self._thumb_item, left, top,
