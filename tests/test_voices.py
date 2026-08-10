@@ -136,8 +136,10 @@ def test_a_line_with_no_room_stays_inside_the_box(panel):
     # that are already laid out, that this is for.
     view = panel._views[1]
     lo, hi = view._row_spans[0]
-    view.fit(lo - view._shift, hi - view._shift + 4)
-    assert view._row_spans[0][1] <= hi - view._shift + 4 + 1
+    guard = sum(view._piece_widths[p] for p in view._row_pieces[0]) \
+        * view.growth / 2
+    view.fit(lo - view._shift - guard, hi - view._shift + guard + 4)
+    assert view._row_spans[0][1] + guard <= hi - view._shift + guard + 4 + 1
     assert view._shift == 4, "it takes what room there is rather than none"
 
 
@@ -168,6 +170,35 @@ def test_the_sweep_follows_the_line_it_moved(panel):
         x, _y = panel.canvas.coords(entry[2])
         assert abs(entry[0] - x) < view.line_height, (
             "a character's recorded centre has come adrift of the glyph")
+
+
+def test_moving_a_voice_updates_the_growth_centre(panel):
+    view = panel._views[1]
+    for piece, chars in view._piece_chars.items():
+        left = view._items[chars[0]][0] - view._char_widths[chars[0]] / 2
+        right = view._items[chars[-1]][0] + view._char_widths[chars[-1]] / 2
+        centre = (left + right) / 2
+        assert view._piece_centres[piece] == pytest.approx(centre), (
+            "the word would expand around the column it left, not its new lane")
+
+
+def test_a_long_secondary_line_keeps_an_optical_edge_margin(panel):
+    from lyrica.app import VOICE_SAFE_MARGIN
+    from lyrica.lineview import LineView
+
+    text = "W" * 22
+    view = LineView(
+        panel.canvas, panel.width // 2, 40, text, [(0.0, 1.0, text)],
+        font=panel.f_line, wrap=panel.wrap, palette=panel.palette,
+        scale=panel.chrome.scale, growth=panel._growth,
+        lean=panel.chrome.px(panel._voice_step))
+    try:
+        panel._fit_view(view)
+        margin = panel.chrome.px(VOICE_SAFE_MARGIN)
+        assert min(a for a, _b in view._row_spans) >= margin - 1
+        assert max(b for _a, b in view._row_spans) <= panel.width - margin + 1
+    finally:
+        view.destroy()
 
 
 def test_recentring_keeps_the_step(panel):

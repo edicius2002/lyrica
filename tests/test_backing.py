@@ -83,6 +83,45 @@ def test_it_answers_from_the_lane_opposite_the_lead(panel):
     assert echo_centre < panel.width / 2
 
 
+def test_left_and_right_adlibs_stay_in_gentle_safe_lanes(panel):
+    from lyrica.app import ECHO_LANE_STEP, ECHO_SAFE_MARGIN
+
+    middle = panel.width / 2
+    lane = panel.chrome.px(ECHO_LANE_STEP)
+    margin = panel.chrome.px(ECHO_SAFE_MARGIN)
+
+    panel._show_backing(panel.lyrics, 1.3)
+    right = panel._echo
+    right_centre = sum(right._row_spans[0]) / 2
+    assert middle < right_centre <= middle + lane + 1
+    assert max(b for _a, b in right._row_spans) <= panel.width - margin
+
+    panel._clear_backing()
+    panel._go_to_line(1, panel.lyrics)
+    panel._show_backing(panel.lyrics, 3.3)
+    left = panel._echo
+    left_centre = sum(left._row_spans[0]) / 2
+    assert middle - lane - 1 <= left_centre < middle
+    assert min(a for a, _b in left._row_spans) >= margin
+
+
+def test_an_adlib_eases_into_and_out_of_its_lane(panel):
+    from lyrica.app import ECHO_EXIT_LANE, ECHO_FADE_S
+
+    middle = panel.width / 2
+    opens = 1.0 - ECHO_FADE_S
+    panel._show_backing(panel.lyrics, opens)
+    opening = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+
+    panel._show_backing(panel.lyrics, 1.0)
+    settled = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+    assert 0 < opening < settled, "it still jumped directly to the full lane"
+
+    panel._show_backing(panel.lyrics, 1.7 + ECHO_FADE_S)
+    leaving = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+    assert settled * (ECHO_EXIT_LANE - 0.05) <= leaving < settled
+
+
 def test_its_own_window_is_what_takes_it_down(panel):
     # Not the line. A line with nothing behind it used to kill it on the spot,
     # which is what cut its fade short; what has to end it is running out of

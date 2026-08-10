@@ -17,6 +17,7 @@ from pathlib import Path
 from PIL import ImageGrab
 
 from lyrica import bloom
+from lyrica.app import ECHO_LANE_STEP, ECHO_SAFE_MARGIN, VOICE_SAFE_MARGIN
 from lyrica.beam import SHINE, Beam
 from lyrica.chrome import prepare
 from lyrica.lineview import GROW_ATTACK_S, LineView
@@ -84,7 +85,7 @@ class Renderer:
                          words("I am waiting here"), font=FONT, wrap=800,
                          palette=DEFAULT, lean=160)
         for view in (left, right):
-            view.fit(30, WIDTH - 30)
+            view.fit(VOICE_SAFE_MARGIN, WIDTH - VOICE_SAFE_MARGIN)
             view.show_inactive(DEFAULT.side)
         right.set_active(True)
         right.show_sweep(1, 0.7)
@@ -97,9 +98,10 @@ class Renderer:
         lead = LineView(self.canvas, 290, 105, "Stay with me tonight",
                         words("Stay with me tonight"), font=FONT, wrap=520,
                         palette=DEFAULT)
-        echo = LineView(self.canvas, 710, 174, "(right here)",
+        echo = LineView(self.canvas, WIDTH // 2, 174, "(right here)",
                         words("right here"), font=SMALL, wrap=300,
-                        palette=DEFAULT.dimmed(0.72))
+                        palette=DEFAULT.dimmed(0.72), lean=ECHO_LANE_STEP)
+        echo.fit(ECHO_SAFE_MARGIN, WIDTH - ECHO_SAFE_MARGIN)
         lead.set_active(True)
         lead.show_sweep(2, 0.35)
         echo.set_active(True)

@@ -22,12 +22,23 @@ def test_word_strike_matches_the_visual_contract():
 
 
 def test_duet_lanes_match_the_visual_contract():
-    from lyrica import config
+    from lyrica import app, config
 
     expected = CONTRACTS["duet"]
     separation = config.VOICE_STEP_DEFAULT * 2
     assert config.VOICE_STEP_DEFAULT == expected["lane_step"]
+    assert app.VOICE_SAFE_MARGIN == expected["safe_margin"]
     assert separation / expected["panel_width"] >= expected["minimum_separation_ratio"]
+
+
+def test_backing_lane_matches_the_visual_contract():
+    from lyrica import app
+
+    expected = CONTRACTS["backing_vocal"]
+    assert app.ECHO_LANE_STEP == expected["lane_step"]
+    assert app.ECHO_SAFE_MARGIN == expected["safe_margin"]
+    assert app.ECHO_ENTRY_LANE == expected["entry_lane_fraction"]
+    assert app.ECHO_EXIT_LANE == expected["exit_lane_fraction"]
 
 
 def test_beam_layers_match_the_visual_contract():
