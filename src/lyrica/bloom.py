@@ -216,6 +216,30 @@ def blurred_ready(char: str, spec: tuple, level: int,
     return (char, spec, min(level, LEVELS), colour) in _cache
 
 
+def _rendered_halo(char: str, font, level: int, colour: tuple):
+    """Render a coloured halo by blurring opacity, never RGB channels."""
+    from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+    width = int(font.getlength(char)) + PAD * 2
+    height = int(font.size * 1.6) + PAD * 2
+    mask = Image.new("L", (max(width, 1), height), 0)
+    ImageDraw.Draw(mask).text((PAD, PAD), char, font=font, fill=255)
+
+    # Blurring a transparent RGBA glyph interpolates its RGB towards the
+    # transparent black background. Blur opacity alone, combine both fields as
+    # alpha-over, and colour afterwards so even the faintest pixel stays light.
+    outer = mask.filter(ImageFilter.GaussianBlur(OUTER_RADIUS)).point(
+        lambda value: int(value * OUTER_STRENGTH))
+    inner = mask.filter(ImageFilter.GaussianBlur(INNER_RADIUS))
+    alpha = ImageChops.screen(inner, outer)
+    strength = min(level, LEVELS) / LEVELS
+    alpha = alpha.point(lambda value: int(value * strength))
+
+    image = Image.new("RGBA", mask.size, (*colour, 0))
+    image.putalpha(alpha)
+    return image
+
+
 def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     """A blurred `char` at `level` of `LEVELS`, as a Tk image, or None.
 
@@ -232,21 +256,9 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     if font is None:
         return None
     try:
-        from PIL import Image, ImageDraw, ImageFilter, ImageTk
+        from PIL import ImageTk
 
-        width = int(font.getlength(char)) + PAD * 2
-        height = int(font.size * 1.6) + PAD * 2
-        source = Image.new("RGBA", (max(width, 1), height), (0, 0, 0, 0))
-        ImageDraw.Draw(source).text((PAD, PAD), char, font=font,
-                                    fill=(*colour, 255))
-        outer = source.filter(ImageFilter.GaussianBlur(OUTER_RADIUS))
-        outer.putalpha(outer.split()[3].point(
-            lambda v: int(v * OUTER_STRENGTH)))
-        inner = source.filter(ImageFilter.GaussianBlur(INNER_RADIUS))
-        img = Image.alpha_composite(outer, inner)
-        strength = min(level, LEVELS) / LEVELS
-        img.putalpha(img.split()[3].point(lambda v: int(v * strength)))
-        photo = ImageTk.PhotoImage(img)
+        photo = ImageTk.PhotoImage(_rendered_halo(char, font, level, colour))
     except Exception:
         logger.debug("could not build a bloom for %r", char, exc_info=True)
         return None
