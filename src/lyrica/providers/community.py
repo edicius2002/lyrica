@@ -20,7 +20,7 @@ from lyrica.textmatch import fold
 from lyrica.ttml import parse_ttml
 
 SEARCH_URL = "https://lyrics-api.binimum.org/getLyrics"
-HEADERS = {"User-Agent": "lyrica/0.2.2 (personal overlay)"}
+HEADERS = {"User-Agent": "lyrica/0.2.3 (personal overlay)"}
 TIMEOUT = 15
 
 logger = logging.getLogger(__name__)

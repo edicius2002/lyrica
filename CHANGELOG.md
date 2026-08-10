@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3 — 2026-08-10
+
+- Blur only the lyric halo's alpha mask and apply its colour afterwards, so
+  faint illuminated edges remain white instead of revealing dark glyphs.
+
 ## 0.2.2 — 2026-08-10
 
 - Increase the lyric row spacing and panel height so backing vocals, bloom and

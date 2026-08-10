@@ -199,6 +199,25 @@ def test_the_halo_is_the_same_size_and_sits_on_the_same_baseline():
     assert abs(pil.getlength("acuerdo") - width_tk) / width_tk < 0.05
 
 
+def test_every_visible_halo_pixel_keeps_the_requested_colour():
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -30, "bold")
+    font = bloom_mod._pil_font(spec)
+    if font is None:
+        pytest.skip("no TrueType file for this font on this machine")
+
+    colour = (255, 255, 255)
+    image = bloom_mod._rendered_halo("W", font, bloom_mod.LEVELS, colour)
+    colours = image.getcolors(maxcolors=image.width * image.height)
+    pixels = [pixel for _count, pixel in colours]
+    partial = [pixel for pixel in pixels if 0 < pixel[3] < 255]
+
+    assert partial, "the test glyph produced no blurred edge"
+    assert all(pixel[:3] == colour for pixel in pixels if pixel[3] > 0), \
+        "the halo mixed its visible edge with transparent black"
+
+
 def test_the_strike_is_shaped_rather_than_linear():
     # Three designed pixels came to 3.4 real ones on the machine this was tuned
     # on, so a linear fall over eighteen frames visited four positions and read
