@@ -8,12 +8,15 @@
   },
   "duet": {
     "panel_width": 900,
+    "panel_height": 320,
+    "wrap_width": 760,
+    "row_gap": 50,
     "lane_step": 160,
     "safe_margin": 36,
     "minimum_separation_ratio": 0.30
   },
   "backing_vocal": {
-    "lane_step": 112,
+    "corner_inset": 10,
     "safe_margin": 44,
     "entry_lane_fraction": 0.55,
     "exit_lane_fraction": 0.75

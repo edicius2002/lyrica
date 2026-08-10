@@ -253,6 +253,26 @@ def test_a_growing_letter_swells_about_its_own_centre():
     assert len(centres) == 1, f"the letter drifted: {sorted(centres)}"
 
 
+def test_the_visual_padding_contains_every_growth_percentage(view):
+    """No intermediate resampled size may put ink beyond the reserved box."""
+    from lyrica import bloom as bloom_mod
+
+    font = bloom_mod._pil_font(view._font)
+    if font is None:
+        pytest.skip("no resampled growth on this machine")
+    char = "g"
+    height = sum(font.getmetrics())
+    pad = view.effect_padding
+    for step in range(1, bloom_mod.SCALES + 1):
+        image, _dx, dy = bloom_mod.grown(
+            char, view._font, step, (255, 255, 255), view.growth)
+        got_y = image.height() / (height + bloom_mod.PAD * 2)
+        ink_top = dy + bloom_mod.PAD * got_y
+        ink_bottom = ink_top + height * got_y
+        assert ink_top >= -pad
+        assert ink_bottom <= view.line_height + pad
+
+
 def _distinct_steps(bloom_mod, spec, char, growth):
     """How many of the growth's steps render to a size of their own."""
     was, bloom_mod.GROWTH = bloom_mod.GROWTH, growth

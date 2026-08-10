@@ -91,6 +91,9 @@ no room to brighten a word instead — the sung colour is already at 253 of 255 
 so it grows. The neighbouring words breathe apart by the exact horizontal
 expansion and return to their original pixels as it settles; the pulse therefore
 keeps the resting word gap instead of consuming it.
+Transitions reserve the maximum glyph, halo and growth box before a row moves;
+a line therefore enters and leaves as complete letters at every frame instead
+of relying on low opacity to hide a character crossing the window edge.
 
 Tk cannot scale a text item: its font sizes are integers and a subtle growth
 lands on two or three of them. A growing letter is swapped for a resampled
@@ -133,8 +136,10 @@ rather than treating the old 8-pixel clipping guard as a visual margin.
 A backing vocal answers from the open lane and runs on its own word timings. A
 lead in the left lane therefore gets its response on the right, and vice versa;
 an unidentified or centred lead keeps the right-hand default. Its lane is a
-gentler 112 pixels from the centre, inset by at least 44 pixels, and its arrival
-and departure ease over only part of that step instead of jumping to an edge.
+short eased journey from the lead to its lower outer corner, overlapping that
+corner by only 10 designed pixels and remaining at least 44 pixels inside the
+panel. The 50-pixel row gap gives the complete italic line, bloom and growth a
+band of their own before the next lyric.
 
 Nothing moves for a song with one singer, or for a source that does not say —
 which is most of them. The names in that head metadata are never read: they are

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2 — 2026-08-10
+
+- Increase the lyric row spacing and panel height so backing vocals, bloom and
+  word growth occupy their own complete visual band.
+- Attach left and right ad-libs to the corresponding lower outer corner of the
+  lead line, close to its final letters rather than to a fixed panel lane.
+- Keep every transition endpoint inside the canvas using the maximum glyph,
+  halo and growth bounds, and use those same bounds for edge fading.
+- Narrow the wrap box enough to preserve full horizontal effects at every
+  supported display scale.
+
 ## 0.2.1 — 2026-08-10
 
 - Let adjacent words breathe apart while a struck word expands, preserving the
