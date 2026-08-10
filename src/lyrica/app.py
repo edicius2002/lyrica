@@ -37,9 +37,6 @@ from lyrica import (
 from lyrica import (
     beam as beam_mod,
 )
-from lyrica import (
-    bloom as bloom_mod,
-)
 from lyrica import chrome as chrome_mod
 from lyrica import (
     meter as meter_mod,
@@ -315,6 +312,7 @@ class Overlay:
         self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
+        self._growth = config.growth_factor()
         self._sides: dict = {}
         self._sides_of: Lyrics | None = None
         # A step, not an alignment: the reference pushes one voice to each edge,
@@ -323,9 +321,6 @@ class Overlay:
         # outright ends up against the margin, and the eye crosses the whole
         # panel every time the singers trade.
         self._voice_step = config.voice_step()
-        # Read once and set on the module, because it decides what the cached
-        # images *are* rather than how they are used.
-        bloom_mod.GROWTH = config.growth_factor()
         self._shown = Track(searched=True, lyrics_state=LYRICS_ABSENT)
         self._loading = self._shown
         self._fetching_key = ""
@@ -1360,7 +1355,7 @@ class Overlay:
                 self.canvas, self.width // 2, start_y, text, words,
                 font=self.f_line, wrap=self.wrap, palette=self.palette,
                 scale=self.chrome.scale, feather=self._feather,
-                bloom=self._bloom,
+                bloom=self._bloom, growth=self._growth,
                 lean=sides.get(lyr.voice_at(index), 0)
                 * self.chrome.px(self._voice_step))
             self._views[index] = view
@@ -1418,7 +1413,7 @@ class Overlay:
             self.canvas, self.width // 2, _below(active), text, words,
             font=self.f_echo, wrap=self.wrap // 2,
             palette=self.palette.dimmed(ECHO_KEEP),
-            scale=self.chrome.scale, bloom=self._bloom)
+            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
         self._echo_line, self._echo_words = self.line_index, words
         # Built centred and then moved, because where it goes depends on how
         # wide it came out. Nothing is refused: it sits below the line's last

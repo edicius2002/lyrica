@@ -50,15 +50,14 @@ GLOW_OFFSETS = ((-2, 0), (2, 0), (0, -2), (0, 2))
 # way from the wash behind the words to the colour of the word itself.
 GLOW_PEAK = 0.85
 
-# How far a struck word rises, in pixels at the designed size, before settling
-# back. Without it the letters themselves do nothing — a halo appears behind
-# text that is not reacting to anything, which reads as an effect laid over the
-# words rather than as the words being sung. There is no room to brighten them
-# instead: the sung colour is already at 253 of 255.
-# How much of a word's light is spent growing rather than settling back. The
-# rise used to take no time at all — one frame from nothing to the top, which is
-# a teleport, not a movement.
-STRIKE_ATTACK = 0.16
+# A struck word moves on a fixed clock rather than borrowing the bloom's. When
+# the clock followed word duration, a short word rose in one frame and a held
+# word stayed swollen for a second. The light may honestly follow duration; the
+# physical gesture has to remain recognisable from one word to the next.
+GROW_ATTACK_S = 0.105
+GROW_SETTLE_S = 0.270
+GROW_SPAN_S = GROW_ATTACK_S + GROW_SETTLE_S
+STRIKE_ATTACK = GROW_ATTACK_S / GROW_SPAN_S
 
 
 def _strike_shape(age: float) -> float:
@@ -101,12 +100,13 @@ class LineView:
     def __init__(self, canvas: tk.Canvas, cx: int, y: float, text: str, words: list,
                  *, font, wrap: int, palette, scale: float = 1.0,
                  feather: float = FEATHER_PX, bloom: float = BLOOM_S,
-                 lean: float = 0.0):
+                 growth: float = 0.14, lean: float = 0.0):
         self.canvas = canvas
         self.palette = palette
         self.words = words
         self.feather = feather * scale
         self.bloom = bloom
+        self.growth = max(0.0, float(growth))
         self._scale = scale
         self.y = float(y)
         self._cx = float(cx)
@@ -190,6 +190,10 @@ class LineView:
         self._piece_chars: dict[int, list[int]] = {}
         for index, piece in enumerate(self._char_piece):
             self._piece_chars.setdefault(piece, []).append(index)
+        self._piece_centres = {
+            piece: sum(self._items[i][0] for i in chars) / len(chars)
+            for piece, chars in self._piece_chars.items() if chars
+        }
 
         # And how long each word is sung for. The light drains on that clock
         # rather than on a fixed number of seconds, because the sweep crossing
@@ -319,12 +323,21 @@ class LineView:
         costs 6 ms, and it happens when the line changes rather than while it is
         being sung.
         """
-        if self._glow or not self.palette.glow or self.bloom <= 0:
+        if self._glow:
             return
         self._blurred = bloom.available(self._font)
         for index, entry in enumerate(self._items):
             ch = self.canvas.itemcget(entry[2], "text")
             x, y = self.canvas.coords(entry[2])
+            if self._blurred and self.growth > 0 and index not in self._grown:
+                # Growth is independent of the halo. Keyed composition cannot
+                # safely draw light behind text, but it can still let the word
+                # itself move.
+                stand_in = self.canvas.create_image(x, y, anchor="nw",
+                                                    state="hidden")
+                self._grown[index] = stand_in
+            if not self.palette.glow or self.bloom <= 0:
+                continue
             if self._blurred:
                 # One image, swapped rather than recoloured. The blur is real,
                 # so a curve does not come out doubled.
@@ -332,13 +345,6 @@ class LineView:
                                                 anchor="nw", state="hidden")
                 self.canvas.tag_lower(item, entry[2])
                 self._glow[index] = [item]
-                # And a stand-in for the letter itself while it is growing. Tk
-                # cannot scale a text item: its font sizes are integers, and a
-                # 6 % growth lands on two of them, which is the staircase this
-                # is trying to avoid. An image resamples to any fraction.
-                stand_in = self.canvas.create_image(x, y, anchor="nw",
-                                                    state="hidden")
-                self._grown[index] = stand_in
                 continue
             items = [self.canvas.create_text(x + dx, y + dy, text=ch, anchor="nw",
                                              font=self._font,
@@ -404,10 +410,14 @@ class LineView:
         # also what a word is.
         for piece, chars in self._piece_chars.items():
             front_here = reached[chars[0]] >= 0.5
-            if front_here and piece not in self._struck:
+            if (front_here and piece not in self._struck
+                    and (self.bloom > 0 or self.growth > 0)):
                 self._struck.add(piece)
-                span = self._piece_time.get(piece, BLOOM_FLOOR_S) * self.bloom
-                span = max(BLOOM_FLOOR_S, min(BLOOM_CEILING_S, span))
+                if self.bloom > 0:
+                    span = self._piece_time.get(piece, BLOOM_FLOOR_S) * self.bloom
+                    span = max(BLOOM_FLOOR_S, min(BLOOM_CEILING_S, span))
+                else:
+                    span = 0.0
                 for index in chars:
                     self._hit[index] = (struck, span)
             elif not front_here and reached[chars[0]] <= 0.05:
@@ -442,16 +452,20 @@ class LineView:
         if self._showing.get(index) == want:
             return
         char = self.canvas.itemcget(text, "text")
-        if not bloom.ready(char, self._font, step, colour):
+        if not bloom.ready(char, self._font, step, colour, self.growth):
             if self._budget <= 0:
                 return          # hold the size it has; the next frame may build
             self._budget -= 1
-        made = bloom.grown(char, self._font, step, colour)
+        made = bloom.grown(char, self._font, step, colour, self.growth)
         if made is None:
             return
         image, dx, dy = made
         x, y = self.canvas.coords(text)
-        self.canvas.coords(item, x + dx, y + dy)
+        piece = self._char_piece[index]
+        centre = self._piece_centres.get(piece, self._items[index][0])
+        scale = 1.0 + self.growth * step / bloom.SCALES
+        group_dx = (self._items[index][0] - centre) * (scale - 1.0)
+        self.canvas.coords(item, x + dx + group_dx, y + dy)
         self.canvas.itemconfigure(item, image=image, state="normal")
         self.canvas.itemconfigure(text, state="hidden")
         self._showing[index] = want
@@ -469,22 +483,26 @@ class LineView:
         when the front arrived stays behind, so each word is *struck* and the
         light it leaves drains away.
         """
-        if self.bloom <= 0 or not self._hit:
+        if not self._hit:
             self._settle_grown()
             return False
         alight = False
         self._budget = NEW_SIZES_PER_FRAME
         for index, (when, span) in list(self._hit.items()):
-            age = (now - when) / span
-            level = GLOW_PEAK * (1.0 - age) if age < 1.0 else 0.0
-            if level <= 0.0:
+            elapsed = max(0.0, now - when)
+            bloom_age = elapsed / span if span > 0 else 1.0
+            grow_age = elapsed / GROW_SPAN_S
+            level = (GLOW_PEAK * (1.0 - bloom_age)
+                     if self.bloom > 0 and bloom_age < 1.0 else 0.0)
+            growing = self.growth > 0 and grow_age < 1.0
+            if level <= 0.0 and not growing:
                 del self._hit[index]
             else:
                 alight = True
             # The letters themselves, not only the light behind them: a halo
             # behind text that is not reacting reads as an effect laid over the
             # words rather than as the words being sung.
-            self._grow_char(index, _strike_shape(age))
+            self._grow_char(index, _strike_shape(grow_age) if growing else 0.0)
             if not self._glow:
                 continue
             if self._blurred:

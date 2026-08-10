@@ -26,9 +26,12 @@ logger = logging.getLogger(__name__)
 # eighth of a fade, and each step is an image that has to be built and kept.
 LEVELS = 8
 
-# How far the light spreads, in pixels at the designed size. Wide enough to read
-# as a glow around the letter rather than as a thicker letter.
-RADIUS = 4
+# A tight core makes the strike legible; a wider, weaker field lets it survive
+# the artwork wash. A single four-pixel blur read as a softened outline at the
+# designed thirty-pixel lyric size.
+INNER_RADIUS = 3
+OUTER_RADIUS = 11
+OUTER_STRENGTH = 0.34
 
 # How much larger a word gets at the peak of its strike. What is being imitated
 # is subtle, but subtle has a floor here that is not a matter of taste: at 6 %
@@ -36,11 +39,11 @@ RADIUS = 4
 # four of the nine steps rendered to the same integer size as their neighbour,
 # so a third of the frames showed an identical picture. Measured, every step
 # earns a different image from about 10 % up.
-GROWTH = 0.11          # replaced at startup from the environment
+GROWTH = 0.14          # default for direct users; the overlay passes its setting
 
 # Room for the blur to fall off inside the image, or it is cut square at the
 # edges and the halo has corners.
-PAD = 12
+PAD = 20
 
 _cache: dict = {}
 _fonts: dict = {}
@@ -139,7 +142,12 @@ def _rendered(char: str, font, colour: tuple, scale: float):
     return img
 
 
-def ready(char: str, spec: tuple, step: int, colour: tuple) -> bool:
+def _growth_key(growth: float | None) -> float:
+    return round(GROWTH if growth is None else growth, 4)
+
+
+def ready(char: str, spec: tuple, step: int, colour: tuple,
+          growth: float | None = None) -> bool:
     """Whether this image already exists, so a caller can budget the building.
 
     Each one costs about 0.7 ms and a frame is 16, so a word of seven letters
@@ -148,10 +156,12 @@ def ready(char: str, spec: tuple, step: int, colour: tuple) -> bool:
     already on screen and a step of a sixth of six per cent is not a thing
     anyone sees held for one frame longer.
     """
-    return ("grown", char, spec, min(step, SCALES), colour) in _cache
+    return ("grown", char, spec, min(step, SCALES), colour,
+            _growth_key(growth)) in _cache
 
 
-def grown(char: str, spec: tuple, step: int, colour: tuple):
+def grown(char: str, spec: tuple, step: int, colour: tuple,
+          growth: float | None = None):
     """`char` grown by `step` of `SCALES`, as (image, dx, dy), or None.
 
     `dx`/`dy` place the image relative to the letter's own top-left corner, and
@@ -172,7 +182,8 @@ def grown(char: str, spec: tuple, step: int, colour: tuple):
     """
     if step <= 0:
         return None
-    key = ("grown", char, spec, min(step, SCALES), colour)
+    amount = _growth_key(growth)
+    key = ("grown", char, spec, min(step, SCALES), colour, amount)
     hit = _cache.get(key)
     if hit is not None:
         return hit
@@ -182,7 +193,7 @@ def grown(char: str, spec: tuple, step: int, colour: tuple):
     try:
         from PIL import ImageTk
 
-        asked = 1.0 + GROWTH * min(step, SCALES) / SCALES
+        asked = 1.0 + amount * min(step, SCALES) / SCALES
         img = _rendered(char, font, colour, asked)
         width = max(1, int(font.getlength(char)))
         height = sum(font.getmetrics())
@@ -225,10 +236,14 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
 
         width = int(font.getlength(char)) + PAD * 2
         height = int(font.size * 1.6) + PAD * 2
-        img = Image.new("RGBA", (max(width, 1), height), (0, 0, 0, 0))
-        ImageDraw.Draw(img).text((PAD, PAD), char, font=font,
-                                 fill=(*colour, 255))
-        img = img.filter(ImageFilter.GaussianBlur(RADIUS))
+        source = Image.new("RGBA", (max(width, 1), height), (0, 0, 0, 0))
+        ImageDraw.Draw(source).text((PAD, PAD), char, font=font,
+                                    fill=(*colour, 255))
+        outer = source.filter(ImageFilter.GaussianBlur(OUTER_RADIUS))
+        outer.putalpha(outer.split()[3].point(
+            lambda v: int(v * OUTER_STRENGTH)))
+        inner = source.filter(ImageFilter.GaussianBlur(INNER_RADIUS))
+        img = Image.alpha_composite(outer, inner)
         strength = min(level, LEVELS) / LEVELS
         img.putalpha(img.split()[3].point(lambda v: int(v * strength)))
         photo = ImageTk.PhotoImage(img)

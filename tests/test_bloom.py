@@ -44,7 +44,10 @@ def test_the_light_drains_and_then_stops(view):
     assert view.advance_bloom(when + span * 0.9) is True
     # A hair past, because `when` is a monotonic clock in the millions and
     # (when + span) - when does not come back as exactly span.
-    assert view.advance_bloom(when + span + 1e-3) is False, "it has to end"
+    from lyrica.lineview import GROW_SPAN_S
+
+    assert view.advance_bloom(when + max(span, GROW_SPAN_S) + 1e-3) is False, \
+        "both the light and the independent movement have to end"
     assert not view._hit
 
 
@@ -68,13 +71,27 @@ def test_a_line_that_is_no_longer_active_carries_no_halo(view):
     assert view.advance_bloom(0.0) is False
 
 
-def test_turning_the_bloom_off_builds_nothing(canvas):
+def test_turning_the_bloom_off_keeps_the_growth(canvas):
     words = [(0.0, 0.2, w) for w in LINE.split()]
     v = LineView(canvas, 300, 40.0, LINE, words, font=("Segoe UI", 20, "bold"),
                  wrap=800, palette=DEFAULT, feather=12.0, bloom=0.0)
     v.set_active(True)
     assert not v._glow
     v.show_sweep(1, 0.5)
+    when, _span = next(iter(v._hit.values()))
+    assert v.advance_bloom(when + 0.1) is True
+    v.destroy()
+
+
+def test_turning_both_effects_off_builds_nothing(canvas):
+    words = [(0.0, 0.2, w) for w in LINE.split()]
+    v = LineView(canvas, 300, 40.0, LINE, words,
+                 font=("Segoe UI", 20, "bold"), wrap=800, palette=DEFAULT,
+                 feather=12.0, bloom=0.0, growth=0.0)
+    v.set_active(True)
+    assert not v._glow and not v._grown
+    v.show_sweep(1, 0.5)
+    assert not v._hit
     assert v.advance_bloom(1.0) is False
     v.destroy()
 
@@ -87,6 +104,8 @@ def test_a_palette_with_no_wash_behind_it_builds_nothing(canvas):
                  wrap=800, palette=KEYED, feather=12.0, bloom=0.25)
     v.set_active(True)
     assert not v._glow
+    if v._blurred:
+        assert v._grown, "keyed mode should remove the halo, not the movement"
     v.destroy()
 
 
@@ -275,30 +294,56 @@ def test_the_letter_is_swapped_for_its_stand_in_and_back(view):
     view.show_sweep(0, 0.6)
     when, span = next(iter(view._hit.values()))
 
-    from lyrica.lineview import STRIKE_ATTACK
-    view.advance_bloom(when + span * STRIKE_ATTACK)
+    from lyrica.lineview import GROW_ATTACK_S, GROW_SPAN_S
+    view.advance_bloom(when + GROW_ATTACK_S)
     assert view._showing, "nothing grew"
     index = next(iter(view._showing))
     assert view.canvas.itemcget(view._items[index][2], "state") == "hidden"
 
-    view.advance_bloom(when + span + 1e-3)
+    view.advance_bloom(when + max(span, GROW_SPAN_S) + 1e-3)
     assert not view._showing, "the stand-ins never went away"
     assert view.canvas.itemcget(view._items[index][2], "state") == "normal"
+
+
+def test_a_word_expands_as_one_group(view):
+    """Outer letters travel apart instead of only thickening in place."""
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import GROW_ATTACK_S
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no resampled growth on this machine")
+    view.show_sweep(0, 0.6)
+    when, _span = next(iter(view._hit.values()))
+    for _ in range(4):
+        view.advance_bloom(when + GROW_ATTACK_S)
+
+    chars = view._piece_chars[0]
+    offsets = []
+    for index in chars:
+        step, colour = view._showing[index]
+        char = view.canvas.itemcget(view._items[index][2], "text")
+        _image, dx, _dy = bloom_mod.grown(
+            char, view._font, step, colour, view.growth)
+        grown_x = view.canvas.coords(view._grown[index])[0]
+        text_x = view.canvas.coords(view._items[index][2])[0]
+        offsets.append(grown_x - text_x - dx)
+    assert offsets[0] < 0 < offsets[-1], offsets
 
 
 def test_only_so_many_new_sizes_are_built_in_one_frame(view):
     # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
     # size every frame overran on its first play: measured at 24 ms.
     from lyrica import bloom as bloom_mod
-    from lyrica.lineview import NEW_SIZES_PER_FRAME, STRIKE_ATTACK
+    from lyrica.lineview import GROW_ATTACK_S, NEW_SIZES_PER_FRAME
 
     view.set_active(True)
     if not view._blurred:
         pytest.skip("no blurred glyphs on this machine")
     bloom_mod._cache.clear()
     view.show_sweep(0, 0.6)
-    when, span = next(iter(view._hit.values()))
-    view.advance_bloom(when + span * STRIKE_ATTACK)
+    when, _span = next(iter(view._hit.values()))
+    view.advance_bloom(when + GROW_ATTACK_S)
     assert len(bloom_mod._cache) <= NEW_SIZES_PER_FRAME
 
 
@@ -307,9 +352,9 @@ def test_a_line_no_longer_active_leaves_no_stand_ins(view):
     if not view._blurred:
         pytest.skip("no blurred glyphs on this machine")
     view.show_sweep(0, 0.6)
-    when, span = next(iter(view._hit.values()))
-    from lyrica.lineview import STRIKE_ATTACK
-    view.advance_bloom(when + span * STRIKE_ATTACK)
+    when, _span = next(iter(view._hit.values()))
+    from lyrica.lineview import GROW_ATTACK_S
+    view.advance_bloom(when + GROW_ATTACK_S)
     view.set_active(False)
     assert not view._showing
     # Tk answers "" for a state never set, which is what an untouched letter has.
