@@ -75,7 +75,23 @@ def _strike_shape(age: float) -> float:
     return 1.0 - cubic_bezier(min(1.0, fall), STRIKE_DOWN)
 
 
+# Whether a word may *begin* building sizes it does not have yet, rather than how
+# many letters of it may. A word is built whole or not at all — see
+# `_grow_piece` — so this gates how many words start in one frame, and a word
+# that starts is allowed to overshoot to stay in one piece.
+#
+# Measured at 0.329 ms per image, not the 0.7 ms an earlier estimate assumed, so
+# one whole step of a twelve-letter word costs 3.95 ms of a 16 ms frame and even
+# a long word finishes inside one. At three, a second word waits a frame rather
+# than sharing the cost of the first, which is what keeps the worst frame bounded
+# by the longest word on the row instead of by the whole row.
 NEW_SIZES_PER_FRAME = 3
+
+# The halo counts separately. Sharing one pool, growth was served first and the
+# light went hungry: measured over twelve cold frames, the halo got new images in
+# six of them, in bursts of three and one, so a decay that is smooth in time was
+# shown in irregular jumps.
+NEW_HALOS_PER_FRAME = 3
 
 
 # How long a character keeps its bloom after the front reaches it. The effect
@@ -120,6 +136,11 @@ class LineView:
         self._items: list = []      # [centre_x, row, item, colour]
         self._char_widths: list[float] = []
         self._char_piece: list[int] = []   # character -> the word it belongs to
+        # The letters themselves, so nothing has to ask Tk what it is drawing.
+        # Every lit character used to be read back from the canvas once a frame
+        # for its halo and again for its size, which is a round trip apiece for
+        # something settled when the line was laid out.
+        self._chars: list[str] = []
         self._outline: list = []
         self._word_chars: list[int] = []   # timed token -> its first character
         self._glow: dict = {}       # char index -> [items], built only while active
@@ -133,7 +154,13 @@ class LineView:
         self._grown: dict = {}      # char index -> its scaled stand-in
         self._reached: list = []    # char index -> how far the front is past it
         self._showing: dict = {}    # char index -> (step, colour) on screen
-        self._budget = 0            # new sizes still allowed this frame
+        # How far each halo has been carried from its resting place to stay with
+        # the letter it belongs to. Kept so the move can be recomputed from the
+        # letter rather than applied again on top of itself.
+        self._glow_dx: dict = {}    # char index -> offset now applied
+        self._halo_shown: dict = {}  # char index -> halo level on screen
+        self._budget = 0            # words still allowed to build sizes
+        self._halo_budget = 0       # new halo levels still allowed this frame
         self._blooming = False
         self._active = False
         self._visible = True
@@ -189,6 +216,7 @@ class LineView:
                     self._items.append([x + adv / 2, r, item, palette.side])
                     self._char_widths.append(adv)
                     self._char_piece.append(_token_index)
+                    self._chars.append(ch)
                     self._outline.extend(outline)
                     x += adv
 
@@ -400,6 +428,15 @@ class LineView:
                     self.canvas.itemconfigure(item, state="hidden")
             for item in self._grown.values():
                 self.canvas.itemconfigure(item, state="hidden")
+            return
+        # Coming back, the stand-in of a letter whose text is held hidden above
+        # has to be put back on screen and the halo asked for again. Neither
+        # happened, and both are only invisible while nothing else disturbs
+        # them: a line hidden mid-strike and shown again had hidden text behind
+        # a hidden image, so its grown letters were simply not drawn.
+        for index in self._showing:
+            self.canvas.itemconfigure(self._grown[index], state="normal")
+        self._halo_shown.clear()
 
     def destroy(self) -> None:
         for item in self.item_ids():
@@ -447,7 +484,7 @@ class LineView:
             return
         self._blurred = bloom.available(self._font)
         for index, entry in enumerate(self._items):
-            ch = self.canvas.itemcget(entry[2], "text")
+            ch = self._chars[index]
             x, y = self.canvas.coords(entry[2])
             if self._blurred and self.growth > 0 and index not in self._grown:
                 # Growth is independent of the halo. Keyed composition cannot
@@ -553,8 +590,32 @@ class LineView:
                 for index in chars:
                     self._hit.pop(index, None)
 
-    def _grow_char(self, index: int, shape: float) -> None:
-        """Show a grown stand-in for a letter, or the letter itself at rest.
+    def _group_dx(self, index: int, scale: float) -> float:
+        """How far this letter stands from where it rests, at `scale`.
+
+        A word swells about its own centre, so its letters travel apart as well
+        as thicken. Derived from the resting geometry every time rather than
+        accumulated, so returning to `scale` 1.0 returns to the original pixel.
+        """
+        piece = self._char_piece[index]
+        centre = self._piece_centres.get(piece, self._items[index][0])
+        return (self._items[index][0] - centre) * (scale - 1.0)
+
+    def _grow_piece(self, piece: int, chars: list[int], shape: float) -> None:
+        """Give a whole word one scale, or leave it the one it already has.
+
+        Atomic on purpose, and that is the whole point of the method. Budgeting
+        per letter instead let a word wear several scales in the same frame:
+        measured on a cold cache, the eight letters of one word showed steps 1,
+        2, 4 and 7 at once — a tenth of the growth in spread — and which letters
+        led changed every frame, so the word deformed differently each time
+        rather than swelling. That is what read as trembling.
+
+        So the budget decides whether this word may *start* building sizes it
+        lacks, never how far it gets. A word that starts finishes, because
+        stopping half way is exactly the tear being prevented; a word that may
+        not start keeps the size it is already showing for one more frame, which
+        at an eighth of a fourteen-per-cent growth nobody sees.
 
         While a word grows, its letters are either sung or unsung with nothing
         between: the ramp lives in the front's own width, which is under one
@@ -562,49 +623,112 @@ class LineView:
         of a boundary and buys the whole cache. Sixty-four ramp steps would have
         been 21,504 images and a quarter of a gigabyte.
         """
+        step = round(shape * bloom.SCALES)
+        if step <= 0:
+            self._set_piece_growth(piece, 0.0)
+            for index in chars:
+                self._retire_grown(index)
+            return
+        wants = {}
+        for index in chars:
+            if index not in self._grown:
+                return          # this line carries no stand-ins to grow
+            sung = (self._reached[index] >= 0.5
+                    if index < len(self._reached) else True)
+            colour = rgb_of(self.palette.sung if sung else self.palette.unsung)
+            wants[index] = (step, colour, self._chars[index])
+        if all(self._showing.get(index) == (want[0], want[1])
+               for index, want in wants.items()):
+            return
+        missing = [index for index, (level, colour, char) in wants.items()
+                   if not bloom.ready(char, self._font, level, colour,
+                                      self.growth)]
+        if missing:
+            if self._budget <= 0:
+                return      # hold this word whole; the next frame may build
+            # Charged for every image it takes, so a word that has just spent
+            # the frame's worth stops the next word starting rather than adding
+            # its own cost on top. The overshoot is bounded by one word.
+            self._budget -= len(missing)
+            for index in missing:
+                level, colour, char = wants[index]
+                if bloom.grown(char, self._font, level, colour,
+                               self.growth) is None:
+                    return      # no images to be had; leave the text as it is
+        # The layout moves only now that every letter's size exists, so the
+        # neighbours never breathe for a growth that is not on screen yet.
+        self._set_piece_growth(piece, step / bloom.SCALES)
+        scale = 1.0 + self.growth * step / bloom.SCALES
+        for index in chars:
+            level, colour, char = wants[index]
+            if self._showing.get(index) == (level, colour):
+                continue
+            made = bloom.grown(char, self._font, level, colour, self.growth)
+            if made is None:
+                continue
+            image, dx, dy = made
+            group_dx = self._group_dx(index, scale)
+            text = self._items[index][2]
+            x, y = self.canvas.coords(text)
+            self.canvas.coords(self._grown[index], x + dx + group_dx, y + dy)
+            if index in self._showing:
+                # Already standing in for its letter: the picture changes, the
+                # two states do not. A whole word's worth of redundant state
+                # changes a frame is what the atomic swap cannot afford.
+                self.canvas.itemconfigure(self._grown[index], image=image)
+            else:
+                self.canvas.itemconfigure(self._grown[index], image=image,
+                                          state="normal")
+                self.canvas.itemconfigure(text, state="hidden")
+            self._showing[index] = (level, colour)
+            # The light belongs to this letter, so it goes where the letter
+            # goes. Left behind, it sat up to twelve pixels away at full growth
+            # and slid back, which is the halo that appeared to drift about
+            # behind the illumination.
+            self._place_halo(index, group_dx, at=(x, y))
+
+    def _retire_grown(self, index: int) -> None:
+        """Put a letter back to its own size, drawn as text again."""
         item = self._grown.get(index)
         if item is None:
             return
-        step = round(shape * bloom.SCALES)
-        text = self._items[index][2]
-        piece = self._char_piece[index]
-        if step <= 0:
-            self._set_piece_growth(piece, 0.0)
-            if self._showing.pop(index, None) is not None:
-                self.canvas.itemconfigure(item, state="hidden")
-                self.canvas.itemconfigure(text, state="normal")
+        if self._showing.pop(index, None) is not None:
+            self.canvas.itemconfigure(item, state="hidden")
+            self.canvas.itemconfigure(self._items[index][2], state="normal")
+        self._place_halo(index, 0.0)
+
+    def _place_halo(self, index: int, dx: float, at=None) -> None:
+        """Carry this character's halo `dx` from where its letter rests.
+
+        `at` is the letter's own corner when the caller has just read it, which
+        saves asking the canvas for the same two numbers twice in a frame.
+        """
+        items = self._glow.get(index)
+        if not items:
             return
-        sung = self._reached[index] >= 0.5 if index < len(self._reached) else True
-        colour = rgb_of(self.palette.sung if sung else self.palette.unsung)
-        want = (step, colour)
-        if self._showing.get(index) == want:
+        if abs(self._glow_dx.get(index, 0.0) - dx) < 1e-6:
             return
-        char = self.canvas.itemcget(text, "text")
-        if not bloom.ready(char, self._font, step, colour, self.growth):
-            if self._budget <= 0:
-                return          # hold the size it has; the next frame may build
-            self._budget -= 1
-        made = bloom.grown(char, self._font, step, colour, self.growth)
-        if made is None:
+        self._glow_dx[index] = dx
+        x, y = at if at is not None else self.canvas.coords(self._items[index][2])
+        if self._blurred:
+            self.canvas.coords(items[0], x - bloom.PAD + dx, y - bloom.PAD)
             return
-        image, dx, dy = made
-        # Move the neighbours only once the requested size actually exists.
-        # If the per-frame image budget is spent, both glyph and layout keep
-        # their previous size for that frame instead of disagreeing.
-        self._set_piece_growth(piece, step / bloom.SCALES)
-        x, y = self.canvas.coords(text)
-        centre = self._piece_centres.get(piece, self._items[index][0])
-        scale = 1.0 + self.growth * step / bloom.SCALES
-        group_dx = (self._items[index][0] - centre) * (scale - 1.0)
-        self.canvas.coords(item, x + dx + group_dx, y + dy)
-        self.canvas.itemconfigure(item, image=image, state="normal")
-        self.canvas.itemconfigure(text, state="hidden")
-        self._showing[index] = want
+        for item, (ox, oy) in zip(items, GLOW_OFFSETS, strict=True):
+            self.canvas.coords(item, x + ox + dx, y + oy)
 
     def _settle_grown(self) -> None:
+        """Every letter back to its own size, and the row back to its own place.
+
+        Both halves matter. Putting the letters back without releasing the
+        growth left the neighbours of a word that was mid-strike standing aside
+        for an expansion that had already gone — six and a half pixels, held for
+        as long as the line lived.
+        """
         for index in list(self._showing):
-            self._grow_char(index, 0.0)
+            self._retire_grown(index)
         self._showing.clear()
+        for piece in list(self._piece_growth):
+            self._set_piece_growth(piece, 0.0)
 
     def advance_bloom(self, now: float) -> bool:
         """Fade each struck character's halo. True while any is still alight.
@@ -613,13 +737,25 @@ class LineView:
         to where the front is travels with it like a carried lamp; one keyed to
         when the front arrived stays behind, so each word is *struck* and the
         light it leaves drains away.
+
+        Walked word by word rather than letter by letter, because a word is the
+        unit that is struck: its letters share one clock, and they have to share
+        one size in any given frame or the word trembles instead of swelling.
         """
         if not self._hit:
             self._settle_grown()
             return False
         alight = False
         self._budget = NEW_SIZES_PER_FRAME
-        for index, (when, span) in list(self._hit.items()):
+        self._halo_budget = NEW_HALOS_PER_FRAME
+        for piece, chars in self._piece_chars.items():
+            struck = [index for index in chars if index in self._hit]
+            if not struck:
+                continue
+            # One clock for the word, read from it once. Every letter of a word
+            # is struck in the same instant by `show_sweep`, and taking the time
+            # per letter only invited them to disagree.
+            when, span = self._hit[struck[0]]
             elapsed = max(0.0, now - when)
             bloom_age = elapsed / span if span > 0 else 1.0
             grow_age = elapsed / GROW_SPAN_S
@@ -627,38 +763,56 @@ class LineView:
                      if self.bloom > 0 and bloom_age < 1.0 else 0.0)
             growing = self.growth > 0 and grow_age < 1.0
             if level <= 0.0 and not growing:
-                del self._hit[index]
+                for index in struck:
+                    del self._hit[index]
             else:
                 alight = True
             # The letters themselves, not only the light behind them: a halo
             # behind text that is not reacting reads as an effect laid over the
             # words rather than as the words being sung.
-            self._grow_char(index, _strike_shape(grow_age) if growing else 0.0)
+            self._grow_piece(piece, struck,
+                             _strike_shape(grow_age) if growing else 0.0)
             if not self._glow:
                 continue
-            if self._blurred:
-                char = self.canvas.itemcget(self._items[index][2], "text")
-                step = int(level / GLOW_PEAK * bloom.LEVELS + 0.5)
-                if not bloom.blurred_ready(char, self._font, step):
-                    if self._budget <= 0:
-                        continue    # keep the halo it has for one more frame
-                    self._budget -= 1
-                image = bloom.glyph(char, self._font, step)
-                for item in self._glow.get(index, ()):
-                    if image is None:
-                        self.canvas.itemconfigure(item, state="hidden")
-                    else:
-                        self.canvas.itemconfigure(item, image=image,
-                                                  state="normal")
-                continue
-            shade = self.palette.bloom(level)
-            for item in self._glow.get(index, ()):
-                self.canvas.itemconfigure(item, fill=shade)
+            self._fade_halo(struck, level)
         self._blooming = alight
         return alight
 
+    def _fade_halo(self, chars: list[int], level: float) -> None:
+        """Show the halo of every letter in this word at `level`."""
+        if not self._blurred:
+            shade = self.palette.bloom(level)
+            for index in chars:
+                for item in self._glow.get(index, ()):
+                    self.canvas.itemconfigure(item, fill=shade)
+            return
+        # The light is quantised to `LEVELS`, so it holds the same picture for
+        # four or five frames at a time. Told again each frame, that was a whole
+        # word's worth of Tcl for an unchanged image.
+        step = int(level / GLOW_PEAK * bloom.LEVELS + 0.5)
+        for index in chars:
+            if self._halo_shown.get(index) == step:
+                continue
+            char = self._chars[index]
+            if not bloom.blurred_ready(char, self._font, step):
+                if self._halo_budget <= 0:
+                    continue    # keep the halo it has for one more frame
+                self._halo_budget -= 1
+            image = bloom.glyph(char, self._font, step)
+            for item in self._glow.get(index, ()):
+                if image is None:
+                    self.canvas.itemconfigure(item, state="hidden")
+                else:
+                    self.canvas.itemconfigure(item, image=image, state="normal")
+            self._halo_shown[index] = step
+
     def _clear_glow(self) -> None:
         self._blooming = False
+        # The carried offsets and shown levels go with the items they described.
+        # Kept, a rebuilt halo would be recorded as already moved and already
+        # lit, and would never travel or change again.
+        self._glow_dx.clear()
+        self._halo_shown.clear()
         for items in self._glow.values():
             for item in items:
                 self.canvas.delete(item)

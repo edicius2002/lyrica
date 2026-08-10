@@ -1,6 +1,7 @@
 """The light a struck character leaves behind, and that it drains in time."""
 import pytest
 
+from lyrica.glass import rgb_of
 from lyrica.lineview import LineView
 from lyrica.palette import DEFAULT, KEYED
 
@@ -397,20 +398,239 @@ def test_adjacent_words_breathe_with_the_expansion_and_return(view):
     assert after == pytest.approx(before), "the resting gaps accumulated drift"
 
 
-def test_only_so_many_new_sizes_are_built_in_one_frame(view):
-    # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
-    # size every frame overran on its first play: measured at 24 ms.
+def test_a_words_letters_never_show_two_sizes_in_one_frame(view):
+    """The tremor itself, on the cache state that produced it.
+
+    The per-frame image budget used to be spent a letter at a time, and a letter
+    that found it spent kept the size it had. Measured on a cold cache, the eight
+    letters of one word showed steps 1, 2, 4 and 7 in the same frame — a tenth of
+    the whole growth in spread — and which letters led changed every frame, so
+    the word deformed differently each time instead of swelling. A word is one
+    gesture: it takes one size per frame or it keeps the one it has.
+    """
     from lyrica import bloom as bloom_mod
-    from lyrica.lineview import GROW_ATTACK_S, NEW_SIZES_PER_FRAME
+    from lyrica.lineview import GROW_SPAN_S
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no resampled growth on this machine")
+    bloom_mod._cache.clear()            # the first play of this line
+    view.show_sweep(0, 0.6)
+    when, _span = next(iter(view._hit.values()))
+
+    torn = []
+    frames = int(GROW_SPAN_S * 60) + 4
+    for frame in range(frames):
+        view.advance_bloom(when + frame / 60.0)
+        for piece, chars in view._piece_chars.items():
+            shown = [i for i in chars if i in view._showing]
+            steps = {view._showing[i][0] for i in shown}
+            if len(steps) > 1 or (shown and len(shown) != len(chars)):
+                torn.append({"frame": frame, "word": piece,
+                             "steps": sorted(steps),
+                             "grown": len(shown), "letters": len(chars)})
+    assert not torn, f"a word wore more than one size in a frame: {torn}"
+
+
+def test_one_frame_builds_one_word_whole_and_no_more(view):
+    """A word is built entire or not at all, and only one word starts a frame.
+
+    Measured at 0.329 ms an image — not the 0.7 ms an earlier estimate assumed —
+    so one step of a twelve-letter word is 3.95 ms of a 16 ms frame and finishes
+    inside one. What has to stay bounded is therefore how many *words* begin in a
+    frame, because letting a word stop half way is the tear above.
+    """
+    import time
+
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import GROW_ATTACK_S
 
     view.set_active(True)
     if not view._blurred:
         pytest.skip("no blurred glyphs on this machine")
     bloom_mod._cache.clear()
+    now = time.monotonic()
+    # Two neighbouring words struck together, which is what a fast phrase does.
+    for piece in (0, 1):
+        for index in view._piece_chars[piece]:
+            view._hit[index] = (now, 0.6)
+    view.advance_bloom(now + GROW_ATTACK_S)
+
+    pieces = {view._char_piece[i] for i in view._showing}
+    assert len(pieces) == 1, "two words built their sizes in the same frame"
+    piece = next(iter(pieces))
+    chars = view._piece_chars[piece]
+    assert len(view._showing) == len(chars), "the word was left part grown"
+    built = [k for k in bloom_mod._cache if k[0] == "grown"]
+    assert len(built) == len(chars), (
+        f"{len(built)} sizes built for a word of {len(chars)} letters")
+
+    # And the word that waited gets its turn on the next frame.
+    view.advance_bloom(now + GROW_ATTACK_S + 1 / 60.0)
+    assert len({view._char_piece[i] for i in view._showing}) == 2
+
+
+def test_the_halo_gets_on_with_it_whatever_the_growth_is_doing(canvas):
+    """They shared one pool and the growth was served first.
+
+    Measured over twelve cold frames, the halo received new images in six of
+    them, in bursts of three and of one: a decay that is continuous in time was
+    shown in irregular jumps, which is the pulsing that appeared behind the
+    illumination.
+
+    So the property is not that the halo gets *some* allowance — it sometimes did
+    — but that what it gets does not depend on how hungry the growth is. Two
+    identical frames are run, one with the sizes still to build and one with them
+    already built, and the halo has to make the same progress in both.
+    """
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import GROW_ATTACK_S
+
+    def halos_built_in_one_frame(warm_the_growth):
+        bloom_mod._cache.clear()
+        words = [(i * 0.2, i * 0.2 + 0.2, w) for i, w in enumerate(LINE.split())]
+        v = LineView(canvas, 300, 40.0, LINE, words,
+                     font=("Segoe UI", 20, "bold"), wrap=800, palette=DEFAULT,
+                     feather=12.0, bloom=1.0)
+        v.set_active(True)
+        if not v._blurred or not v._glow:
+            v.destroy()
+            pytest.skip("no blurred glyphs on this machine")
+        v.show_sweep(0, 0.6)
+        when, _span = next(iter(v._hit.values()))
+        if warm_the_growth:
+            # Every size this frame will ask for, already in hand.
+            for index in v._piece_chars[0]:
+                char = canvas.itemcget(v._items[index][2], "text")
+                for step in range(1, bloom_mod.SCALES + 1):
+                    for shade in (DEFAULT.sung, DEFAULT.unsung):
+                        bloom_mod.grown(char, v._font, step, rgb_of(shade),
+                                        v.growth)
+        before = sum(1 for k in bloom_mod._cache if k[0] != "grown")
+        v.advance_bloom(when + GROW_ATTACK_S)
+        after = sum(1 for k in bloom_mod._cache if k[0] != "grown")
+        v.destroy()
+        return after - before
+
+    hungry = halos_built_in_one_frame(warm_the_growth=False)
+    fed = halos_built_in_one_frame(warm_the_growth=True)
+    assert hungry == fed, (
+        f"the halo built {hungry} levels while the growth was building and "
+        f"{fed} when it had nothing to build, so they share one allowance")
+    assert fed > 0, "the halo built nothing at all"
+
+
+def test_a_halo_travels_with_the_letter_it_belongs_to(view):
+    """It used to hold still while its letter moved out from under it.
+
+    A word swells about its own centre, so its outer letters travel as well as
+    thicken — up to twelve pixels at the designed size. The halo kept its resting
+    place, so the light visibly slid behind the glyph and back again.
+    """
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import GROW_ATTACK_S, GROW_SPAN_S
+
+    view.set_active(True)
+    if not view._blurred or not view._glow:
+        pytest.skip("no blurred halo on this machine")
+    view.show_sweep(0, 0.6)
+    when, span = next(iter(view._hit.values()))
+    chars = view._piece_chars[0]
+    outer = chars[-1]
+
+    def offset():
+        glow = view.canvas.coords(view._glow[outer][0])[0]
+        text = view.canvas.coords(view._items[outer][2])[0]
+        return glow - text + bloom_mod.PAD
+
+    assert offset() == pytest.approx(0.0), "the halo starts out of place"
+
+    for _ in range(4):                  # warm, then read the grown frame
+        view.advance_bloom(when + GROW_ATTACK_S)
+    step, _colour = view._showing[outer]
+    scale = 1.0 + view.growth * step / bloom_mod.SCALES
+    want = view._group_dx(outer, scale)
+    assert abs(want) > 1.0, "this letter does not travel; pick an outer one"
+    assert offset() == pytest.approx(want), (
+        "the halo stayed behind while its letter moved")
+
+    view.advance_bloom(when + max(span, GROW_SPAN_S) + 1e-3)
+    assert offset() == pytest.approx(0.0), "the halo did not come back"
+
+
+def test_the_same_size_always_lands_on_the_same_pixels(view):
+    """A word's centre may not wander between two showings of one step.
+
+    The offsets are derived from the resting geometry and the scale every time
+    rather than carried forward, so reaching step five on the way up and again on
+    the way down has to put the ink in the same place. Anything accumulated shows
+    as a word that walks while it breathes. Measured across a whole line, the
+    wander at a fixed step is 0.0000 px and the width change 0.0000 px.
+    """
+    from lyrica import bloom as bloom_mod
+    from lyrica.lineview import GROW_SPAN_S
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no resampled growth on this machine")
     view.show_sweep(0, 0.6)
     when, _span = next(iter(view._hit.values()))
-    view.advance_bloom(when + GROW_ATTACK_S)
-    assert len(bloom_mod._cache) <= NEW_SIZES_PER_FRAME
+    chars = view._piece_chars[0]
+
+    seen: dict = {}
+    repeats = 0
+    for frame in range(int(GROW_SPAN_S * 60) + 2):
+        view.advance_bloom(when + frame / 60.0)
+        shown = [i for i in chars if i in view._showing]
+        if len(shown) != len(chars):
+            continue
+        steps = {view._showing[i][0] for i in shown}
+        if len(steps) != 1:
+            continue
+        step = next(iter(steps))
+        # Where the ink sits, held against the place the row has given the word.
+        where = tuple(round(view.canvas.coords(view._grown[i])[0]
+                            - view._piece_layout_shift[0], 6) for i in chars)
+        if step in seen:
+            repeats += 1
+            assert seen[step] == where, (
+                f"step {step} landed somewhere else the second time")
+        seen[step] = where
+    assert repeats, "no step was reached twice, so nothing was compared"
+    assert len(seen) > 1, "the word never changed size"
+    assert bloom_mod.SCALES in seen, "the word never reached full growth"
+
+
+def test_a_line_dropped_mid_strike_returns_its_row_to_rest(view):
+    """Letting go of the letters is only half of letting go of the growth.
+
+    A word's neighbours stand aside while it expands. Retiring the stand-ins
+    without releasing that expansion left them aside for an expansion that was
+    no longer on screen, for as long as the line lived.
+    """
+    from lyrica.lineview import GROW_ATTACK_S
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no resampled growth on this machine")
+    rest = {piece: view.canvas.coords(view._items[chars[0]][2])[0]
+            for piece, chars in view._piece_chars.items()}
+
+    view.show_sweep(0, 0.6)
+    when, _span = next(iter(view._hit.values()))
+    for _ in range(3):
+        view.advance_bloom(when + GROW_ATTACK_S)
+    assert view._piece_growth, "nothing expanded, so nothing to let go of"
+    assert any(abs(s) > 1e-6 for s in view._piece_layout_shift.values())
+
+    view.set_active(False)
+
+    assert not view._piece_growth
+    assert all(shift == pytest.approx(0.0)
+               for shift in view._piece_layout_shift.values())
+    now = {piece: view.canvas.coords(view._items[chars[0]][2])[0]
+           for piece, chars in view._piece_chars.items()}
+    assert now == pytest.approx(rest), "the row kept standing aside"
 
 
 def test_a_line_no_longer_active_leaves_no_stand_ins(view):

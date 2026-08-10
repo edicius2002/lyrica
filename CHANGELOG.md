@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.5 — 2026-08-10
+
+- Give every letter of an expanding word the same size in the same frame. The
+  per-frame image budget was spent a letter at a time, so a word wore up to four
+  scales at once and deformed differently each frame instead of swelling.
+- Carry each halo with the letter it belongs to, which travels up to twelve
+  pixels as a word grows about its own centre.
+- Budget the halo separately from the growth, so a cold cache no longer holds the
+  light still for whole frames and then jumps it.
+- Restore a line's grown letters when it becomes visible again, instead of
+  leaving hidden text behind a hidden image.
+
 ## 0.2.4 — 2026-08-10
 
 - Hide lyric lines once their edge fade reaches zero instead of leaving opaque
