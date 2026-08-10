@@ -1421,7 +1421,14 @@ class Overlay:
         # line is.
         span = self._echo._row_spans[0]
         wide = span[1] - span[0]
-        self._echo.recentre(self.width - self.chrome.px(EDGE_MARGIN) - wide / 2)
+        active_side = self._voice_sides(lyr).get(lyr.voice_at(self.line_index), 0)
+        # The supporting voice answers from the open lane. A centred or
+        # unidentified lead keeps the established right-side placement.
+        echo_side = -active_side if active_side else 1
+        margin = self.chrome.px(EDGE_MARGIN)
+        echo_centre = (margin + wide / 2 if echo_side < 0
+                       else self.width - margin - wide / 2)
+        self._echo.recentre(echo_centre)
         self._advance_backing(pos)
 
     def _advance_backing(self, pos: float) -> bool:

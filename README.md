@@ -120,14 +120,15 @@ the left half of a duet purely by having more lines. A third voice keeps the
 middle too — a duet has two sides, and inventing a third position would be
 claiming a third singer.
 
-It is a step, not an alignment. The reference pushes one voice to each edge,
-which works in a full-height view and not in a panel whose width comes from its
-own longest line: aligned outright, a short line ends up against the margin and
-the eye crosses the whole panel every time the singers trade. `LYRICA_VOICE_STEP`
-sets it in pixels, default 48 — at 34 two consecutive lines read as one of them
-being slightly out of true rather than as a side. `off` removes it. A line too
-long to take the whole step takes what room there is and no more, so nothing
-ever reaches the margin.
+It is a pair of responsive lanes rather than a hard edge alignment. At the
+default `LYRICA_VOICE_STEP=160`, their centres sit near 32% and 68% of the
+designed panel: plainly opposite, without sending a short phrase all the way to
+a margin. `off` removes the lanes. A line too long to take the whole step takes
+what room there is and no more, so nothing ever clips.
+
+A backing vocal answers from the open lane and runs on its own word timings. A
+lead in the left lane therefore gets its response on the right, and vice versa;
+an unidentified or centred lead keeps the right-hand default.
 
 Nothing moves for a song with one singer, or for a source that does not say —
 which is most of them. The names in that head metadata are never read: they are

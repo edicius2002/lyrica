@@ -112,6 +112,11 @@ def test_the_two_voices_land_on_opposite_sides(panel):
     assert _centre(panel._views[1]) > middle + 1
 
 
+def test_the_default_reads_as_two_lanes_not_a_crooked_column(panel):
+    separation = _centre(panel._views[1]) - _centre(panel._views[0])
+    assert separation >= panel.width * 0.30
+
+
 def test_together_stays_on_the_column(panel):
     assert _centre(panel._views[2]) == pytest.approx(panel.width / 2, abs=1.5)
 

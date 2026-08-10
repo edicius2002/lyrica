@@ -205,6 +205,21 @@ def _may_add_backing(best: Lyrics | None,
     return any(getattr(p, "carries_backing", False) for p in pending)
 
 
+def _candidate_is_complete(best: Lyrics | None) -> bool:
+    """Whether another reading of the metadata cannot improve the staging.
+
+    Every provider is asked for one reading, but browsers often supply several
+    defensible artist/title pairs. Word precision used to stop that outer loop
+    even when the result carried no agents or backing vocals; a later reading
+    could have reached the TTML performance and was never tried.
+    """
+    if not _nothing_left_to_beat(best, PROVIDERS):
+        return False
+    staged_source_exists = any(
+        getattr(provider, "carries_backing", False) for provider in PROVIDERS)
+    return not staged_source_exists or _staged(best)
+
+
 def _ask_one(provider: LyricsProvider, artist: str, title: str,
              duration: float, album: str):
     started = time.perf_counter()
@@ -346,7 +361,7 @@ def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.
             best = result
         # Every candidate asks the whole cascade, so the bar to clear here is
         # the best any source could give, not what is left to ask.
-        if _nothing_left_to_beat(best, PROVIDERS):
+        if _candidate_is_complete(best):
             return best
     return best
 

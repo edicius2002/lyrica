@@ -8,10 +8,14 @@ from lyrica.lyrics import Lyrics
 def panel(overlay):
     from lyrica import app as A
     overlay.lyrics = Lyrics(
-        lines=[(0.0, "I need you all night")],
+        lines=[(0.0, "I need you all night"), (3.0, "Stay with me")],
         words=[[(0.0, 0.4, "I"), (0.4, 0.9, "need"), (0.9, 1.6, "you"),
-                (1.6, 2.0, "all"), (2.0, 2.6, "night")]],
-        synced=True, backing=["(You)"], backing_words=[[(1.0, 1.7, "(You)")]])
+                (1.6, 2.0, "all"), (2.0, 2.6, "night")],
+               [(3.0, 3.4, "Stay"), (3.4, 3.8, "with"),
+                (3.8, 4.2, "me")]],
+        synced=True, backing=["(You)", "(Yeah)"],
+        backing_words=[[(1.0, 1.7, "(You)")], [(3.1, 3.7, "(Yeah)")]],
+        voices=["v1", "v2"], singers={"v1": "person", "v2": "person"})
     overlay._lyrics_state = A.LYRICS_PRESENT
     overlay._go_to_line(0, overlay.lyrics)
     overlay.root.update()
@@ -66,6 +70,17 @@ def test_it_sits_below_the_line_and_off_at_the_right_margin(panel):
     assert echo.y > line.y + line.line_height * 0.5, "it has to clear the line"
     left = min(s for s, _e in echo._row_spans)
     assert left > max(e for _s, e in line._row_spans), "and not touch it"
+
+
+def test_it_answers_from_the_lane_opposite_the_lead(panel):
+    panel._go_to_line(1, panel.lyrics)
+    panel._show_backing(panel.lyrics, 3.3)
+    active = panel._views[1]
+    echo = panel._echo
+    active_centre = sum(active._row_spans[0]) / 2
+    echo_centre = sum(echo._row_spans[0]) / 2
+    assert active_centre > panel.width / 2
+    assert echo_centre < panel.width / 2
 
 
 def test_its_own_window_is_what_takes_it_down(panel):

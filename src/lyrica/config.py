@@ -180,16 +180,13 @@ def growth_factor() -> float:
     return max(GROWTH_MIN, min(GROWTH_MAX, value))
 
 
-# How far each singer of a duet stands from the column, in pixels at the
-# designed size. Rendered before it was chosen: at 34 two lines by different
-# voices sit 68 px apart and it reads as one of them being slightly out of
-# true rather than as a side; the step has to be about half a word before the
-# eye takes it as deliberate. The ceiling is where the longest line runs out of
-# room — the wrap width leaves a hundred pixels on each side of the window —
-# past which the step would be granted to short lines and refused to long ones,
-# which is the ragged look this is bounded to avoid.
-VOICE_STEP_MIN, VOICE_STEP_MAX = 0.0, 100.0
-VOICE_STEP_DEFAULT = 48.0
+# How far each singer of a duet stands from the column, in designed pixels.
+# The default puts the two lane centres near 32% and 68% of the 900 px panel,
+# visibly opposite rather than merely out of alignment. Long lines still take
+# only the room available inside the margins, so the responsive lane is a
+# destination rather than permission to clip.
+VOICE_STEP_MIN, VOICE_STEP_MAX = 0.0, 240.0
+VOICE_STEP_DEFAULT = 160.0
 
 
 def voice_step() -> float:
