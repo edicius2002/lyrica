@@ -416,3 +416,14 @@ def test_the_voice_step_defaults_and_can_be_tuned(store, monkeypatch):
     assert config.voice_step() == config.VOICE_STEP_MAX
     monkeypatch.setenv("LYRICA_VOICE_STEP", "un poco")
     assert config.voice_step() == config.VOICE_STEP_DEFAULT
+
+
+def test_the_beam_intensity_defaults_and_is_bounded(store, monkeypatch):
+    monkeypatch.delenv("LYRICA_BEAM_INTENSITY", raising=False)
+    assert config.beam_intensity() == config.BEAM_INTENSITY_DEFAULT
+    monkeypatch.setenv("LYRICA_BEAM_INTENSITY", "1.5")
+    assert config.beam_intensity() == 1.5
+    monkeypatch.setenv("LYRICA_BEAM_INTENSITY", "9")
+    assert config.beam_intensity() == config.BEAM_INTENSITY_MAX
+    monkeypatch.setenv("LYRICA_BEAM_INTENSITY", "soft")
+    assert config.beam_intensity() == config.BEAM_INTENSITY_DEFAULT

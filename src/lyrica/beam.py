@@ -11,9 +11,10 @@ loudness and nothing else. A beam that always moves and breathes with the music
 says everything a loudness signal honestly can; one that tried to lurch on each
 kick would be guessing.
 """
+import colorsys
 import math
 
-from lyrica.glass import hex_of, rgb_of
+from lyrica.glass import delta_e, hex_of, rgb_of
 
 # Spacing is deliberately uneven, and evenly spacing it is what looked wrong
 # first. The default panel's perimeter is about 2900 px while a corner arc is
@@ -30,13 +31,14 @@ STRAIGHT_SPACING = 34.0
 # SHINE lights the whole border at once and rotates a gradient through it, so
 # every edge is lit all the time and what moves is the colour rather than a
 # spot. The second is the quieter of the two to sit beside while reading.
-COMET, SHINE = "comet", "shine"
+COMET, SHINE, AURORA = "comet", "shine", "aurora"
 
 # How long a circuit takes. The shine turns more slowly: a gradient sweeping the
 # whole border at the comet's rate reads as a wash sloshing about, where the
 # comet at the shine's rate barely appears to move at all.
 PERIOD_S = 6.0
 SHINE_PERIOD_S = 11.0
+AURORA_PERIOD_S = 8.0
 
 # How far apart the two ends of the shine's gradient sit, in whole cycles round
 # the ring. One, so opposite edges are opposite colours and the seam where the
@@ -62,6 +64,18 @@ SHINE_SWING_OPEN = 0.62
 # once per beat would spin at half or double speed about half the time. A beam
 # that is merely *more agitated* when the music is cannot be wrong that way.
 SHINE_SPEED_GAIN = 0.55
+
+# The old ring was a single two-pixel line. It moved, but against a textured
+# artwork wash it had no spatial presence. A crisp core carries the colour and
+# a quieter wide line underneath gives it a field without covering the words.
+CORE_WIDTH = 3.0
+HALO_WIDTH = 9.0
+HALO_KEEP = 0.42
+
+# Palette roles guarantee text contrast, not border contrast. The beam gets its
+# own perceptual floor so a cover whose accent resembles its wash cannot make
+# the ring disappear.
+MIN_BEAM_DE = 18.0
 
 # How much of the ring trails behind the head, as a fraction of the whole. Short
 # on purpose: a comet with a tail a quarter of the way round is a lit border
@@ -129,8 +143,18 @@ def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
     # The beam's own mid, not the unsung line's. They were the same number until
     # the unlit text was brightened for legibility, at which point the ring lost
     # the dark ground the head needs to travel through.
-    mid = rgb_of(palette.beam)
     head = rgb_of(palette.sung)
+    mid = rgb_of(palette.beam)
+    if delta_e(dark, mid) < MIN_BEAM_DE:
+        # Move only as far toward the already-safe sung role as visibility
+        # requires. The hue survives; only a disappearing accent is corrected.
+        for k in range(1, 21):
+            amount = k / 20
+            candidate = tuple(a + (b - a) * amount
+                              for a, b in zip(mid, head, strict=True))
+            if delta_e(dark, candidate) >= MIN_BEAM_DE:
+                mid = candidate
+                break
     out = []
     for i in range(steps):
         t = i / (steps - 1)
@@ -143,37 +167,78 @@ def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
     return out
 
 
+def _mix(a: tuple, b: tuple, amount: float) -> str:
+    amount = max(0.0, min(1.0, amount))
+    return hex_of(tuple(x + (y - x) * amount
+                        for x, y in zip(a, b, strict=True)))
+
+
+def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[str]:
+    """Neighbouring hues from the song colour, closed into a seamless ring."""
+    base = tuple(channel / 255 for channel in rgb_of(palette.beam))
+    hue, saturation, value = colorsys.rgb_to_hsv(*base)
+    saturation = max(0.28, saturation)
+    value = max(0.60, value)
+    anchors = [colorsys.hsv_to_rgb((hue + shift) % 1.0, saturation, value)
+               for shift in (-0.12, 0.0, 0.12)]
+    anchors = [tuple(channel * 255 for channel in colour) for colour in anchors]
+    out = []
+    for index in range(steps):
+        turn = index / steps * len(anchors)
+        left = int(turn) % len(anchors)
+        amount = turn - int(turn)
+        out.append(_mix(anchors[left], anchors[(left + 1) % len(anchors)], amount))
+    return out
+
+
 class Beam:
     """The ring of segments, and the state to colour them."""
 
     def __init__(self, canvas, width: int, height: int, radius: int,
-                 scale: float = 1.0, style: str = COMET):
+                 scale: float = 1.0, style: str = COMET,
+                 intensity: float = 1.0):
         self.canvas = canvas
         self.style = style
+        self.intensity = max(0.5, min(2.0, intensity))
         self._phase = 0.0
         self._items: list[int] = []
+        self._halo_items: list[int] = []
         self._shades: list[str] = []
-        self._thickness = max(1.0, 2.0 * scale)
+        self._halo_shades: list[str] = []
+        self._core_width = max(1.0, CORE_WIDTH * scale * self.intensity)
+        self._halo_width = max(self._core_width, HALO_WIDTH * scale * self.intensity)
+        self._core_tag = f"beam-core-{id(self)}"
+        self._halo_tag = f"beam-halo-{id(self)}"
+        self._width_state = None
         self._gradient: list[str] = []
+        self._aurora: list[str] = []
         self._palette = None
         self.reshape(width, height, radius)
 
     def reshape(self, width: int, height: int, radius: int) -> None:
         """Lay the ring out again, for a window that changed size."""
         self.destroy()
-        points = _rounded_path(width, height, radius, self._thickness)
+        points = _rounded_path(width, height, radius, self._halo_width / 2)
         for i, start in enumerate(points):
             end = points[(i + 1) % len(points)]
-            item = self.canvas.create_line(*start, *end, width=self._thickness,
-                                           fill="#000000", capstyle="round")
-            self._items.append(item)
+            halo = self.canvas.create_line(*start, *end, width=self._halo_width,
+                                           fill="#000000", capstyle="round",
+                                           tags=(self._halo_tag,))
+            core = self.canvas.create_line(*start, *end, width=self._core_width,
+                                           fill="#000000", capstyle="round",
+                                           tags=(self._core_tag,))
+            self._halo_items.append(halo)
+            self._items.append(core)
+            self._halo_shades.append("#000000")
             self._shades.append("#000000")
 
     def destroy(self) -> None:
-        for item in self._items:
+        for item in (*self._items, *self._halo_items):
             self.canvas.delete(item)
         self._items.clear()
+        self._halo_items.clear()
         self._shades.clear()
+        self._halo_shades.clear()
 
     def advance(self, dt: float, music, palette) -> None:
         """Move the head and recolour the ring.
@@ -187,13 +252,37 @@ class Beam:
         if palette is not self._palette:
             self._palette = palette
             self._gradient = _gradient(palette)
+            self._aurora = _aurora_colours(palette)
             self._shades = [""] * len(self._items)   # force a full repaint
+            self._halo_shades = [""] * len(self._items)
 
         level = max(0.0, min(1.0, getattr(music, "level", music)))
         dynamics = max(0.0, min(1.0, getattr(music, "dynamics", 0.0)))
         rate = max(0.0, min(1.0, getattr(music, "rate", 0.0)))
         top = len(self._gradient) - 1
         count = len(self._items)
+
+        width_state = round((level * 0.7 + dynamics * 0.3) * 4)
+        if width_state != self._width_state:
+            self._width_state = width_state
+            pulse = width_state / 4
+            self.canvas.itemconfigure(
+                self._core_tag, width=self._core_width * (1.0 + 0.22 * pulse))
+            self.canvas.itemconfigure(
+                self._halo_tag, width=self._halo_width * (0.82 + 0.38 * pulse))
+
+        if self.style == AURORA:
+            period = AURORA_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
+            self._phase = (self._phase + dt / period) % 1.0
+            strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
+            for i, item in enumerate(self._items):
+                turn = (i / count + self._phase) % 1.0
+                colour = rgb_of(self._aurora[int(turn * len(self._aurora))
+                                             % len(self._aurora)])
+                wave = 0.72 + 0.28 * math.cos(2 * math.pi * (turn - self._phase))
+                shade = _mix(tuple(palette.backdrop), colour, strength * wave)
+                self._paint(i, item, shade, palette)
+            return
 
         if self.style == SHINE:
             # Busier music turns it faster; nothing here claims to know a beat.
@@ -209,9 +298,7 @@ class Beam:
                 turn = (i / count) * SHINE_CYCLES + self._phase
                 wave = 0.5 + 0.5 * math.cos(2 * math.pi * turn)
                 shade = self._gradient[int(top * (base + swing * wave) * strength)]
-                if shade != self._shades[i]:
-                    self.canvas.itemconfigure(item, fill=shade)
-                    self._shades[i] = shade
+                self._paint(i, item, shade, palette)
             return
 
         self._phase = (self._phase + dt / PERIOD_S) % 1.0
@@ -222,6 +309,14 @@ class Beam:
             behind = (self._phase - i / count) % 1.0
             glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
             shade = self._gradient[int(top * glow * strength)]
-            if shade != self._shades[i]:
-                self.canvas.itemconfigure(item, fill=shade)
-                self._shades[i] = shade
+            self._paint(i, item, shade, palette)
+
+    def _paint(self, index: int, item: int, shade: str, palette) -> None:
+        """Paint the crisp ring and its quieter field only when either changed."""
+        if shade != self._shades[index]:
+            self.canvas.itemconfigure(item, fill=shade)
+            self._shades[index] = shade
+        halo = _mix(tuple(palette.backdrop), rgb_of(shade), HALO_KEEP)
+        if halo != self._halo_shades[index]:
+            self.canvas.itemconfigure(self._halo_items[index], fill=halo)
+            self._halo_shades[index] = halo

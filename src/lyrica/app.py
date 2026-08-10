@@ -501,7 +501,8 @@ class Overlay:
         if style != "off" and self.chrome.washed:
             self.beam = beam_mod.Beam(self.canvas, self.width, self.height,
                                       self.chrome.px(chrome_mod.CORNER_RADIUS),
-                                      self.chrome.scale, style)
+                                      self.chrome.scale, style,
+                                      config.beam_intensity())
 
         # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
