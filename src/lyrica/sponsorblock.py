@@ -39,7 +39,7 @@ from lyrica import config
 logger = logging.getLogger(__name__)
 
 API = "https://sponsor.ajay.app/api/skipSegments"
-HEADERS = {"User-Agent": "lyrica/0.2.0 (personal overlay)"}
+HEADERS = {"User-Agent": "lyrica/0.2.1 (personal overlay)"}
 
 # How much of the video's digest is sent. Four hex characters is what the
 # service's own privacy endpoint takes, and it returns every video sharing them.

@@ -9,7 +9,14 @@
   "duet": {
     "panel_width": 900,
     "lane_step": 160,
+    "safe_margin": 36,
     "minimum_separation_ratio": 0.30
+  },
+  "backing_vocal": {
+    "lane_step": 112,
+    "safe_margin": 44,
+    "entry_lane_fraction": 0.55,
+    "exit_lane_fraction": 0.75
   },
   "beam": {
     "core_width": 3.0,

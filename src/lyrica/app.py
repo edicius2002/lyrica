@@ -44,7 +44,6 @@ from lyrica import (
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
 from lyrica.lyrics import Lyrics, progress_in
-from lyrica.overlay_text import EDGE_MARGIN
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -97,6 +96,21 @@ ECHO_KEEP = 0.72
 # own window inside the line — it answers a phrase rather than lasting as long
 # as one — so it comes and goes on that window rather than on the line's.
 ECHO_FADE_S = 0.30
+
+# Backing vocals answer from a side, not from the edge. The old placement
+# aligned their outer edge to the panel margin, so a short "(yeah)" travelled
+# more than 400 designed pixels and its growth crossed the window boundary.
+# This lane is deliberately gentler than a duet's, with a larger safe area for
+# italic overhang, bloom and the word-growth gesture.
+ECHO_LANE_STEP = 112
+ECHO_SAFE_MARGIN = 44
+ECHO_ENTRY_LANE = 0.55
+ECHO_EXIT_LANE = 0.75
+
+# A voice may lean towards an edge, but neither its outline nor its maximum
+# growth should read as touching the glass. Eight pixels was only a clipping
+# guard; this is an optical margin.
+VOICE_SAFE_MARGIN = 36
 
 SLOW_TICK_MS = 100
 FAST_TICK_MS = 16   # 60 Hz; measured at ~1% of this machine with stable items
@@ -309,6 +323,7 @@ class Overlay:
         self._views_width = 0
         self._echo = None
         self._echo_line = -1
+        self._echo_side = 0
         self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
@@ -1379,17 +1394,16 @@ class Overlay:
         """Let a line take its voice's step, as far as the margins allow."""
         if not view.lean:
             return
-        margin = self.chrome.px(EDGE_MARGIN)
+        margin = self.chrome.px(VOICE_SAFE_MARGIN)
         view.fit(margin, self.width - margin)
 
     def _show_backing(self, lyr: Lyrics, pos: float) -> None:
-        """Draw what is sung behind the active line, off at the right margin.
+        """Draw what is sung behind the active line, in the open voice lane.
 
-        Not under the line and not beside it: the gap between rows is eleven
-        pixels against the twenty-seven a second row would need, so anywhere
-        below pushes the whole column about every time a backing vocal comes and
-        goes. The right margin is empty, it is where a voice standing behind the
-        singer belongs, and nothing has to move for it.
+        It sits below the line without joining the main column's row stack, so
+        its arrival never pushes the lyrics up or down. Horizontally it occupies
+        the lane opposite the lead, inset from the edge rather than aligned to
+        it.
 
         It sweeps on its own timings, which the source gives it, and it has to:
         a backing vocal answers the line while the line is still being sung, and
@@ -1410,26 +1424,18 @@ class Overlay:
             return
         if not words[0][0] - ECHO_FADE_S <= pos <= words[-1][1] + ECHO_FADE_S:
             return
-        self._echo = LineView(
-            self.canvas, self.width // 2, _below(active), text, words,
-            font=self.f_echo, wrap=self.wrap // 2,
-            palette=self.palette.dimmed(ECHO_KEEP),
-            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
-        self._echo_line, self._echo_words = self.line_index, words
-        # Built centred and then moved, because where it goes depends on how
-        # wide it came out. Nothing is refused: it sits below the line's last
-        # row rather than beside it, so the two cannot meet however wide the
-        # line is.
-        span = self._echo._row_spans[0]
-        wide = span[1] - span[0]
         active_side = self._voice_sides(lyr).get(lyr.voice_at(self.line_index), 0)
         # The supporting voice answers from the open lane. A centred or
         # unidentified lead keeps the established right-side placement.
         echo_side = -active_side if active_side else 1
-        margin = self.chrome.px(EDGE_MARGIN)
-        echo_centre = (margin + wide / 2 if echo_side < 0
-                       else self.width - margin - wide / 2)
-        self._echo.recentre(echo_centre)
+        self._echo = LineView(
+            self.canvas, self.width // 2, _below(active), text, words,
+            font=self.f_echo, wrap=self.wrap // 2,
+            palette=self.palette.dimmed(ECHO_KEEP),
+            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth,
+            lean=echo_side * self.chrome.px(ECHO_LANE_STEP))
+        self._echo_line, self._echo_words = self.line_index, words
+        self._echo_side = echo_side
         self._advance_backing(pos)
 
     def _advance_backing(self, pos: float) -> bool:
@@ -1449,6 +1455,24 @@ class Overlay:
         anchor = self._views.get(self._echo_line)
         if anchor is not None:
             self._echo.move_to(_below(anchor))
+        # Enter from part-way into the selected lane and settle there with an
+        # ordinary ease-in-out. On departure it yields only a quarter of the
+        # step, so it recedes rather than darting across the line. The same
+        # signed calculation handles left and right symmetrically.
+        if pos < words[0][0]:
+            phase = (pos - opens) / ECHO_FADE_S
+            lane = ECHO_ENTRY_LANE + (1.0 - ECHO_ENTRY_LANE) * motion.cubic_bezier(
+                phase, motion.RESIZE_CURVE)
+        elif pos > words[-1][1]:
+            phase = (pos - words[-1][1]) / ECHO_FADE_S
+            lane = 1.0 - (1.0 - ECHO_EXIT_LANE) * motion.cubic_bezier(
+                phase, motion.RESIZE_CURVE)
+        else:
+            lane = 1.0
+        self._echo.lean = (self._echo_side * self.chrome.px(ECHO_LANE_STEP)
+                           * lane)
+        margin = self.chrome.px(ECHO_SAFE_MARGIN)
+        self._echo.fit(margin, self.width - margin)
         pal = self._echo.palette
         if pos < words[0][0]:
             self._echo.set_active(False)
@@ -1470,7 +1494,7 @@ class Overlay:
     def _clear_backing(self) -> None:
         if self._echo is not None:
             self._echo.destroy()
-        self._echo, self._echo_line = None, -1
+        self._echo, self._echo_line, self._echo_side = None, -1, 0
         self._echo_words: list = []
 
     def _refit_views(self) -> None:

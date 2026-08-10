@@ -88,7 +88,9 @@ readable gesture. Turning the bloom off leaves the growth in place. It has a flo
 matter of taste: below about a tenth, several of its steps render to the same
 whole-pixel size and a third of the frames show an identical picture. There is
 no room to brighten a word instead — the sung colour is already at 253 of 255 —
-so it grows.
+so it grows. The neighbouring words breathe apart by the exact horizontal
+expansion and return to their original pixels as it settles; the pulse therefore
+keeps the resting word gap instead of consuming it.
 
 Tk cannot scale a text item: its font sizes are integers and a subtle growth
 lands on two or three of them. A growing letter is swapped for a resampled
@@ -124,11 +126,15 @@ It is a pair of responsive lanes rather than a hard edge alignment. At the
 default `LYRICA_VOICE_STEP=160`, their centres sit near 32% and 68% of the
 designed panel: plainly opposite, without sending a short phrase all the way to
 a margin. `off` removes the lanes. A line too long to take the whole step takes
-what room there is and no more, so nothing ever clips.
+what room there is and no more, so nothing ever clips. The fit also reserves a
+36 designed-pixel optical margin and the room needed by the growth gesture,
+rather than treating the old 8-pixel clipping guard as a visual margin.
 
 A backing vocal answers from the open lane and runs on its own word timings. A
 lead in the left lane therefore gets its response on the right, and vice versa;
-an unidentified or centred lead keeps the right-hand default.
+an unidentified or centred lead keeps the right-hand default. Its lane is a
+gentler 112 pixels from the centre, inset by at least 44 pixels, and its arrival
+and departure ease over only part of that step instead of jumping to an edge.
 
 Nothing moves for a song with one singer, or for a source that does not say —
 which is most of them. The names in that head metadata are never read: they are

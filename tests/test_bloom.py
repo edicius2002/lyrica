@@ -331,6 +331,33 @@ def test_a_word_expands_as_one_group(view):
     assert offsets[0] < 0 < offsets[-1], offsets
 
 
+def test_adjacent_words_breathe_with_the_expansion_and_return(view):
+    """Growth uses surrounding space without consuming the original gap."""
+    piece = 1
+    before = {
+        p: view.canvas.coords(view._items[chars[0]][2])[0]
+        for p, chars in view._piece_chars.items()
+    }
+
+    view._set_piece_growth(piece, 1.0)
+
+    assert view._piece_layout_shift[0] < 0
+    assert view._piece_layout_shift[piece] == pytest.approx(0.0)
+    assert view._piece_layout_shift[2] > 0
+    assert (view._piece_layout_shift[2] - view._piece_layout_shift[piece]
+            == pytest.approx(view._piece_widths[piece] * view.growth / 2))
+
+    view._set_piece_growth(piece, 0.0)
+    assert not view._piece_growth
+    assert all(shift == pytest.approx(0.0)
+               for shift in view._piece_layout_shift.values())
+    after = {
+        p: view.canvas.coords(view._items[chars[0]][2])[0]
+        for p, chars in view._piece_chars.items()
+    }
+    assert after == pytest.approx(before), "the resting gaps accumulated drift"
+
+
 def test_only_so_many_new_sizes_are_built_in_one_frame(view):
     # Each is about 0.7 ms against a 16 ms budget, and a word reaching for a new
     # size every frame overran on its first play: measured at 24 ms.

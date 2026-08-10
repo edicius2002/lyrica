@@ -115,7 +115,9 @@ class LineView:
         # the whole way, which is the point: see `fit`.
         self.lean = float(lean)
         self._shift = 0.0
+        self._tag = f"lyrica-line-{id(self)}"
         self._items: list = []      # [centre_x, row, item, colour]
+        self._char_widths: list[float] = []
         self._char_piece: list[int] = []   # character -> the word it belongs to
         self._outline: list = []
         self._word_chars: list[int] = []   # timed token -> its first character
@@ -167,6 +169,7 @@ class LineView:
             row_y = y + r * self.line_height
             for (_token_index, word_text, _), gap in zip(row, gaps, strict=True):
                 x += gap
+                piece_tag = self._piece_tag(_token_index)
                 for ch in word_text:
                     adv = measure(font_obj, key, ch)
                     # Only in keyed mode, the one mode with nothing drawn behind
@@ -175,11 +178,14 @@ class LineView:
                     # way whatever the cover started at.
                     outline = [canvas.create_text(x + dx, row_y + dy, text=ch,
                                                   anchor="nw", font=font,
-                                                  fill=OUTLINE_COLOUR)
+                                                  fill=OUTLINE_COLOUR,
+                                                  tags=(piece_tag,))
                                for dx, dy in ring_offsets(palette.outline)]
                     item = canvas.create_text(x, row_y, text=ch, anchor="nw",
-                                              font=font, fill=palette.side)
+                                              font=font, fill=palette.side,
+                                              tags=(piece_tag,))
                     self._items.append([x + adv / 2, r, item, palette.side])
+                    self._char_widths.append(adv)
                     self._char_piece.append(_token_index)
                     self._outline.extend(outline)
                     x += adv
@@ -191,9 +197,22 @@ class LineView:
         for index, piece in enumerate(self._char_piece):
             self._piece_chars.setdefault(piece, []).append(index)
         self._piece_centres = {
-            piece: sum(self._items[i][0] for i in chars) / len(chars)
+            piece: (
+                self._items[chars[0]][0] - self._char_widths[chars[0]] / 2
+                + self._items[chars[-1]][0] + self._char_widths[chars[-1]] / 2
+            ) / 2
             for piece, chars in self._piece_chars.items() if chars
         }
+        self._piece_widths = {
+            piece: sum(self._char_widths[i] for i in chars)
+            for piece, chars in self._piece_chars.items()
+        }
+        self._row_pieces: dict[int, list[int]] = {}
+        for piece, chars in self._piece_chars.items():
+            if chars:
+                self._row_pieces.setdefault(self._items[chars[0]][1], []).append(piece)
+        self._piece_growth: dict[int, float] = {}
+        self._piece_layout_shift = {piece: 0.0 for piece in self._piece_chars}
 
         # And how long each word is sung for. The light drains on that clock
         # rather than on a fixed number of seconds, because the sweep crossing
@@ -252,8 +271,20 @@ class LineView:
         the line creeping further each time.
         """
         want = self.lean
-        lo = min((a for a, _b in self._row_spans), default=0.0) - self._shift
-        hi = max((b for _a, b in self._row_spans), default=0.0) - self._shift
+        # Leave enough room for every word on a row to complete its strike.
+        # Usually only one or two overlap, but reserving the full possible
+        # width makes a fast phrase no less safe than a slow one.
+        guards = {
+            row: sum(self._piece_widths[piece] for piece in pieces)
+            * self.growth / 2
+            for row, pieces in self._row_pieces.items()
+        }
+        lo = min((a - guards.get(row, 0.0)
+                  for row, (a, _b) in enumerate(self._row_spans)),
+                 default=0.0) - self._shift
+        hi = max((b + guards.get(row, 0.0)
+                  for row, (_a, b) in enumerate(self._row_spans)),
+                 default=0.0) - self._shift
         if want > 0:
             want = max(0.0, min(want, right - hi))
         elif want < 0:
@@ -269,7 +300,53 @@ class LineView:
             self.canvas.move(item, delta, 0)
         for entry in self._items:
             entry[0] += delta
+        for piece in self._piece_centres:
+            self._piece_centres[piece] += delta
         self._row_spans = [(a + delta, b + delta) for a, b in self._row_spans]
+
+    def _set_piece_growth(self, piece: int, shape: float) -> None:
+        """Give an expanding word room without changing the resting layout.
+
+        The row grows about its own centre. Words before a strike breathe left,
+        words after it breathe right, and simultaneous strikes share the same
+        calculation. Because the stored geometry remains at rest, reducing to
+        zero returns to the exact original pixels instead of accumulating
+        rounding drift frame after frame.
+        """
+        shape = max(0.0, min(1.0, float(shape)))
+        if abs(self._piece_growth.get(piece, 0.0) - shape) < 1e-6:
+            return
+        if shape:
+            self._piece_growth[piece] = shape
+        else:
+            self._piece_growth.pop(piece, None)
+        self._reflow_growth()
+
+    def _piece_tag(self, piece: int) -> str:
+        return f"{self._tag}-piece-{piece}"
+
+    def _reflow_growth(self) -> None:
+        desired = {piece: 0.0 for piece in self._piece_layout_shift}
+        for pieces in self._row_pieces.values():
+            extra = {
+                piece: self._piece_widths[piece] * self.growth
+                * self._piece_growth.get(piece, 0.0)
+                for piece in pieces
+            }
+            cursor = -sum(extra.values()) / 2
+            for piece in pieces:
+                desired[piece] = cursor + extra[piece] / 2
+                cursor += extra[piece]
+
+        for piece, target in desired.items():
+            current = self._piece_layout_shift[piece]
+            delta = target - current
+            if abs(delta) < 1e-6:
+                continue
+            # One Tcl round trip for the word, regardless of how many letters,
+            # outlines, halo layers and stand-ins it currently carries.
+            self.canvas.move(self._piece_tag(piece), delta, 0)
+            self._piece_layout_shift[piece] = target
 
     def item_ids(self):
         yield from self._outline
@@ -334,7 +411,9 @@ class LineView:
                 # safely draw light behind text, but it can still let the word
                 # itself move.
                 stand_in = self.canvas.create_image(x, y, anchor="nw",
-                                                    state="hidden")
+                                                    state="hidden",
+                                                    tags=(self._piece_tag(
+                                                        self._char_piece[index]),))
                 self._grown[index] = stand_in
             if not self.palette.glow or self.bloom <= 0:
                 continue
@@ -342,13 +421,17 @@ class LineView:
                 # One image, swapped rather than recoloured. The blur is real,
                 # so a curve does not come out doubled.
                 item = self.canvas.create_image(x - bloom.PAD, y - bloom.PAD,
-                                                anchor="nw", state="hidden")
+                                                anchor="nw", state="hidden",
+                                                tags=(self._piece_tag(
+                                                    self._char_piece[index]),))
                 self.canvas.tag_lower(item, entry[2])
                 self._glow[index] = [item]
                 continue
             items = [self.canvas.create_text(x + dx, y + dy, text=ch, anchor="nw",
                                              font=self._font,
-                                             fill=self.palette.bloom(0.0))
+                                             fill=self.palette.bloom(0.0),
+                                             tags=(self._piece_tag(
+                                                 self._char_piece[index]),))
                      for dx, dy in GLOW_OFFSETS]
             for item in items:
                 self.canvas.tag_lower(item, entry[2])
@@ -441,7 +524,9 @@ class LineView:
             return
         step = round(shape * bloom.SCALES)
         text = self._items[index][2]
+        piece = self._char_piece[index]
         if step <= 0:
+            self._set_piece_growth(piece, 0.0)
             if self._showing.pop(index, None) is not None:
                 self.canvas.itemconfigure(item, state="hidden")
                 self.canvas.itemconfigure(text, state="normal")
@@ -460,8 +545,11 @@ class LineView:
         if made is None:
             return
         image, dx, dy = made
+        # Move the neighbours only once the requested size actually exists.
+        # If the per-frame image budget is spent, both glyph and layout keep
+        # their previous size for that frame instead of disagreeing.
+        self._set_piece_growth(piece, step / bloom.SCALES)
         x, y = self.canvas.coords(text)
-        piece = self._char_piece[index]
         centre = self._piece_centres.get(piece, self._items[index][0])
         scale = 1.0 + self.growth * step / bloom.SCALES
         group_dx = (self._items[index][0] - centre) * (scale - 1.0)

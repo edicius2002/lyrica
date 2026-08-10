@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — 2026-08-10
+
+- Let adjacent words breathe apart while a struck word expands, preserving the
+  resting gap and returning to the exact original layout as it settles.
+- Keep the growth centre attached to lyric lines after they move into a
+  secondary artist's lane.
+- Move left and right ad-libs into gentler inset lanes with eased arrival and
+  departure instead of aligning short phrases against the window edge.
+- Reserve optical edge margins for secondary voices, including the space their
+  word-growth gesture can consume.
+
 ## 0.2.0 — 2026-08-10
 
 - Give every struck word an independent 14% grouped pulse with a fixed motion
