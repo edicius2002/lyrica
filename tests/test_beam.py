@@ -159,6 +159,63 @@ def test_the_shine_stays_lit_with_no_audio_at_all(canvas):
     assert min(_lit(SHINE, 0.0, canvas)) > 20
 
 
+def test_the_ring_has_a_crisp_core_and_a_wider_field(canvas):
+    from lyrica.beam import SHINE, Beam
+
+    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
+    assert len(ring._items) == len(ring._halo_items) > 0
+    core = float(canvas.itemcget(ring._items[0], "width"))
+    halo = float(canvas.itemcget(ring._halo_items[0], "width"))
+    assert halo >= core * 2
+    ring.destroy()
+
+
+def test_music_energy_changes_the_beams_spatial_weight(canvas):
+    from lyrica import palette as pal_mod
+    from lyrica.beam import SHINE, Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.meter import Character
+    from lyrica.songcolour import NEUTRAL
+
+    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
+    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
+    ring.advance(0.0, Character(level=0.0, dynamics=0.0), palette)
+    quiet = float(canvas.itemcget(ring._halo_items[0], "width"))
+    ring.advance(0.0, Character(level=1.0, dynamics=1.0), palette)
+    loud = float(canvas.itemcget(ring._halo_items[0], "width"))
+    assert loud > quiet
+    ring.destroy()
+
+
+def test_the_beam_colour_has_a_contrast_floor():
+    from types import SimpleNamespace
+
+    from lyrica.beam import COLOUR_STOP, MIN_BEAM_DE, _gradient
+    from lyrica.glass import delta_e, rgb_of
+
+    back = (40, 40, 40)
+    palette = SimpleNamespace(backdrop=back, beam="#282828", sung="#ffffff")
+    gradient = _gradient(palette)
+    middle = rgb_of(gradient[round((len(gradient) - 1) * COLOUR_STOP)])
+    assert delta_e(back, middle) >= MIN_BEAM_DE - 1
+
+
+def test_aurora_uses_several_neighbouring_hues(canvas):
+    from lyrica import palette as pal_mod
+    from lyrica.beam import AURORA, Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.meter import Character
+    from lyrica.songcolour import NEUTRAL
+
+    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
+    ring = Beam(canvas, 600, 200, 18, 1.0, AURORA)
+    ring.advance(0.5, Character(level=0.7, dynamics=0.7, rate=0.5), palette)
+    assert len(set(ring._shades)) > 8
+    ring.destroy()
+
+
 def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
     from lyrica import config
 
@@ -166,6 +223,8 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
     assert config.beam_style() == "shine"
     monkeypatch.setenv("LYRICA_BEAM", "shine")
     assert config.beam_style() == "shine"
+    monkeypatch.setenv("LYRICA_BEAM", "aurora")
+    assert config.beam_style() == "aurora"
     monkeypatch.setenv("LYRICA_BEAM", "off")
     assert config.beam_style() == "off"
 

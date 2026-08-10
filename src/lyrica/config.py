@@ -208,15 +208,17 @@ def voice_step() -> float:
     return max(VOICE_STEP_MIN, min(VOICE_STEP_MAX, value))
 
 
-BEAM_STYLES = ("comet", "shine")
+BEAM_STYLES = ("comet", "shine", "aurora")
+BEAM_INTENSITY_MIN, BEAM_INTENSITY_MAX = 0.5, 2.0
+BEAM_INTENSITY_DEFAULT = 1.0
 
 
 def beam_style() -> str:
     """How the border reacts to what is playing: `comet`, `shine` or `off`.
 
     `comet` is a bright head travelling a dark ring. `shine` lights the whole
-    border and rotates a gradient through it, so every edge stays lit and what
-    moves is the colour — quieter to sit beside while reading.
+    border and rotates a luminance gradient. `aurora` rotates neighbouring hues
+    derived from the cover for a more expressive signature.
 
     Either keeps the render loop awake for as long as the overlay is visible,
     which is the one running cost the overlay has that nothing else asks for.
@@ -230,6 +232,23 @@ def beam_style() -> str:
         logger.warning("LYRICA_BEAM=%r is not one of %s or off; using shine",
                        raw, ", ".join(BEAM_STYLES))
     return "shine"
+
+
+def beam_intensity() -> float:
+    """Visual weight of the border's core and halo, 0.5 to 2.0."""
+    raw = os.environ.get("LYRICA_BEAM_INTENSITY", "").strip()
+    if not raw:
+        return BEAM_INTENSITY_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("LYRICA_BEAM_INTENSITY=%r is not a number; using %s",
+                       raw, BEAM_INTENSITY_DEFAULT)
+        return BEAM_INTENSITY_DEFAULT
+    if not BEAM_INTENSITY_MIN <= value <= BEAM_INTENSITY_MAX:
+        logger.warning("LYRICA_BEAM_INTENSITY=%s is outside %s-%s; clamping",
+                       value, BEAM_INTENSITY_MIN, BEAM_INTENSITY_MAX)
+    return max(BEAM_INTENSITY_MIN, min(BEAM_INTENSITY_MAX, value))
 
 
 def settings_path() -> Path:
