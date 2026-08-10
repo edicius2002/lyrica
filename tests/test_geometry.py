@@ -5,6 +5,8 @@ the panel has two sizes, and code written for one of them assumed the other.
 """
 import itertools
 
+import pytest
+
 from lyrica import motion
 
 
@@ -161,6 +163,63 @@ def test_a_line_moves_to_the_new_centre_when_the_window_widens(tk_root):
     view.recentre(504)                      # idempotent
     assert abs(centre(view) - 504) < 1
     view.destroy()
+
+
+@pytest.mark.parametrize("scale", [0.6, 1.0, 2.0])
+def test_full_growth_stays_inside_the_horizontal_box_at_every_scale(tk_root,
+                                                                     scale):
+    import tkinter as tk
+
+    from lyrica.lineview import LineView
+    from lyrica.palette import DEFAULT
+
+    width = round(900 * scale)
+    text = "wide words keep every glowing letter inside the lyric window"
+    words = [(0.0, 1.0, word) for word in text.split()]
+    canvas = tk.Canvas(tk_root, width=width, height=round(320 * scale))
+    view = LineView(
+        canvas, width / 2, 40, text, words,
+        font=("Segoe UI", round(-30 * scale), "bold"),
+        wrap=round(760 * scale), palette=DEFAULT, scale=scale, growth=0.14)
+    try:
+        for row, (left, right) in enumerate(view._row_spans):
+            guard = sum(view._piece_widths[p] for p in view._row_pieces[row]) \
+                * view.growth / 2
+            assert left - guard - view.effect_padding >= 0
+            assert right + guard + view.effect_padding <= width
+    finally:
+        view.destroy()
+        canvas.destroy()
+
+
+@pytest.mark.parametrize("scale", [0.6, 1.0, 2.0])
+def test_a_transition_is_clamped_by_complete_glyph_bounds(tk_root, scale):
+    import tkinter as tk
+
+    from lyrica import app as A
+    from lyrica.lineview import LineView
+    from lyrica.palette import DEFAULT
+
+    height = round(A.HEIGHT * scale)
+    canvas = tk.Canvas(tk_root, width=round(A.WIDTH * scale), height=height)
+    view = LineView(
+        canvas, round(A.WIDTH * scale) / 2, height, "whole letters", [],
+        font=("Segoe UI", round(-30 * scale), "bold"),
+        wrap=round(A.WRAP * scale), palette=DEFAULT, scale=scale, growth=0.14)
+
+    class Panel:
+        pass
+
+    panel = Panel()
+    panel.height = height
+    try:
+        for wanted in (-1000, height / 2, height + 1000):
+            view.move_to(A.Overlay._safe_view_y(panel, view, wanted))
+            top, bottom = view.visual_vertical_span()
+            assert 0 <= top <= bottom <= height
+    finally:
+        view.destroy()
+        canvas.destroy()
 
 
 

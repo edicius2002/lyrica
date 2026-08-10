@@ -17,14 +17,20 @@ from pathlib import Path
 from PIL import ImageGrab
 
 from lyrica import bloom
-from lyrica.app import ECHO_LANE_STEP, ECHO_SAFE_MARGIN, VOICE_SAFE_MARGIN
+from lyrica.app import (
+    ECHO_CORNER_INSET,
+    ECHO_DROP,
+    ECHO_SAFE_MARGIN,
+    ROW_GAP,
+    VOICE_SAFE_MARGIN,
+)
 from lyrica.beam import SHINE, Beam
 from lyrica.chrome import prepare
 from lyrica.lineview import GROW_ATTACK_S, LineView
 from lyrica.meter import Character
 from lyrica.palette import DEFAULT
 
-WIDTH, HEIGHT = 900, 300
+WIDTH, HEIGHT = 900, 320
 BACKGROUND = "#10131a"
 FONT = ("Segoe UI", -30, "bold")
 SMALL = ("Segoe UI", -20, "italic")
@@ -95,20 +101,32 @@ class Renderer:
 
     def backing_vocal(self) -> None:
         self.clear()
-        lead = LineView(self.canvas, 290, 105, "Stay with me tonight",
+        lead = LineView(self.canvas, 290, 94, "Stay with me tonight",
                         words("Stay with me tonight"), font=FONT, wrap=520,
                         palette=DEFAULT)
-        echo = LineView(self.canvas, WIDTH // 2, 174, "(right here)",
+        echo_y = (lead.y + lead.height - lead.line_height
+                  + lead.line_height * ECHO_DROP)
+        echo = LineView(self.canvas, WIDTH // 2, echo_y, "(right here)",
                         words("right here"), font=SMALL, wrap=300,
-                        palette=DEFAULT.dimmed(0.72), lean=ECHO_LANE_STEP)
+                        palette=DEFAULT.dimmed(0.72))
+        echo_width = max(b - a for a, b in echo._row_spans)
+        corner = max(b for _a, b in lead._row_spans)
+        echo.lean = (corner - ECHO_CORNER_INSET + echo_width / 2
+                     - WIDTH / 2)
         echo.fit(ECHO_SAFE_MARGIN, WIDTH - ECHO_SAFE_MARGIN)
+        following = LineView(
+            self.canvas, 610, lead.y + lead.height + ROW_GAP,
+            "Don't let it fade", words("Don't let it fade"), font=FONT,
+            wrap=520, palette=DEFAULT)
         lead.set_active(True)
         lead.show_sweep(2, 0.35)
         echo.set_active(True)
         echo.show_sweep(0, 0.65)
+        following.show_inactive(DEFAULT.side)
         self.capture("backing-vocal")
         lead.destroy()
         echo.destroy()
+        following.destroy()
 
     def beam(self, name: str, character: Character) -> None:
         self.clear()

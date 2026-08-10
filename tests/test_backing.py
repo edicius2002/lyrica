@@ -64,12 +64,16 @@ def test_it_sweeps_on_its_own_timings_while_it_is_sung(panel):
     assert len(_shown(panel)) > 1, "a single colour means it is not sweeping"
 
 
-def test_it_sits_below_the_line_and_off_at_the_right_margin(panel):
+def test_it_hangs_from_the_lines_lower_right_corner(panel):
+    from lyrica.app import ECHO_CORNER_INSET
+
     panel._show_backing(panel.lyrics, 1.3)
     line, echo = panel._views[0], panel._echo
     assert echo.y > line.y + line.line_height * 0.5, "it has to clear the line"
     left = min(s for s, _e in echo._row_spans)
-    assert left > max(e for _s, e in line._row_spans), "and not touch it"
+    corner = max(e for _s, e in line._row_spans)
+    assert left == pytest.approx(
+        corner - panel.chrome.px(ECHO_CORNER_INSET), abs=1.5)
 
 
 def test_it_answers_from_the_lane_opposite_the_lead(panel):
@@ -80,46 +84,70 @@ def test_it_answers_from_the_lane_opposite_the_lead(panel):
     active_centre = sum(active._row_spans[0]) / 2
     echo_centre = sum(echo._row_spans[0]) / 2
     assert active_centre > panel.width / 2
-    assert echo_centre < panel.width / 2
+    assert echo_centre < active_centre
 
 
-def test_left_and_right_adlibs_stay_in_gentle_safe_lanes(panel):
-    from lyrica.app import ECHO_LANE_STEP, ECHO_SAFE_MARGIN
+def test_left_and_right_adlibs_stay_on_safe_outer_corners(panel):
+    from lyrica.app import ECHO_CORNER_INSET, ECHO_SAFE_MARGIN
 
-    middle = panel.width / 2
-    lane = panel.chrome.px(ECHO_LANE_STEP)
+    inset = panel.chrome.px(ECHO_CORNER_INSET)
     margin = panel.chrome.px(ECHO_SAFE_MARGIN)
 
     panel._show_backing(panel.lyrics, 1.3)
     right = panel._echo
-    right_centre = sum(right._row_spans[0]) / 2
-    assert middle < right_centre <= middle + lane + 1
+    active = panel._views[0]
+    assert min(a for a, _b in right._row_spans) == pytest.approx(
+        max(b for _a, b in active._row_spans) - inset, abs=1.5)
     assert max(b for _a, b in right._row_spans) <= panel.width - margin
 
     panel._clear_backing()
     panel._go_to_line(1, panel.lyrics)
     panel._show_backing(panel.lyrics, 3.3)
     left = panel._echo
-    left_centre = sum(left._row_spans[0]) / 2
-    assert middle - lane - 1 <= left_centre < middle
+    active = panel._views[1]
+    assert max(b for _a, b in left._row_spans) == pytest.approx(
+        min(a for a, _b in active._row_spans) + inset, abs=1.5)
     assert min(a for a, _b in left._row_spans) >= margin
 
 
 def test_an_adlib_eases_into_and_out_of_its_lane(panel):
     from lyrica.app import ECHO_EXIT_LANE, ECHO_FADE_S
 
-    middle = panel.width / 2
+    active = panel._views[0]
+    origin = sum(active._row_spans[-1]) / 2
     opens = 1.0 - ECHO_FADE_S
     panel._show_backing(panel.lyrics, opens)
-    opening = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+    opening = abs(sum(panel._echo._row_spans[0]) / 2 - origin)
 
     panel._show_backing(panel.lyrics, 1.0)
-    settled = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+    settled = abs(sum(panel._echo._row_spans[0]) / 2 - origin)
     assert 0 < opening < settled, "it still jumped directly to the full lane"
 
     panel._show_backing(panel.lyrics, 1.7 + ECHO_FADE_S)
-    leaving = abs(sum(panel._echo._row_spans[0]) / 2 - middle)
+    leaving = abs(sum(panel._echo._row_spans[0]) / 2 - origin)
     assert settled * (ECHO_EXIT_LANE - 0.05) <= leaving < settled
+
+
+def test_the_row_gap_contains_the_complete_adlib_and_next_line(panel):
+    panel._show_backing(panel.lyrics, 1.3)
+    echo_bottom = panel._echo.visual_vertical_span()[1]
+    next_top = panel._views[1].visual_vertical_span()[0]
+    assert echo_bottom <= next_top, (
+        "the ad-lib still shares pixels with the line below")
+
+
+def test_every_transition_endpoint_keeps_complete_glyphs_on_canvas(panel):
+    panel._go_to_line(1, panel.lyrics)
+    for index, view in panel._views.items():
+        places = (view.y, panel._targets[index])
+        original = view.y
+        try:
+            for y in places:
+                view.move_to(y)
+                top, bottom = view.visual_vertical_span()
+                assert 0 <= top <= bottom <= panel.height
+        finally:
+            view.move_to(original)
 
 
 def test_its_own_window_is_what_takes_it_down(panel):

@@ -15,6 +15,7 @@ change that also changed size would force a relayout, which is a rebuild
 wearing a different name — and it matches the reference, where lines differ by
 brightness rather than by scale.
 """
+import math
 import time
 import tkinter as tk
 from tkinter import font as tkfont
@@ -229,6 +230,24 @@ class LineView:
                                            - min(s for s, _e, _x in timed))
 
         self.height = len(rows) * self.line_height
+
+    @property
+    def effect_padding(self) -> int:
+        """Maximum ink outside the resting line box, in canvas pixels.
+
+        A line's nominal height does not include either the bloom or the half
+        of its own height gained by growing about its centre. Geometry that
+        ignores both lets a transition show a perfectly laid-out text item and
+        still cuts the visible glyph image at the window edge.
+        """
+        halo = bloom.OUTER_RADIUS if self.bloom > 0 and self.palette.glow else 0
+        growth = self.line_height * self.growth / 2
+        return math.ceil(max(self.palette.outline, halo) + growth)
+
+    def visual_vertical_span(self) -> tuple[float, float]:
+        """Top and bottom of every possible visible pixel in this line."""
+        pad = self.effect_padding
+        return self.y - pad, self.y + self.height + pad
 
     # --- lifecycle ---
     def move_to(self, y: float) -> None:

@@ -52,9 +52,12 @@ from lyrica.sessions import Snapshot, create_reader
 # Three lines: the one before, the one being sung, and the one coming. The
 # height follows from that plus the card and a fade band at each edge — it is
 # derived, not chosen, and shrinking the count is what shrinks the window.
-WIDTH, HEIGHT = 900, 300
-WRAP = 800
-ROW_GAP = 10
+WIDTH, HEIGHT = 900, 320
+WRAP = 760
+# A backing line occupies the lower corner between two main rows. This gap
+# includes the echo font, its outer bloom and both lines' maximum growth, so a
+# response never has to share pixels with the line arriving below it.
+ROW_GAP = 50
 
 # The band at each edge where a line fades away. Shallower now that only one
 # line sits either side: deep enough to read as a fade rather than a cut,
@@ -89,7 +92,7 @@ FONT_ECHO = ("Segoe UI", -20, "italic")
 # Measured against the render this was chosen from, where the drop was one
 # font size: a line's height is its linespace, half again as much, so the same
 # look asks for two thirds of it.
-ECHO_DROP = 0.66
+ECHO_DROP = 0.72
 ECHO_KEEP = 0.72
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
@@ -97,12 +100,9 @@ ECHO_KEEP = 0.72
 # as one — so it comes and goes on that window rather than on the line's.
 ECHO_FADE_S = 0.30
 
-# Backing vocals answer from a side, not from the edge. The old placement
-# aligned their outer edge to the panel margin, so a short "(yeah)" travelled
-# more than 400 designed pixels and its growth crossed the window boundary.
-# This lane is deliberately gentler than a duet's, with a larger safe area for
-# italic overhang, bloom and the word-growth gesture.
-ECHO_LANE_STEP = 112
+# Backing vocals hang from the lower outer corner of the line they answer. The
+# inset lets the two boxes meet visually without laying one word over another.
+ECHO_CORNER_INSET = 10
 ECHO_SAFE_MARGIN = 44
 ECHO_ENTRY_LANE = 0.55
 ECHO_EXIT_LANE = 0.75
@@ -324,6 +324,8 @@ class Overlay:
         self._echo = None
         self._echo_line = -1
         self._echo_side = 0
+        self._echo_origin_lean = 0.0
+        self._echo_target_lean = 0.0
         self._echo_words: list = []
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
@@ -1374,6 +1376,11 @@ class Overlay:
                 bloom=self._bloom, growth=self._growth,
                 lean=sides.get(lyr.voice_at(index), 0)
                 * self.chrome.px(self._voice_step))
+            # A row used to be born beyond the window and enter letter by
+            # letter. Fading hid most of it, but at intermediate opacity the
+            # edge still cut a glyph. Its first position now contains the full
+            # maximum-growth box; every later glide lies between safe endpoints.
+            view.move_to(self._safe_view_y(view, start_y))
             self._views[index] = view
             self._fit_view(view)
         self._views_width = self.width
@@ -1397,13 +1404,25 @@ class Overlay:
         margin = self.chrome.px(VOICE_SAFE_MARGIN)
         view.fit(margin, self.width - margin)
 
+    def _safe_view_y(self, view: LineView, wanted: float) -> float:
+        """Nearest vertical position whose complete visual box is on-canvas."""
+        pad = view.effect_padding
+        low = float(pad)
+        high = float(self.height - view.height - pad)
+        if high < low:
+            # A pathological multi-row line taller than the panel cannot be
+            # made to fit by choosing an edge. Centre it, which loses equally
+            # at both ends instead of silently preferring half of one glyph.
+            return (self.height - view.height) / 2
+        return max(low, min(float(wanted), high))
+
     def _show_backing(self, lyr: Lyrics, pos: float) -> None:
-        """Draw what is sung behind the active line, in the open voice lane.
+        """Draw what is sung behind the active line, on its lower corner.
 
         It sits below the line without joining the main column's row stack, so
         its arrival never pushes the lyrics up or down. Horizontally it occupies
-        the lane opposite the lead, inset from the edge rather than aligned to
-        it.
+        the outer lower corner opposite the lead, close to the line's final
+        letters rather than to the panel edge.
 
         It sweeps on its own timings, which the source gives it, and it has to:
         a backing vocal answers the line while the line is still being sung, and
@@ -1432,10 +1451,22 @@ class Overlay:
             self.canvas, self.width // 2, _below(active), text, words,
             font=self.f_echo, wrap=self.wrap // 2,
             palette=self.palette.dimmed(ECHO_KEEP),
-            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth,
-            lean=echo_side * self.chrome.px(ECHO_LANE_STEP))
+            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
         self._echo_line, self._echo_words = self.line_index, words
         self._echo_side = echo_side
+        active_left, active_right = active._row_spans[-1]
+        echo_left = min(a for a, _b in self._echo._row_spans)
+        echo_right = max(b for _a, b in self._echo._row_spans)
+        echo_width = echo_right - echo_left
+        inset = self.chrome.px(ECHO_CORNER_INSET)
+        origin = (active_left + active_right) / 2
+        target = (active_right - inset + echo_width / 2
+                  if echo_side > 0
+                  else active_left + inset - echo_width / 2)
+        middle = self.width / 2
+        self._echo_origin_lean = origin - middle
+        self._echo_target_lean = target - middle
+        self._echo.move_to(self._safe_view_y(self._echo, _below(active)))
         self._advance_backing(pos)
 
     def _advance_backing(self, pos: float) -> bool:
@@ -1454,11 +1485,10 @@ class Overlay:
             return False
         anchor = self._views.get(self._echo_line)
         if anchor is not None:
-            self._echo.move_to(_below(anchor))
-        # Enter from part-way into the selected lane and settle there with an
-        # ordinary ease-in-out. On departure it yields only a quarter of the
-        # step, so it recedes rather than darting across the line. The same
-        # signed calculation handles left and right symmetrically.
+            self._echo.move_to(self._safe_view_y(self._echo, _below(anchor)))
+        # Enter from the lead towards its corner and settle there with an
+        # ordinary ease-in-out. On departure it yields only a quarter of that
+        # short journey, so the response remains attached to the phrase.
         if pos < words[0][0]:
             phase = (pos - opens) / ECHO_FADE_S
             lane = ECHO_ENTRY_LANE + (1.0 - ECHO_ENTRY_LANE) * motion.cubic_bezier(
@@ -1469,7 +1499,8 @@ class Overlay:
                 phase, motion.RESIZE_CURVE)
         else:
             lane = 1.0
-        self._echo.lean = (self._echo_side * self.chrome.px(ECHO_LANE_STEP)
+        self._echo.lean = (self._echo_origin_lean
+                           + (self._echo_target_lean - self._echo_origin_lean)
                            * lane)
         margin = self.chrome.px(ECHO_SAFE_MARGIN)
         self._echo.fit(margin, self.width - margin)
@@ -1495,6 +1526,7 @@ class Overlay:
         if self._echo is not None:
             self._echo.destroy()
         self._echo, self._echo_line, self._echo_side = None, -1, 0
+        self._echo_origin_lean = self._echo_target_lean = 0.0
         self._echo_words: list = []
 
     def _refit_views(self) -> None:
@@ -1539,16 +1571,17 @@ class Overlay:
             # so it travels in with the rest. Snapping it into place was what
             # made arriving lines land on top of lines still moving.
             previous = self._targets.get(index, view.y)
-            self._targets[index] = y
+            target = self._safe_view_y(view, y)
+            self._targets[index] = target
             if not animate:
-                view.move_to(y)
+                view.move_to(target)
                 self._glides.pop(index, None)
-            elif abs(previous - y) >= 1:
+            elif abs(previous - target) >= 1:
                 # Displacement decaying, not a position being driven: a change
                 # landing mid-glide adds to the journey instead of restarting it.
                 remaining = self._glides[index].offset() if index in self._glides else 0.0
                 self._glides[index] = motion.Glide(
-                    previous - y + remaining,
+                    previous - target + remaining,
                     motion.row_duration(index, self.line_index))
             y += view.height + self.row_gap
 
@@ -1702,7 +1735,7 @@ class Overlay:
         has already faded out by the time the edge would cut it.
         """
         fade = max(1, self.chrome.px(FADE_ZONE))
-        top, bottom = view.y, view.y + view.height
+        top, bottom = view.visual_vertical_span()
         room = min((top - self._content_top) / fade,
                    (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
