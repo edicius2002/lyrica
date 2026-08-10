@@ -163,7 +163,7 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
     from lyrica import config
 
     monkeypatch.setenv("LYRICA_BEAM", "sparkles")
-    assert config.beam_style() == "comet"
+    assert config.beam_style() == "shine"
     monkeypatch.setenv("LYRICA_BEAM", "shine")
     assert config.beam_style() == "shine"
     monkeypatch.setenv("LYRICA_BEAM", "off")

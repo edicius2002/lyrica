@@ -230,9 +230,9 @@ def beam_style() -> str:
     if raw in BEAM_STYLES:
         return raw
     if raw:
-        logger.warning("LYRICA_BEAM=%r is not one of %s or off; using comet",
+        logger.warning("LYRICA_BEAM=%r is not one of %s or off; using shine",
                        raw, ", ".join(BEAM_STYLES))
-    return "comet"
+    return "shine"
 
 
 def settings_path() -> Path:

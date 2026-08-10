@@ -4,6 +4,7 @@ These run on Windows, macOS and CI alike — nothing here touches a real media
 session. The macOS mapping is covered against the documented output shape,
 which is the only verification available without a Mac.
 """
+import asyncio
 import sys
 from datetime import UTC, datetime
 
@@ -12,6 +13,7 @@ import pytest
 from lyrica import sessions
 from lyrica.sessions import NullSessionReader, Snapshot, create_reader
 from lyrica.sessions.macos import parse_timestamp, snapshot_from_payload
+from lyrica.sessions.windows import WindowsSessionReader, _RestartReadLoop
 
 # Shape documented by `media-control get`. Only bundleIdentifier, playing and
 # title are guaranteed; everything else is optional.
@@ -79,6 +81,40 @@ def test_a_reader_that_raises_while_checking_does_not_stop_startup(monkeypatch):
 
     monkeypatch.setattr(sessions, "reader_classes", lambda: [Exploding])
     assert isinstance(create_reader(), NullSessionReader)
+
+
+def test_a_cancelled_windows_read_recreates_its_event_loop(monkeypatch):
+    reader = WindowsSessionReader()
+    attempts = []
+    delays = []
+
+    async def read_loop():
+        attempts.append(None)
+        if len(attempts) < 3:
+            raise _RestartReadLoop()
+        reader._stop.set()
+
+    monkeypatch.setattr(reader, "_loop", read_loop)
+    monkeypatch.setattr(reader._stop, "wait", delays.append)
+
+    reader._run()
+
+    assert len(attempts) == 3
+    assert delays == [1.0, 2.0]
+
+
+def test_a_cancelled_windows_operation_requests_a_restart(monkeypatch):
+    reader = WindowsSessionReader()
+
+    async def cancelled_read():
+        raise OSError("RPC_E_CALL_CANCELED")
+
+    monkeypatch.setattr(reader, "_read", cancelled_read)
+
+    with pytest.raises(_RestartReadLoop):
+        asyncio.run(reader._loop())
+
+    assert reader.snapshot == Snapshot()
 
 
 def test_the_null_reader_reports_nothing_playing():

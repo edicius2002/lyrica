@@ -16,6 +16,19 @@ from lyrica.sessions.base import SessionReader, Snapshot
 
 logger = logging.getLogger(__name__)
 
+# `request_async()` normally finishes in a few milliseconds. When the media
+# controls broker is restarting, though, WinRT can leave the await pending or
+# reject the COM call with RPC_E_CALL_CANCELED. Do not leave the reader thread
+# stranded on either outcome: cancelling the await lets asyncio dispose of the
+# operation before a fresh loop is made.
+READ_TIMEOUT_S = 5.0
+RETRY_INITIAL_S = 1.0
+RETRY_MAX_S = 30.0
+
+
+class _RestartReadLoop(Exception):
+    """A WinRT operation needs a fresh asyncio loop before it is retried."""
+
 
 def _session_manager_class():
     from winsdk.windows.media.control import (
@@ -106,12 +119,37 @@ class WindowsSessionReader(SessionReader):
         return bytes(out)
 
     def _run(self):
-        asyncio.run(self._loop())
+        delay = RETRY_INITIAL_S
+        while not self._stop.is_set():
+            try:
+                asyncio.run(self._loop())
+                return
+            except _RestartReadLoop:
+                # `asyncio.run` closes this loop, cancelling anything left by
+                # the rejected WinRT call. Starting it again is important:
+                # retrying on the same loop can keep talking to the stale COM
+                # operation that caused the failure.
+                if self._stop.is_set():
+                    return
+                logger.info("restarting media-session reader in %.0fs", delay)
+                self._stop.wait(delay)
+                delay = min(RETRY_MAX_S, delay * 2)
 
     async def _loop(self):
         while not self._stop.is_set():
             try:
-                self.snapshot = await self._read()
+                self.snapshot = await asyncio.wait_for(
+                    self._read(), timeout=READ_TIMEOUT_S,
+                )
+            except (OSError, TimeoutError) as error:
+                # A cancelled COM call is not a statement that no player is
+                # running. Publish the neutral value only until the fresh
+                # loop gets a real answer, then back off so a Windows broker
+                # restart is not hammered hundreds of times a minute.
+                logger.warning("media session read interrupted; restarting reader: %s",
+                               error)
+                self.snapshot = Snapshot()
+                raise _RestartReadLoop from error
             except Exception:
                 # Deliberately broad: this thread is the overlay's only source
                 # of truth, and if it dies the window freezes on a stale line
