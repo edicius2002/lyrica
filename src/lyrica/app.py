@@ -1434,6 +1434,7 @@ class Overlay:
         # of a phrase, so the line moves on exactly as it is fading. Tying it to
         # the line is what made it vanish mid-fade instead of sinking away.
         if self._echo is not None and self._advance_backing(pos):
+            self._order_text_layers()
             return
         self._clear_backing()
 
@@ -1468,6 +1469,7 @@ class Overlay:
         self._echo_target_lean = target - middle
         self._echo.move_to(self._safe_view_y(self._echo, _below(active)))
         self._advance_backing(pos)
+        self._order_text_layers()
 
     def _advance_backing(self, pos: float) -> bool:
         """Carry the backing through its own window. False once it is spent.
@@ -1528,6 +1530,25 @@ class Overlay:
         self._echo, self._echo_line, self._echo_side = None, -1, 0
         self._echo_origin_lean = self._echo_target_lean = 0.0
         self._echo_words: list = []
+
+    def _order_text_layers(self) -> None:
+        """Keep opaque fading glyphs below the text they must never cover."""
+        active = self._views.get(self.line_index)
+        for index, view in self._views.items():
+            if index != self.line_index:
+                view.raise_layer()
+        if self._echo is not None:
+            self._echo.raise_layer()
+        if active is not None:
+            active.raise_layer()
+
+        # Lyric views are created after the permanent card, so without an
+        # explicit order even a fully faded (background-coloured) glyph can
+        # punch black letter shapes through the title or artist.
+        for item in (self._thumb_item, self._thumb_image,
+                     self._title_item, self._artist_item):
+            if item is not None:
+                self.canvas.tag_raise(item)
 
     def _refit_views(self) -> None:
         """Keep the lines centred on the window they are actually in.
@@ -1747,9 +1768,14 @@ class Overlay:
                 continue
             active = index == self.line_index
             view.set_active(active)
-            if not active:
-                view.show_inactive(self.palette.faded(
-                    abs(index - self.line_index), self._visibility(view)))
+            if active:
+                view.set_visible(True)
+                continue
+            visibility = self._visibility(view)
+            view.set_visible(visibility > 0.0)
+            view.show_inactive(self.palette.faded(
+                abs(index - self.line_index), visibility))
+        self._order_text_layers()
 
     def run(self):
         self.reader.start()
