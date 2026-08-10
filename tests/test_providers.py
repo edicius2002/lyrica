@@ -237,7 +237,8 @@ def test_candidates_stop_at_a_definitive_answer(monkeypatch):
     seen = []
     # Word level, because the real provider list contains a word-capable source
     # and a line-level answer therefore leaves something worth looking for.
-    word_level = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 0.5, "a")]], synced=True)
+    word_level = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 0.5, "a")]],
+                        synced=True, voices=["v1", "v2"])
 
     def fake_fetch(artist, title, duration=0.0, album=""):
         seen.append(title)
@@ -246,6 +247,24 @@ def test_candidates_stop_at_a_definitive_answer(monkeypatch):
     monkeypatch.setattr(providers, "fetch_lyrics", fake_fetch)
     providers.fetch_for_candidates([("A", "strong"), ("A", "never")])
     assert seen == ["strong"]
+
+
+def test_candidates_keep_looking_for_the_staged_performance(monkeypatch):
+    seen = []
+    flat = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 0.5, "a")]], synced=True)
+    staged = Lyrics(lines=[(0.0, "a")], words=[[(0.0, 0.5, "a")]],
+                    synced=True, backing=["(oh)"],
+                    backing_words=[[(0.1, 0.4, "oh")]])
+
+    def fake_fetch(artist, title, duration=0.0, album=""):
+        seen.append(title)
+        return flat if title == "channel title" else staged
+
+    monkeypatch.setattr(providers, "fetch_lyrics", fake_fetch)
+    result = providers.fetch_for_candidates(
+        [("A", "channel title"), ("A", "catalogue title")])
+    assert result is staged
+    assert seen == ["channel title", "catalogue title"]
 
 
 def test_no_candidates_returns_none(monkeypatch):
