@@ -82,7 +82,9 @@ in disagreement, spent before a long word was half lit and still burning after a
 short one had gone. `off` removes it.
 
 The **growth** is the word swelling and settling back. `LYRICA_GROWTH` sets it
-as a fraction, default 0.11, `off` to remove it. It has a floor that is not a
+as a fraction, default 0.14, `off` to remove it. It has its own short motion
+clock, independent of the bloom, so a quick word and a held word make the same
+readable gesture. Turning the bloom off leaves the growth in place. It has a floor that is not a
 matter of taste: below about a tenth, several of its steps render to the same
 whole-pixel size and a third of the frames show an identical picture. There is
 no room to brighten a word instead — the sung colour is already at 253 of 255 —
@@ -94,8 +96,9 @@ image and swapped back after, which is also why, for as long as a word is
 growing, its letters are either sung or unsung with nothing between — baking
 the ramp's sixty-four steps into images would have been 21,504 of them.
 
-The bloom is a real gaussian blur, drawn with PIL and handed to the canvas as an
-image rather than faked with offset copies of the glyph. That is not only
+The bloom is a two-stage gaussian blur: a tight core and a wider, quieter field,
+drawn with PIL and handed to the canvas as an image rather than faked with
+offset copies of the glyph. That is not only
 truer — four copies two pixels apart double every curve — but twenty times
 cheaper per frame, since showing a different image costs 0.005 ms where
 recolouring four items costs 0.21.
