@@ -22,8 +22,8 @@ from lyrica.glass import delta_e, hex_of, rgb_of
 # less than one segment and reads as a chamfer rather than a curve. The corners
 # are therefore given a fixed budget of their own and the straights share what
 # is left by length.
-CORNER_POINTS = 7
-STRAIGHT_SPACING = 34.0
+CORNER_POINTS = 9
+STRAIGHT_SPACING = 16.0
 
 # Two ways to light the edge.
 #
@@ -94,7 +94,7 @@ GAIN = 0.38
 # Where the tail stops being the song's colour and starts becoming the head.
 # Below this the beam fades out to nothing; above it, up to white.
 COLOUR_STOP = 0.55
-GRADIENT_STEPS = 48
+GRADIENT_STEPS = 96
 
 
 def _rounded_path(width: int, height: int, radius: int,
@@ -219,17 +219,22 @@ class Beam:
         """Lay the ring out again, for a window that changed size."""
         self.destroy()
         points = _rounded_path(width, height, radius, self._halo_width / 2)
-        for i, start in enumerate(points):
-            end = points[(i + 1) % len(points)]
+        segments = [(start, points[(i + 1) % len(points)])
+                    for i, start in enumerate(points)]
+        # Every halo first, then every core. Interleaving them lets the wide
+        # halo of segment N+1 cover the end of core N, turning a continuous
+        # gradient into a dashed line at every join.
+        for start, end in segments:
             halo = self.canvas.create_line(*start, *end, width=self._halo_width,
                                            fill="#000000", capstyle="round",
                                            tags=(self._halo_tag,))
+            self._halo_items.append(halo)
+            self._halo_shades.append("#000000")
+        for start, end in segments:
             core = self.canvas.create_line(*start, *end, width=self._core_width,
                                            fill="#000000", capstyle="round",
                                            tags=(self._core_tag,))
-            self._halo_items.append(halo)
             self._items.append(core)
-            self._halo_shades.append("#000000")
             self._shades.append("#000000")
 
     def destroy(self) -> None:

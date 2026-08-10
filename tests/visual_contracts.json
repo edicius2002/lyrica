@@ -1,0 +1,19 @@
+{
+  "word_strike": {
+    "growth": 0.14,
+    "attack_ms": 105,
+    "settle_ms": 270,
+    "inner_glow_radius": 3,
+    "outer_glow_radius": 11
+  },
+  "duet": {
+    "panel_width": 900,
+    "lane_step": 160,
+    "minimum_separation_ratio": 0.30
+  },
+  "beam": {
+    "core_width": 3.0,
+    "halo_width": 9.0,
+    "minimum_delta_e": 18.0
+  }
+}
