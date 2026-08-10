@@ -222,6 +222,27 @@ def test_a_transition_is_clamped_by_complete_glyph_bounds(tk_root, scale):
         canvas.destroy()
 
 
+def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "line before"), (3.0, "line illuminated"),
+               (6.0, "line entering")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(1, lyrics)
+
+    stack = {item: position
+             for position, item in enumerate(overlay.canvas.find_all())}
+    active = list(overlay._views[1].item_ids())
+    inactive = [item for index, view in overlay._views.items() if index != 1
+                for item in view.item_ids()]
+    assert min(stack[item] for item in active) > max(stack[item] for item in inactive)
+    assert min(stack[item] for item in (overlay._title_item, overlay._artist_item)) \
+        > max(stack[item] for view in overlay._views.values()
+              for item in view.item_ids())
+
+
 
 def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch):
     # One built while the panel is compact leaves bare panel showing for the

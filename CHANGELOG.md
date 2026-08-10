@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 — 2026-08-10
+
+- Hide lyric lines once their edge fade reaches zero instead of leaving opaque
+  background-coloured glyphs on the canvas.
+- Keep the song card above every lyric and the active line above inactive and
+  backing lines, preventing dark text from covering illuminated content.
+
 ## 0.2.3 — 2026-08-10
 
 - Blur only the lyric halo's alpha mask and apply its colour afterwards, so

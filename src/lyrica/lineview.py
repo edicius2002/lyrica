@@ -136,6 +136,7 @@ class LineView:
         self._budget = 0            # new sizes still allowed this frame
         self._blooming = False
         self._active = False
+        self._visible = True
         self._state = None
 
         font_obj = tkfont.Font(font=font)
@@ -180,11 +181,11 @@ class LineView:
                     outline = [canvas.create_text(x + dx, row_y + dy, text=ch,
                                                   anchor="nw", font=font,
                                                   fill=OUTLINE_COLOUR,
-                                                  tags=(piece_tag,))
+                                                  tags=(self._tag, piece_tag))
                                for dx, dy in ring_offsets(palette.outline)]
                     item = canvas.create_text(x, row_y, text=ch, anchor="nw",
                                               font=font, fill=palette.side,
-                                              tags=(piece_tag,))
+                                              tags=(self._tag, piece_tag))
                     self._items.append([x + adv / 2, r, item, palette.side])
                     self._char_widths.append(adv)
                     self._char_piece.append(_token_index)
@@ -377,6 +378,29 @@ class LineView:
         # constant size while its line glided would come adrift of its own word.
         yield from self._grown.values()
 
+    def raise_layer(self) -> None:
+        """Raise the complete line while preserving its internal item order."""
+        self.canvas.tag_raise(self._tag)
+
+    def set_visible(self, visible: bool) -> None:
+        """Actually hide a spent line instead of painting opaque background."""
+        visible = bool(visible)
+        if visible == self._visible:
+            return
+        self._visible = visible
+        state = "normal" if visible else "hidden"
+        for item in self._outline:
+            self.canvas.itemconfigure(item, state=state)
+        for index, entry in enumerate(self._items):
+            text_state = "hidden" if visible and index in self._showing else state
+            self.canvas.itemconfigure(entry[2], state=text_state)
+        if not visible:
+            for items in self._glow.values():
+                for item in items:
+                    self.canvas.itemconfigure(item, state="hidden")
+            for item in self._grown.values():
+                self.canvas.itemconfigure(item, state="hidden")
+
     def destroy(self) -> None:
         for item in self.item_ids():
             self.canvas.delete(item)
@@ -431,8 +455,8 @@ class LineView:
                 # itself move.
                 stand_in = self.canvas.create_image(x, y, anchor="nw",
                                                     state="hidden",
-                                                    tags=(self._piece_tag(
-                                                        self._char_piece[index]),))
+                                                    tags=(self._tag, self._piece_tag(
+                                                        self._char_piece[index])))
                 self._grown[index] = stand_in
             if not self.palette.glow or self.bloom <= 0:
                 continue
@@ -441,16 +465,16 @@ class LineView:
                 # so a curve does not come out doubled.
                 item = self.canvas.create_image(x - bloom.PAD, y - bloom.PAD,
                                                 anchor="nw", state="hidden",
-                                                tags=(self._piece_tag(
-                                                    self._char_piece[index]),))
+                                                tags=(self._tag, self._piece_tag(
+                                                    self._char_piece[index])))
                 self.canvas.tag_lower(item, entry[2])
                 self._glow[index] = [item]
                 continue
             items = [self.canvas.create_text(x + dx, y + dy, text=ch, anchor="nw",
                                              font=self._font,
                                              fill=self.palette.bloom(0.0),
-                                             tags=(self._piece_tag(
-                                                 self._char_piece[index]),))
+                                             tags=(self._tag, self._piece_tag(
+                                                 self._char_piece[index])))
                      for dx, dy in GLOW_OFFSETS]
             for item in items:
                 self.canvas.tag_lower(item, entry[2])

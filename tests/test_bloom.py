@@ -426,3 +426,15 @@ def test_a_line_no_longer_active_leaves_no_stand_ins(view):
     # Tk answers "" for a state never set, which is what an untouched letter has.
     assert all(view.canvas.itemcget(e[2], "state") in ("", "normal")
                for e in view._items)
+
+
+def test_a_fully_faded_line_is_hidden_instead_of_painted_black(view):
+    view.set_visible(False)
+    view.show_inactive(view.palette.bloom(0.0))
+
+    assert all(view.canvas.itemcget(item, "state") == "hidden"
+               for item in view.item_ids())
+
+    view.set_visible(True)
+    assert all(view.canvas.itemcget(entry[2], "state") == "normal"
+               for entry in view._items)
