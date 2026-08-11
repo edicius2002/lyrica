@@ -89,10 +89,9 @@ FONT_ECHO = ("Segoe UI", -20, "italic")
 # because neither alone was enough: on the same baseline it read as part of the
 # line, and a rung down the ladder gave it the exact colour of the main line's
 # unsung half.
-# Measured against the render this was chosen from, where the drop was one
-# font size: a line's height is its linespace, half again as much, so the same
-# look asks for two thirds of it.
-ECHO_DROP = 0.72
+# Slightly below the previous two-thirds drop. This leaves a deliberate small
+# breathing gap below the lead while still fitting before the next lyric row.
+ECHO_DROP = 0.82
 ECHO_KEEP = 0.72
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
@@ -276,6 +275,21 @@ def lyrics_state(lyr: Lyrics | None) -> str:
 def _scaled_font(spec: tuple, scale: float) -> tuple:
     family, size, *rest = spec
     return (family, round(size * scale), *rest)
+
+
+def _font_that_fits_width(font: tuple, measured: float, available: float) -> tuple:
+    """Scale a Tk font down just enough to keep one measured row in its box."""
+    if measured <= available or not font or len(font) < 2:
+        return font
+    size = int(font[1])
+    if not size:
+        return font
+    # Tk uses a negative size for pixels. Leave a one-pixel reduction even
+    # when rounding says the old size would do, so the next measurement makes
+    # progress instead of rebuilding the same overflowing row forever.
+    reduced = min(abs(size) - 1, int(abs(size) * available / measured))
+    reduced = max(1, reduced)
+    return (font[0], -reduced if size < 0 else reduced, *font[2:])
 
 
 class Overlay:
@@ -1448,11 +1462,27 @@ class Overlay:
         # The supporting voice answers from the open lane. A centred or
         # unidentified lead keeps the established right-side placement.
         echo_side = -active_side if active_side else 1
-        self._echo = LineView(
-            self.canvas, self.width // 2, _below(active), text, words,
-            font=self.f_echo, wrap=self.wrap // 2,
-            palette=self.palette.dimmed(ECHO_KEEP),
-            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
+        margin = self.chrome.px(ECHO_SAFE_MARGIN)
+        available = max(1.0, self.width - 2 * margin)
+        echo_font = self.f_echo
+        # Backing vocals are a single responding voice, never a second lyric
+        # block. Let a long one use the whole safe width, then reduce only its
+        # own font until it fits that one row. The normal lead font and layout
+        # are untouched.
+        for _attempt in range(8):
+            self._echo = LineView(
+                self.canvas, self.width // 2, _below(active), text, words,
+                font=echo_font, wrap=10**9,
+                palette=self.palette.dimmed(ECHO_KEEP),
+                scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
+            echo_left = min(a for a, _b in self._echo._row_spans)
+            echo_right = max(b for _a, b in self._echo._row_spans)
+            fitted_font = _font_that_fits_width(echo_font, echo_right - echo_left,
+                                                 available)
+            if fitted_font == echo_font:
+                break
+            self._echo.destroy()
+            echo_font = fitted_font
         self._echo_line, self._echo_words = self.line_index, words
         self._echo_side = echo_side
         active_left, active_right = active._row_spans[-1]

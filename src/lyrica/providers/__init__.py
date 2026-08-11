@@ -84,7 +84,12 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 # 4: entries written before who sings each line was parsed at all. Same story
 #    as 2, and the same answer: an entry whose providers have all been asked is
 #    never refreshed by anything else, so the version is what refreshes it.
-CACHE_VERSION = 4
+# 5: parenthetical backing phrases were still part of the lead line. Re-reading
+#    them is necessary because cached word timings otherwise have no chance to
+#    be separated into the backing channel.
+# 6: Richsync parenthetical suffixes were not normalized into the backing
+#    channel, even though they carried usable serial word timings.
+CACHE_VERSION = 6
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:

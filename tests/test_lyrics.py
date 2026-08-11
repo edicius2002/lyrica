@@ -1,7 +1,7 @@
 """Unit tests for LRC parsing and the Lyrics model (offline)."""
 import pytest
 
-from lyrica.lyrics import Lyrics, parse_lrc
+from lyrica.lyrics import Lyrics, parse_lrc, split_parenthetical_adlib
 
 SAMPLE_LRC = """\
 [00:12.34]First line
@@ -69,3 +69,35 @@ def test_a_source_without_backing_at_all_still_answers():
     from lyrica.lyrics import Lyrics
 
     assert Lyrics(lines=[(0.0, "a")], words=[[]], synced=True).backing_at(0) == ("", [])
+
+
+def test_an_overlapping_parenthetical_phrase_becomes_a_backing_adlib():
+    words = [(0.0, 1.0, "Lead"), (0.4, 0.8, "(you"),
+             (0.8, 1.2, "know)"), (0.9, 1.5, "tonight")]
+    assert split_parenthetical_adlib("Lead (you know) tonight", words) == (
+        "Lead tonight", [(0.0, 1.0, "Lead"), (0.9, 1.5, "tonight")],
+        "(you know)", [(0.4, 0.8, "(you"), (0.8, 1.2, "know)")])
+
+
+def test_a_sequential_parenthetical_phrase_in_the_middle_stays_in_the_lead():
+    words = [(0.0, 0.4, "Lead"), (0.4, 1.0, "(you"),
+             (1.0, 1.2, "know)"), (1.2, 1.6, "tonight")]
+    assert split_parenthetical_adlib("Lead (you know) tonight", words) is None
+
+
+def test_a_sequential_parenthetical_suffix_becomes_a_backing_adlib():
+    words = [(0.0, 0.4, "Lead"), (0.4, 1.0, "(you"),
+             (1.0, 1.2, "know)")]
+    assert split_parenthetical_adlib("Lead (you know)", words) == (
+        "Lead", [(0.0, 0.4, "Lead")],
+        "(you know)", [(0.4, 1.0, "(you"), (1.0, 1.2, "know)")])
+
+
+def test_a_parenthetical_suffix_cannot_split_one_timed_token():
+    words = [(0.0, 0.4, "Lead"), (0.4, 1.2, "(yeah)")]
+    assert split_parenthetical_adlib("Lead(yeah)", words) is None
+
+
+def test_an_entire_parenthetical_line_stays_in_the_lead():
+    words = [(0.0, 0.5, "(Yeah)"), (0.5, 1.0, "(yeah)")]
+    assert split_parenthetical_adlib("(Yeah) (yeah)", words) is None

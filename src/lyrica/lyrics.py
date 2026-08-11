@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 LRC_LINE = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\](.*)")
+PARENTHETICAL_SUFFIX = re.compile(r"\s(?:\([^()]*\)\s*)+$")
 
 # (start_seconds, end_seconds, text). Kept as a plain tuple so it survives a
 # JSON round trip through the cache without a custom encoder.
@@ -13,6 +14,103 @@ Word = tuple[float, float, str]
 # this. Musixmatch's richsync gives offsets but no durations, so a word before
 # an instrumental break would otherwise stay lit for the length of the break.
 MAX_INFERRED_WORD_S = 1.5
+
+
+def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
+    """Separate a timed parenthetical backing phrase from one lyric line.
+
+    Parentheses conventionally mark an echo or backing vocal, but punctuation
+    alone cannot prove that. This accepts only complete word tokens inside
+    balanced parentheses when they overlap the remaining lead words, or when
+    they form a parenthesized suffix after the lead. A sequential parenthesis
+    in the middle of a line, an inline fragment such as ``word(yeah)``, or an
+    entire parenthetical line stays in the lead rather than being placed in the
+    wrong visual channel.
+    """
+    main: list[Word] = []
+    backing: list[Word] = []
+    group: list[Word] = []
+    depth = 0
+    lead_after_backing = False
+
+    for word in words:
+        token = word[2].strip()
+        if not token:
+            return None
+        opens, closes = token.count("("), token.count(")")
+        if depth:
+            group.append(word)
+            depth += opens - closes
+            if depth < 0:
+                return None
+            if depth == 0:
+                backing.extend(group)
+                group = []
+            continue
+
+        if opens or closes:
+            # A parenthetical ad-lib has its own whole timed tokens. Splitting
+            # a token would make its timing describe two different voices.
+            if not token.startswith("(") or closes > opens:
+                return None
+            group = [word]
+            depth = opens - closes
+            if depth == 0:
+                backing.extend(group)
+                group = []
+            continue
+        if backing:
+            lead_after_backing = True
+        main.append(word)
+
+    if depth or not main or not backing:
+        return None
+    overlaps_lead = any(start < lead_end and lead_start < end
+                        for start, end, _text in backing
+                        for lead_start, lead_end, _lead_text in main)
+    # A closing parenthetical is a common editorial convention for an echoed
+    # answer. Its own word timings say exactly when it is sung, even when it
+    # follows the lead rather than overlapping it. Parentheses in the middle
+    # still need overlap: otherwise an aside or alternate wording is too easy
+    # to mistake for a backing vocal.
+    is_parenthetical_suffix = (
+        not lead_after_backing
+        and PARENTHETICAL_SUFFIX.search(text) is not None
+    )
+    if not (overlaps_lead or is_parenthetical_suffix):
+        return None
+
+    kept, phrases = _separate_parenthetical_text(text)
+    if not kept or not phrases:
+        return None
+    return kept, main, " ".join(phrases), backing
+
+
+def _separate_parenthetical_text(text: str) -> tuple[str, list[str]]:
+    """Return the lead text and complete parenthetical phrases it contains."""
+    lead: list[str] = []
+    phrases: list[str] = []
+    phrase: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            if depth:
+                phrase.append(char)
+            else:
+                phrase = [char]
+            depth += 1
+        elif char == ")" and depth:
+            phrase.append(char)
+            depth -= 1
+            if not depth:
+                phrases.append("".join(phrase))
+        elif depth:
+            phrase.append(char)
+        else:
+            lead.append(char)
+    if depth:
+        return text, []
+    return " ".join("".join(lead).split()), phrases
 
 
 class Precision(IntEnum):
