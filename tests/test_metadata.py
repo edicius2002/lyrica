@@ -292,6 +292,20 @@ def test_aligning_is_remembered_for_that_track(store_offsets):
     assert config.saved_offset("chrome.exe|somebody|else") == 0.0
 
 
+def test_same_song_in_spotify_and_youtube_keeps_separate_offsets(store_offsets):
+    from lyrica import config
+
+    spotify = Snapshot(app="Spotify.exe", artist="Dua Lipa", title="Levitating")
+    youtube = Snapshot(app="chrome.exe", artist="Dua Lipa", title="Levitating")
+
+    config.save_offset(0.5, spotify.track_key())
+    config.save_offset(-8.0, youtube.track_key())
+
+    assert spotify.track_key() != youtube.track_key()
+    assert config.saved_offset(spotify.track_key()) == 0.5
+    assert config.saved_offset(youtube.track_key()) == -8.0
+
+
 def test_aligning_does_nothing_without_lyrics(store_offsets):
     from lyrica.app import Overlay
     from lyrica.lyrics import Lyrics
