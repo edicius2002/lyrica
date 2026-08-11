@@ -284,6 +284,21 @@ def test_a_backing_vocal_split_below_the_word_is_put_back_together():
     assert ttml.parse_ttml(doc).backing_at(0)[0] == "(You, the moonlight)"
 
 
+def test_an_unmarked_overlapping_parenthesis_becomes_a_backing_vocal():
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="2s">'
+           '<span begin="0s" end="1s">Lead</span> '
+           '<span begin="0.4s" end="0.8s">(you</span> '
+           '<span begin="0.8s" end="1.2s">know)</span> '
+           '<span begin="0.9s" end="1.5s">tonight</span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert lyrics.lines[0][1] == "Lead tonight"
+    assert lyrics.words_at(0) == [(0.0, 1.0, "Lead"), (0.9, 1.5, "tonight")]
+    assert lyrics.backing_at(0) == (
+        "(you know)", [(0.4, 0.8, "(you"), (0.8, 1.2, "know)")])
+
+
 def test_a_line_with_nothing_behind_it_says_so():
     doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
            '<p begin="0s" end="3s"><span begin="0s" end="1s">solo</span></p>'

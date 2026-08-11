@@ -37,7 +37,7 @@ this that could be wrong about a real person, and nothing here would show them.
 import re
 import xml.etree.ElementTree as ET
 
-from lyrica.lyrics import Lyrics
+from lyrica.lyrics import Lyrics, split_parenthetical_adlib
 
 TTML_NS = "http://www.w3.org/ns/ttml"
 TTM_NS = "http://www.w3.org/ns/ttml#metadata"
@@ -257,12 +257,22 @@ def parse_ttml(body: str) -> Lyrics | None:
         text = _line_text(p, spans)
         if not text:
             continue
+        echo = _backing_spans(p)
+        # An explicit x-bg annotation is exact. Parentheses without that
+        # annotation are only a conservative fallback, so they never overwrite
+        # a source that already tells us about a backing vocal.
+        inferred = None if echo else split_parenthetical_adlib(text, line_words)
+        if inferred is not None:
+            text, line_words, backing_text, backing_line_words = inferred
         lines.append((start, text))
         words.append(line_words)
         voices.append(_agent_of(p))
-        echo = _backing_spans(p)
-        backing.append(" ".join("".join(x + tail for _s, _e, x, tail in echo).split()))
-        backing_words.append(_words(echo))
+        if inferred is not None:
+            backing.append(backing_text)
+            backing_words.append(backing_line_words)
+        else:
+            backing.append(" ".join("".join(x + tail for _s, _e, x, tail in echo).split()))
+            backing_words.append(_words(echo))
 
     if not lines:
         return None

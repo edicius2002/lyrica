@@ -15,6 +15,89 @@ Word = tuple[float, float, str]
 MAX_INFERRED_WORD_S = 1.5
 
 
+def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
+    """Separate a timed parenthetical backing phrase from one lyric line.
+
+    Parentheses conventionally mark an echo or backing vocal, but punctuation
+    alone cannot prove that. This accepts only complete word tokens inside
+    balanced parentheses whose time overlaps the remaining lead words. A
+    sequential aside, an inline fragment such as ``word(yeah)``, or an entire
+    parenthetical line stays in the lead rather than being placed in the wrong
+    visual channel.
+    """
+    main: list[Word] = []
+    backing: list[Word] = []
+    group: list[Word] = []
+    depth = 0
+
+    for word in words:
+        token = word[2].strip()
+        if not token:
+            return None
+        opens, closes = token.count("("), token.count(")")
+        if depth:
+            group.append(word)
+            depth += opens - closes
+            if depth < 0:
+                return None
+            if depth == 0:
+                backing.extend(group)
+                group = []
+            continue
+
+        if opens or closes:
+            # A parenthetical ad-lib has its own whole timed tokens. Splitting
+            # a token would make its timing describe two different voices.
+            if not token.startswith("(") or closes > opens:
+                return None
+            group = [word]
+            depth = opens - closes
+            if depth == 0:
+                backing.extend(group)
+                group = []
+            continue
+        main.append(word)
+
+    if depth or not main or not backing:
+        return None
+    if not any(start < lead_end and lead_start < end
+               for start, end, _text in backing
+               for lead_start, lead_end, _lead_text in main):
+        return None
+
+    kept, phrases = _separate_parenthetical_text(text)
+    if not kept or not phrases:
+        return None
+    return kept, main, " ".join(phrases), backing
+
+
+def _separate_parenthetical_text(text: str) -> tuple[str, list[str]]:
+    """Return the lead text and complete parenthetical phrases it contains."""
+    lead: list[str] = []
+    phrases: list[str] = []
+    phrase: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            if depth:
+                phrase.append(char)
+            else:
+                phrase = [char]
+            depth += 1
+        elif char == ")" and depth:
+            phrase.append(char)
+            depth -= 1
+            if not depth:
+                phrases.append("".join(phrase))
+        elif depth:
+            phrase.append(char)
+        else:
+            lead.append(char)
+    if depth:
+        return text, []
+    return " ".join("".join(lead).split()), phrases
+
+
 class Precision(IntEnum):
     """How exactly a result can be followed, worst to best.
 
