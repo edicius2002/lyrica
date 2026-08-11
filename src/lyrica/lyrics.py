@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 LRC_LINE = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\](.*)")
+PARENTHETICAL_SUFFIX = re.compile(r"\s(?:\([^()]*\)\s*)+$")
 
 # (start_seconds, end_seconds, text). Kept as a plain tuple so it survives a
 # JSON round trip through the cache without a custom encoder.
@@ -20,15 +21,17 @@ def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
 
     Parentheses conventionally mark an echo or backing vocal, but punctuation
     alone cannot prove that. This accepts only complete word tokens inside
-    balanced parentheses whose time overlaps the remaining lead words. A
-    sequential aside, an inline fragment such as ``word(yeah)``, or an entire
-    parenthetical line stays in the lead rather than being placed in the wrong
-    visual channel.
+    balanced parentheses when they overlap the remaining lead words, or when
+    they form a parenthesized suffix after the lead. A sequential parenthesis
+    in the middle of a line, an inline fragment such as ``word(yeah)``, or an
+    entire parenthetical line stays in the lead rather than being placed in the
+    wrong visual channel.
     """
     main: list[Word] = []
     backing: list[Word] = []
     group: list[Word] = []
     depth = 0
+    lead_after_backing = False
 
     for word in words:
         token = word[2].strip()
@@ -56,13 +59,25 @@ def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
                 backing.extend(group)
                 group = []
             continue
+        if backing:
+            lead_after_backing = True
         main.append(word)
 
     if depth or not main or not backing:
         return None
-    if not any(start < lead_end and lead_start < end
-               for start, end, _text in backing
-               for lead_start, lead_end, _lead_text in main):
+    overlaps_lead = any(start < lead_end and lead_start < end
+                        for start, end, _text in backing
+                        for lead_start, lead_end, _lead_text in main)
+    # A closing parenthetical is a common editorial convention for an echoed
+    # answer. Its own word timings say exactly when it is sung, even when it
+    # follows the lead rather than overlapping it. Parentheses in the middle
+    # still need overlap: otherwise an aside or alternate wording is too easy
+    # to mistake for a backing vocal.
+    is_parenthetical_suffix = (
+        not lead_after_backing
+        and PARENTHETICAL_SUFFIX.search(text) is not None
+    )
+    if not (overlaps_lead or is_parenthetical_suffix):
         return None
 
     kept, phrases = _separate_parenthetical_text(text)

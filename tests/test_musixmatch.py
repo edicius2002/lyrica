@@ -10,7 +10,7 @@ import requests
 
 from lyrica.lyrics import MAX_INFERRED_WORD_S, Precision
 from lyrica.providers import musixmatch
-from lyrica.providers.musixmatch import MusixmatchProvider, richsync_to_words
+from lyrica.providers.musixmatch import MusixmatchProvider, richsync_to_lyrics, richsync_to_words
 
 # Captured shape: ts/te bound the line, x is its text, l lists word events whose
 # o is an offset from ts. There is no per-word duration anywhere.
@@ -18,6 +18,16 @@ RICHSYNC = [
     {"ts": 10.0, "te": 12.0, "x": "alpha beta",
      "l": [{"c": "alpha", "o": 0.0}, {"c": " beta", "o": 0.8}]},
     {"ts": 20.0, "te": 21.0, "x": "gamma", "l": [{"c": "gamma", "o": 0.0}]},
+]
+
+PARENTHETICAL_RICHSYNC = [
+    {"ts": 10.0, "te": 12.0, "x": "lead (echo)",
+     "l": [{"c": "lead", "o": 0.0}, {"c": " (echo)", "o": 0.8}]},
+    {"ts": 20.0, "te": 22.0, "x": "lead (aside) tonight",
+     "l": [{"c": "lead", "o": 0.0}, {"c": " (aside)", "o": 0.5},
+           {"c": " tonight", "o": 1.0}]},
+    {"ts": 30.0, "te": 31.0, "x": "(chorus)",
+     "l": [{"c": "(chorus)", "o": 0.0}]},
 ]
 
 
@@ -51,13 +61,13 @@ def wired(monkeypatch):
     return state
 
 
-def working(track_id=1, has_richsync=True):
+def working(track_id=1, has_richsync=True, richsync=RICHSYNC):
     return {
         "token.get": envelope(body={"user_token": "tok"}),
         "matcher.track.get": envelope(body={"track": {"track_id": track_id,
                                                       "has_richsync": has_richsync}}),
         "track.richsync.get": envelope(
-            body={"richsync": {"richsync_body": json.dumps(RICHSYNC)}}),
+            body={"richsync": {"richsync_body": json.dumps(richsync)}}),
     }
 
 
@@ -100,6 +110,21 @@ def test_lines_without_usable_events_are_skipped():
     assert lines == []
 
 
+def test_a_parenthetical_richsync_suffix_becomes_a_timed_backing_adlib():
+    lyrics = richsync_to_lyrics(PARENTHETICAL_RICHSYNC)
+    assert lyrics.lines[0] == (10.0, "lead")
+    assert lyrics.words_at(0) == [(10.0, 10.8, "lead")]
+    assert lyrics.backing_at(0) == ("(echo)", [(10.8, 12.0, "(echo)")])
+
+
+def test_richsync_keeps_inline_and_entire_parenthetical_lines_as_lead():
+    lyrics = richsync_to_lyrics(PARENTHETICAL_RICHSYNC)
+    assert lyrics.lines[1][1] == "lead (aside) tonight"
+    assert lyrics.backing_at(1) == ("", [])
+    assert lyrics.lines[2][1] == "(chorus)"
+    assert lyrics.backing_at(2) == ("", [])
+
+
 # --- fetch ------------------------------------------------------------------
 
 def test_a_match_returns_word_level_lyrics(wired):
@@ -108,6 +133,12 @@ def test_a_match_returns_word_level_lyrics(wired):
     assert result.precision is Precision.WORD
     assert result.exact is True
     assert result.source == "musixmatch/richsync"
+
+
+def test_a_match_keeps_a_parenthetical_suffix_as_a_backing_adlib(wired):
+    wired["responses"] = working(richsync=PARENTHETICAL_RICHSYNC)
+    result = MusixmatchProvider().fetch("A", "B", 200.0)
+    assert result.backing_at(0) == ("(echo)", [(10.8, 12.0, "(echo)")])
 
 
 def test_a_track_flagged_without_richsync_is_not_fetched(wired):

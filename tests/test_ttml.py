@@ -299,6 +299,18 @@ def test_an_unmarked_overlapping_parenthesis_becomes_a_backing_vocal():
         "(you know)", [(0.4, 0.8, "(you"), (0.8, 1.2, "know)")])
 
 
+def test_an_unmarked_parenthetical_suffix_keeps_its_own_timing_as_backing():
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+           '<p begin="0s" end="2s">'
+           '<span begin="0s" end="0.8s">Lead</span> '
+           '<span begin="0.8s" end="1.3s">(yeah)</span>'
+           '</p></div></body></tt>')
+    lyrics = ttml.parse_ttml(doc)
+    assert lyrics.lines[0][1] == "Lead"
+    assert lyrics.words_at(0) == [(0.0, 0.8, "Lead")]
+    assert lyrics.backing_at(0) == ("(yeah)", [(0.8, 1.3, "(yeah)")])
+
+
 def test_a_line_with_nothing_behind_it_says_so():
     doc = ('<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
            '<p begin="0s" end="3s"><span begin="0s" end="1s">solo</span></p>'

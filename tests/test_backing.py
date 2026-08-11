@@ -36,6 +36,52 @@ def test_it_is_absent_outside_its_own_window(panel):
     assert _shown(panel) is None
 
 
+def test_a_sequential_parenthetical_suffix_is_visible_on_its_own_timing(panel):
+    # The parser may identify this as a backing vocal even though it starts
+    # after the lead has ended. Its clock, not overlap with the lead, is what
+    # has to bring it on screen.
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (2.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(2.0, 2.5, "Next")]],
+        synced=True, backing=["(yeah)", ""],
+        backing_words=[[(0.8, 1.3, "(yeah)")], []])
+    panel._go_to_line(0, panel.lyrics)
+
+    panel._show_backing(panel.lyrics, 1.0)
+
+    assert panel._echo is not None
+    assert panel._echo.text == "(yeah)"
+
+
+def test_a_long_adlib_stays_on_one_row_inside_the_panel(panel):
+    tokens = ["(this"] + ["long" for _ in range(42)] + ["echo)"]
+    text = " ".join(tokens)
+    words = [(1.0 + i * 0.04, 1.04 + i * 0.04, token)
+             for i, token in enumerate(tokens)]
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (4.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(4.0, 4.5, "Next")]],
+        synced=True, backing=[text, text], backing_words=[words, words],
+        voices=["v1", "v2"], singers={"v1": "person", "v2": "person"})
+
+    panel._go_to_line(0, panel.lyrics)
+    panel._show_backing(panel.lyrics, 1.4)
+    right = panel._echo
+    assert len(right._row_spans) == 1
+    right_box = panel.canvas.bbox(right._tag)
+    assert 0 <= right_box[0] <= right_box[2] <= panel.width
+    assert sum(right._row_spans[0]) / 2 >= panel.width / 2
+
+    panel._clear_backing()
+    panel._go_to_line(1, panel.lyrics)
+    panel._show_backing(panel.lyrics, 1.4)
+    left = panel._echo
+    assert len(left._row_spans) == 1
+    left_box = panel.canvas.bbox(left._tag)
+    assert 0 <= left_box[0] <= left_box[2] <= panel.width
+    assert sum(left._row_spans[0]) / 2 <= panel.width / 2
+
+
 def test_it_arrives_out_of_the_wash_and_leaves_into_it(panel):
     from lyrica.app import ECHO_FADE_S
     from lyrica.glass import rgb_of
@@ -65,11 +111,11 @@ def test_it_sweeps_on_its_own_timings_while_it_is_sung(panel):
 
 
 def test_it_hangs_from_the_lines_lower_right_corner(panel):
-    from lyrica.app import ECHO_CORNER_INSET
+    from lyrica.app import ECHO_CORNER_INSET, ECHO_DROP
 
     panel._show_backing(panel.lyrics, 1.3)
     line, echo = panel._views[0], panel._echo
-    assert echo.y > line.y + line.line_height * 0.5, "it has to clear the line"
+    assert echo.y == pytest.approx(line.y + line.line_height * ECHO_DROP, abs=1.0)
     left = min(s for s, _e in echo._row_spans)
     corner = max(e for _s, e in line._row_spans)
     assert left == pytest.approx(

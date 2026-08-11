@@ -79,10 +79,23 @@ def test_an_overlapping_parenthetical_phrase_becomes_a_backing_adlib():
         "(you know)", [(0.4, 0.8, "(you"), (0.8, 1.2, "know)")])
 
 
-def test_a_sequential_parenthetical_phrase_stays_in_the_lead():
+def test_a_sequential_parenthetical_phrase_in_the_middle_stays_in_the_lead():
     words = [(0.0, 0.4, "Lead"), (0.4, 1.0, "(you"),
              (1.0, 1.2, "know)"), (1.2, 1.6, "tonight")]
     assert split_parenthetical_adlib("Lead (you know) tonight", words) is None
+
+
+def test_a_sequential_parenthetical_suffix_becomes_a_backing_adlib():
+    words = [(0.0, 0.4, "Lead"), (0.4, 1.0, "(you"),
+             (1.0, 1.2, "know)")]
+    assert split_parenthetical_adlib("Lead (you know)", words) == (
+        "Lead", [(0.0, 0.4, "Lead")],
+        "(you know)", [(0.4, 1.0, "(you"), (1.0, 1.2, "know)")])
+
+
+def test_a_parenthetical_suffix_cannot_split_one_timed_token():
+    words = [(0.0, 0.4, "Lead"), (0.4, 1.2, "(yeah)")]
+    assert split_parenthetical_adlib("Lead(yeah)", words) is None
 
 
 def test_an_entire_parenthetical_line_stays_in_the_lead():

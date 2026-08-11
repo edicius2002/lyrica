@@ -25,7 +25,7 @@ from pathlib import Path
 
 import requests
 
-from lyrica.lyrics import MAX_INFERRED_WORD_S, Lyrics, Precision
+from lyrica.lyrics import MAX_INFERRED_WORD_S, Lyrics, Precision, split_parenthetical_adlib
 from lyrica.providers.base import LyricsProvider
 
 BASE = "https://apic-desktop.musixmatch.com/ws/1.1"
@@ -94,6 +94,34 @@ def richsync_to_words(parsed: list) -> tuple[list, list]:
         lines.append((start, text))
         words.append(line_words)
     return lines, words
+
+
+def richsync_to_lyrics(parsed: list) -> Lyrics:
+    """Build Richsync lyrics, preserving complete parenthetical suffixes.
+
+    Richsync has word starts but not independently measured word ends. That
+    makes a timing-overlap inference untrustworthy, but a complete
+    parenthesized suffix is still an explicit editorial convention and keeps
+    its own serial word timings. The shared splitter deliberately leaves
+    inline parentheses and wholly parenthetical lines in the lead channel.
+    """
+    lines, words = richsync_to_words(parsed)
+    backing: list = []
+    backing_words: list = []
+    for index, (start, text) in enumerate(lines):
+        inferred = split_parenthetical_adlib(text, words[index])
+        if inferred is None:
+            backing.append("")
+            backing_words.append([])
+            continue
+        lead_text, lead_words, backing_text, timed_backing = inferred
+        lines[index] = (start, lead_text)
+        words[index] = lead_words
+        backing.append(backing_text)
+        backing_words.append(timed_backing)
+    return Lyrics(lines=lines, words=words, synced=True,
+                  backing=backing, backing_words=backing_words,
+                  source="musixmatch/richsync", exact=True)
 
 
 class MusixmatchProvider(LyricsProvider):
@@ -218,10 +246,9 @@ class MusixmatchProvider(LyricsProvider):
             parsed = json.loads(raw)  # the body is JSON inside a JSON string
         except ValueError:
             return None
-        lines, words = richsync_to_words(parsed)
-        if not lines:
+        lyrics = richsync_to_lyrics(parsed)
+        if not lyrics.lines:
             return None
         # matcher.track.get matched on artist, title and duration together, so a
         # hit here identifies the recording rather than approximating it.
-        return Lyrics(lines=lines, words=words, synced=True,
-                      source="musixmatch/richsync", exact=True)
+        return lyrics
