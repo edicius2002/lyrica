@@ -319,6 +319,19 @@ def test_a_track_with_no_nudge_of_its_own_starts_at_zero(store):
     assert config.saved_offset("chrome.exe|Someone|Else") == 0.0
 
 
+def test_a_zero_nudge_is_not_remembered_for_a_new_track(store):
+    config.save_offset(0.0, "Spotify.exe|Air|La Femme d'Argent")
+    assert "offsets" not in config.settings()
+
+
+def test_resetting_a_track_nudge_removes_its_entry(store):
+    track = "Spotify.exe|Air|La Femme d'Argent"
+    config.save_offset(-0.75, track)
+    config.save_offset(0.0, track)
+    assert track not in config.settings()["offsets"]
+    assert config.saved_offset(track) == 0.0
+
+
 def test_a_nudge_saved_before_nudges_were_per_track_still_applies(store):
     config.settings_path().write_text('{"offset": 1.25}', encoding="utf-8")
     assert config.saved_offset("chrome.exe|Anyone|Anything") == 1.25
@@ -328,6 +341,20 @@ def test_a_per_track_nudge_beats_the_old_global_one(store):
     config.settings_path().write_text('{"offset": 1.25}', encoding="utf-8")
     config.save_offset(-3.0, "chrome.exe|Tiago PZK|Traductor")
     assert config.saved_offset("chrome.exe|Tiago PZK|Traductor") == -3.0
+
+
+def test_a_modern_offset_map_stops_the_legacy_value_leaking_to_new_tracks(store):
+    config.settings_path().write_text(
+        '{"offset": 1.25, "offsets": {}}', encoding="utf-8")
+    assert config.saved_offset("chrome.exe|Anyone|Anything") == 0.0
+
+
+def test_resetting_a_legacy_offset_creates_the_modern_zero_marker(store):
+    track = "chrome.exe|Tiago PZK|Traductor"
+    config.settings_path().write_text('{"offset": 1.25}', encoding="utf-8")
+    config.save_offset(0.0, track)
+    assert config.settings()["offsets"] == {}
+    assert config.saved_offset(track) == 0.0
 
 
 def test_only_so_many_tracks_are_remembered(store):

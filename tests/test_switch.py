@@ -69,6 +69,32 @@ def test_everything_changes_in_the_same_move(panel):
     assert panel.track_key == "k|B"
 
 
+def test_a_new_song_loads_its_own_remembered_offset(panel, monkeypatch):
+    """A's correction must not travel with the outgoing panel into B."""
+    from lyrica import app as A
+
+    requested = []
+    offsets = {"k|A": -8.0, "k|B": 0.75}
+    monkeypatch.setattr(A.config, "saved_offset",
+                        lambda key: requested.append(key) or offsets[key])
+    monkeypatch.setattr(A, "fetch_for_candidates", lambda *_args: None)
+    monkeypatch.setattr(panel, "_start_artwork", lambda _track: None)
+    monkeypatch.setattr(panel, "_start_cuts", lambda _track: None)
+
+    class ImmediateThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(A.threading, "Thread", ImmediateThread)
+    panel._start_fetch(_snap("B", "b", "k|B"))
+
+    assert requested == ["k|B"]
+    assert panel._loading.offset == 0.75
+
+
 def test_a_seek_does_not_outlive_the_song_it_was_made_on(panel):
     # Its target drove the next song's clock, and did not converge until that
     # song had played as long as the position clicked in the last one.

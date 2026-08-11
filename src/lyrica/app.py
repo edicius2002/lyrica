@@ -974,7 +974,7 @@ class Overlay:
         """
         self.fetch_gen += 1
         loading = Track(gen=self.fetch_gen, snapshot=snap,
-                        offset=config.saved_offset(self.track_key))
+                        offset=config.saved_offset(snap.track_key()))
         loading.deadline = time.monotonic() + REVEAL_WAIT_S
         self._loading = loading
 

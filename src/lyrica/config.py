@@ -294,6 +294,24 @@ def save_setting(key: str, value) -> None:
         logger.debug("could not save %s", key, exc_info=True)
 
 
+def remove_setting(key: str) -> None:
+    """Forget one remembered choice when it was present.
+
+    Keeping removal beside ``save_setting`` means callers do not need to
+    rewrite a setting as a sentinel value merely to say that it is gone.
+    """
+    current = settings()
+    if key not in current:
+        return
+    del current[key]
+    try:
+        path = settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(current), encoding="utf-8")
+    except OSError:
+        logger.debug("could not remove %s", key, exc_info=True)
+
+
 def saved_size() -> float | None:
     value = settings().get("size")
     if value is not None:
@@ -385,24 +403,43 @@ def saved_offset(track: str = "") -> float:
     seconds of intro before the song needs eight seconds that no other track
     wants. One shared number meant fixing a video broke the next one.
     """
-    offsets = settings().get("offsets")
-    if track and isinstance(offsets, dict) and track in offsets:
-        return _bounded_offset(offsets[track])
+    remembered = settings()
+    offsets = remembered.get("offsets")
+    if track and isinstance(offsets, dict):
+        # The presence of this map is the migration marker. Once one track has
+        # been given its own nudge, an absent entry means this track was reset
+        # to zero; it must not inherit the old global value again.
+        return _bounded_offset(offsets.get(track))
     # Whatever a single global nudge was set to before nudges were per track.
     # Still honoured as the starting point for a track that has none of its own.
-    return _bounded_offset(settings().get("offset"))
+    return _bounded_offset(remembered.get("offset"))
 
 
 def save_offset(seconds: float, track: str = "") -> None:
+    value = round(_bounded_offset(seconds), 2)
     if not track:
-        save_setting("offset", round(seconds, 2))
+        if value == 0.0:
+            remove_setting("offset")
+        else:
+            save_setting("offset", value)
         return
-    stored = settings().get("offsets")
+    remembered = settings()
+    stored = remembered.get("offsets")
     offsets = dict(stored) if isinstance(stored, dict) else {}
+    if value == 0.0:
+        removed = track in offsets
+        offsets.pop(track, None)
+        if removed:
+            # Keep an empty map too: it marks that the global legacy offset has
+            # been retired, so a reset really does restore this track to zero.
+            save_setting("offsets", offsets)
+        elif not isinstance(stored, dict) and "offset" in remembered:
+            save_setting("offsets", {})
+        return
     # Re-inserted rather than updated in place, so the dictionary's order is
     # least-recently-set first and the trim below drops the right end.
     offsets.pop(track, None)
-    offsets[track] = round(seconds, 2)
+    offsets[track] = value
     for stale in list(offsets)[:-OFFSET_MEMORY]:
         del offsets[stale]
     save_setting("offsets", offsets)
