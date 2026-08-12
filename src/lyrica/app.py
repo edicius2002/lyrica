@@ -14,6 +14,7 @@ Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
 import logging
 import logging.handlers
 import os
+import queue
 import threading
 import time
 import tkinter as tk
@@ -44,6 +45,7 @@ from lyrica import (
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
 from lyrica.lyrics import Lyrics, progress_in
+from lyrica.overlay_text import OUTLINE_COLOUR
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -108,6 +110,12 @@ ECHO_INFERRED_FADE_S = 0.10
 # milliseconds is long enough to read without making the fallback feel like a
 # separate lyric line; source timestamps remain untouched.
 ECHO_INFERRED_MIN_VISIBLE_S = 0.45
+
+# A late SponsorBlock answer can move the recording clock by whole seconds.
+# Landing on the corrected row is honest; scrolling every intervening row is
+# not.  The replacement scene rises out of the wash just long enough to make
+# the discontinuity read as deliberate rather than as a flash.
+CUT_CORRECTION_FADE_S = 0.12
 
 
 def _needs_inferred_backing_fallback(lyr: Lyrics, line_index: int) -> bool:
@@ -227,12 +235,11 @@ def _between(low: tuple, high: str, k: float) -> str:
 class Track:
     """Everything one song owns while it is being assembled.
 
-    The point is that a worker writes here and nowhere else, into an object the
-    render thread is not looking at. The guards this replaces were all of the
-    form `if gen == self.fetch_gen: <store>` — a check and a store with nothing
-    between them, six of them, each written on a different day, and any of them
-    able to lose a race the interpreter is free to schedule. There is nothing to
-    guard now: a stale worker fills a `Track` that is simply never put up.
+    Workers return immutable, generation-stamped events. The render thread is
+    the only writer here, so readiness is observed as a coherent UI state and a
+    late result can still be committed after this object has been promoted.
+    Results whose generation no longer names the track being assembled are
+    simply discarded; the outgoing frame stays frozen once a successor exists.
 
     `searched` is not `cover is not None`. "The search is over" and "the search
     found something" are different facts, and treating them as one is what let a
@@ -260,6 +267,29 @@ class Track:
     def whole(self) -> bool:
         """Whether this song is ready to be put up as one thing."""
         return self.searched and self.lyrics_state != LYRICS_UNKNOWN
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    """One background answer, handed back to the Tk thread.
+
+    Workers never mutate the state being rendered.  A generation identifies
+    the track the answer belongs to; artwork also carries the window-shape
+    generation it was rasterised for, because an image built across a resize
+    is valid content at the wrong dimensions.
+    """
+
+    gen: int
+    kind: str
+    value: object = None
+    shape_gen: int | None = None
+
+
+@dataclass(frozen=True)
+class ArtworkResult:
+    identified: artwork.Release
+    cover: bytes | None
+    art: tuple | None
 
 
 def transport_is_live(track: Track, snap: Snapshot) -> bool:
@@ -350,6 +380,7 @@ class Overlay:
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
+        self._worker_results: queue.SimpleQueue[WorkerResult] = queue.SimpleQueue()
         self.offset = config.saved_offset()
         self.line_index = -1
 
@@ -406,6 +437,8 @@ class Overlay:
         self._fetching_key = ""
         self._cuts = sponsorblock.Cuts()
         self._cuts_checked = None
+        self._cuts_discontinuous = False
+        self._cut_fade_at: float | None = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -715,13 +748,14 @@ class Overlay:
                     self._go_to_line(index, lyr)
                 return
 
-    def _go_to_line(self, index: int, lyr: Lyrics) -> None:
+    def _go_to_line(self, index: int, lyr: Lyrics, *, animate: bool | None = None) -> None:
         """Make `index` the current line, animating when the move is small."""
         step = abs(index - self.line_index) if self.line_index >= 0 else None
         self.line_index = index
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
-        self._retarget(indices, animate=should_animate(step, self._dragging))
+        move = should_animate(step, self._dragging) if animate is None else animate
+        self._retarget(indices, animate=move)
         self._restyle(indices)
 
     def _nudge(self, dt: float):
@@ -1027,13 +1061,94 @@ class Overlay:
         logger.info("overlay size %.2f (%dx%d)", self._size, self.width, self.height)
 
     # --- lyrics ---
+    def _track_for_result(self, gen: int) -> Track | None:
+        """The still-relevant track a worker generation belongs to."""
+        if self._loading.gen == gen:
+            return self._loading
+        return None
+
+    def _queue_art_build(self, track: Track, data: bytes) -> None:
+        """Rasterise known cover bytes for the current window shape."""
+        shape_gen = self._shape_gen
+
+        def work():
+            art = self._build_art(data)
+            self._worker_results.put(WorkerResult(
+                track.gen, "art", art, shape_gen=shape_gen))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _drain_worker_results(self) -> None:
+        """Commit background answers on the only thread that renders them."""
+        while True:
+            try:
+                result = self._worker_results.get_nowait()
+            except queue.Empty:
+                return
+            track = self._track_for_result(result.gen)
+            if track is None:
+                continue
+
+            if result.kind == "lyrics":
+                track.lyrics = result.value
+                track.lyrics_state = lyrics_state(result.value)
+                continue
+
+            if result.kind == "cuts":
+                found = result.value
+                track.cuts = found
+                # Do not disturb the deliberately frozen outgoing scene once a
+                # newer track is assembling. If this is still the current song,
+                # the corrected clock is consumed below without a row glide.
+                if track is self._shown and result.gen == self.fetch_gen:
+                    changed = found.spans != self._cuts.spans
+                    self._cuts, self._cuts_checked = found, None
+                    self._cuts_discontinuous = self._cuts_discontinuous or changed
+                continue
+
+            if result.kind == "artwork":
+                answer = result.value
+                track.identified = answer.identified
+                track.cover = answer.cover
+                track.searched = True
+                if result.shape_gen == self._shape_gen:
+                    track.art = answer.art
+                elif answer.cover:
+                    # The fetch is still useful; only its raster dimensions are
+                    # stale. Rebuild from the bytes rather than throwing the
+                    # whole late answer away after a resize.
+                    track.art = None
+                    self._queue_art_build(track, answer.cover)
+
+                if track is self._shown and result.gen == self.fetch_gen:
+                    self._identified = answer.identified
+                    self._cover_data = answer.cover
+                    self._card_raw = None
+                    if result.shape_gen == self._shape_gen and answer.art is not None:
+                        self._offer_art(result.gen, result.shape_gen, answer.art)
+                    elif answer.cover is None:
+                        self._pending_art = None
+                        self._forget_cover()
+                continue
+
+            if result.kind == "art" and result.shape_gen == self._shape_gen:
+                track.art = result.value
+                if track is self._shown and result.gen == self.fetch_gen:
+                    self._offer_art(result.gen, result.shape_gen, result.value)
+            elif result.kind == "art" and track.cover:
+                # It crossed another resize while being built. Keep chasing the
+                # current shape off-thread; each stale result schedules at most
+                # one successor, so there is never an unbounded fan-out.
+                self._queue_art_build(track, track.cover)
+
     def _start_fetch(self, snap: Snapshot):
         """Begin assembling the track that is now playing.
 
-        Nothing on screen changes here. The workers fill a `Track` of their own
-        that nothing is rendering, and the tick puts it up in one move once it
-        is whole — which is what lets the outgoing song keep its last line, and
-        what makes a half-changed panel impossible rather than unlikely.
+        Nothing on screen changes here. Workers return generation-stamped
+        events, the Tk thread commits them to this track, and the tick puts it
+        up in one move once it is whole — which is what lets the outgoing song
+        keep its last line and makes a half-changed panel impossible rather
+        than unlikely.
         """
         self.fetch_gen += 1
         loading = Track(gen=self.fetch_gen, snapshot=snap,
@@ -1044,8 +1159,7 @@ class Overlay:
         def work():
             found = fetch_for_candidates(snap.lookup_candidates(), snap.duration,
                                          snap.album)
-            loading.lyrics = found
-            loading.lyrics_state = lyrics_state(found)
+            self._worker_results.put(WorkerResult(loading.gen, "lyrics", found))
 
         threading.Thread(target=work, daemon=True).start()
         self._start_artwork(loading)
@@ -1074,7 +1188,7 @@ class Overlay:
             found = sponsorblock.cuts_for(video_id)
             if found is None:
                 return
-            loading.cuts = found
+            self._worker_results.put(WorkerResult(loading.gen, "cuts", found))
             if found.intro:
                 logger.info("%s opens with %.1fs that is not the song",
                             video_id, found.intro)
@@ -1094,6 +1208,7 @@ class Overlay:
         snap = loading.snapshot
         candidates = snap.lookup_candidates()
         album = snap.album
+        shape_gen = self._shape_gen
 
         def work():
             # One cover, shown once. Fetching the good one first and only
@@ -1109,17 +1224,17 @@ class Overlay:
             # be named by a catalogue that has no picture of it.
             named = artwork.identify(candidates, album)
             if named:
-                loading.identified = named
                 logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
                             named.album or "no album")
-            loading.cover = data
-            if data:
-                loading.art = self._build_art(data)
+            identified = named or artwork.Release()
+            art = self._build_art(data) if data else None
             # Last, and whatever the outcome. Saying the search is over is not
             # the same as saying it found something, and conflating the two is
             # what let a track with no cover of its own keep the last one's for
             # as long as it played.
-            loading.searched = True
+            self._worker_results.put(WorkerResult(
+                loading.gen, "artwork", ArtworkResult(identified, data, art),
+                shape_gen=shape_gen))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1275,6 +1390,8 @@ class Overlay:
         # a click near the end of one track drove the next one's clock and did
         # not converge until that track had played as long.
         self._awaiting_seek = None
+        self._cuts_discontinuous = False
+        self._cut_fade_at = None
         self._clear_views()
         self.line_index = -1
         self._card_raw = None       # so the card re-derives against the new song
@@ -1714,6 +1831,30 @@ class Overlay:
                 moving = True
         return moving
 
+    def _advance_cut_fade(self) -> bool:
+        """Bring a clock-corrected scene out of the wash without scrolling it."""
+        if self._cut_fade_at is None:
+            return False
+        elapsed = time.monotonic() - self._cut_fade_at
+        done = elapsed >= CUT_CORRECTION_FADE_S
+        progress = motion.cubic_bezier(
+            1.0 if done else elapsed / CUT_CORRECTION_FADE_S,
+            motion.RESIZE_CURVE)
+        # `entry[3]` remains the renderer's target colour. Only the colour sent
+        # to Tk is blended, so the ordinary sweep can keep calculating its true
+        # state while this short presentation effect catches up with it.
+        for view in self._views.values():
+            for entry in view._items:
+                self.canvas.itemconfigure(
+                    entry[2], fill=_between(view.palette.backdrop, entry[3], progress))
+            for item in view._outline:
+                self.canvas.itemconfigure(
+                    item, fill=_between(view.palette.backdrop, OUTLINE_COLOUR, progress))
+        if done:
+            self._cut_fade_at = None
+            return False
+        return True
+
     # --- render ---
     def _tick(self):
         self._drain_actions()
@@ -1735,6 +1876,11 @@ class Overlay:
             # and its last line until there is a complete one to replace them.
             self._fetching_key = snap.track_key()
             self._start_fetch(snap)
+        # After observing the session change. A result for the outgoing track
+        # can land in the same tick as the new snapshot; advancing the
+        # generation first keeps that late answer from repainting the frame we
+        # deliberately froze.
+        self._drain_worker_results()
         promoted = False
         if self._loading is not self._shown and self._ready_to_show():
             self._promote()
@@ -1752,7 +1898,9 @@ class Overlay:
         # but it must never move to the next track's clock. The same gate stops
         # every time-based visual when playback is paused or the session drops.
         live_transport = transport_is_live(self._shown, snap)
-        if live_transport or promoted:
+        current_art_waiting = (self._pending_art is not None
+                               and self._loading is self._shown)
+        if live_transport or promoted or current_art_waiting:
             # A promotion owns a single, atomic visual change even when the
             # newly selected track is paused. Otherwise artwork waits with the
             # frozen frame instead of quietly changing beneath it.
@@ -1803,8 +1951,17 @@ class Overlay:
             waiting = index < 0
             if waiting:
                 index = 0
+            corrected = self._cuts_discontinuous
+            if corrected:
+                # A late intro/outro answer is a clock discontinuity, like a
+                # seek. Land on the truthful row in one frame; gliding through
+                # the intervening lyrics would briefly present every one as if
+                # it were being sung.
+                self._glides.clear()
+                self._cut_fade_at = time.monotonic()
+                self._cuts_discontinuous = False
             if index != self.line_index:
-                self._go_to_line(index, lyr)
+                self._go_to_line(index, lyr, animate=False if corrected else None)
 
             if self._advance_glides():
                 # Brightness follows position, so it has to be recomputed while
@@ -1826,7 +1983,8 @@ class Overlay:
                 # Advanced every frame rather than only when the front moves:
                 # the bloom is a decay in time, and between two words the front
                 # stands still while the light behind it still has to drain.
-                if active.advance_bloom(time.monotonic()) or word >= 0:
+                if (self._cut_fade_at is None
+                        and active.advance_bloom(time.monotonic())) or word >= 0:
                     interval = FAST_TICK_MS
             else:
                 # No word timing for this line: light all of it. Leaving it dim
@@ -1834,9 +1992,14 @@ class Overlay:
                 active.show_lit()
             # Outside every branch, so a line with no word timings takes its
             # backing down instead of leaving the last one frozen over it.
-            backing_pos = pos + (0.0 if lyr.backing_timing_at(self.line_index)
-                                 == "inferred" else WORD_LEAD_S)
-            self._show_backing(lyr, backing_pos)
+            if self._cut_fade_at is None:
+                backing_pos = pos + (0.0 if lyr.backing_timing_at(self.line_index)
+                                     == "inferred" else WORD_LEAD_S)
+                self._show_backing(lyr, backing_pos)
+            else:
+                self._clear_backing()
+            if self._advance_cut_fade():
+                interval = FAST_TICK_MS
 
         self.root.after(interval, self._tick)
 

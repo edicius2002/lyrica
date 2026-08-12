@@ -6,6 +6,7 @@ interpreter fails with "Can't find a usable init.tcl ... No error", which reads
 like a missing installation and is really exhaustion. Tests that need a canvas
 share one root for the session instead of each building their own.
 """
+import queue
 import tkinter as tk
 
 import pytest
@@ -86,7 +87,13 @@ def overlay(_overlay_once):
     o._awaiting_seek = None
     o._card_text = o._card_raw = o._card_measured = None
     o._shown = o._loading = A.Track(searched=True)
+    o._worker_results = queue.SimpleQueue()
     o._fetching_key = ""
+    o._cuts = A.sponsorblock.Cuts()
+    o._cuts_checked = None
+    o._cuts_discontinuous = False
+    o._cut_fade_at = None
+    o._pending_art = None
     o.root.update()
     try:
         yield o

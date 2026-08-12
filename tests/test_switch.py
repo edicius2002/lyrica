@@ -135,20 +135,24 @@ def test_a_song_with_no_cover_does_not_wear_the_last_one(panel):
     assert panel._cover_data is None
 
 
-def test_a_worker_that_answers_late_writes_where_nobody_is_looking(panel):
-    # The guards this replaces were six check-then-store pairs on shared
-    # attributes. A stale worker now fills a Track that is simply never put up.
+def test_a_worker_that_answers_after_its_track_was_abandoned_is_ignored(panel):
+    # Background threads publish generation-stamped answers. Once neither the
+    # loading nor shown track owns that generation, the UI thread drops it.
     from lyrica import app as A
 
     stale = panel._loading
+    before = stale.lyrics
     panel._loading = A.Track(gen=3, snapshot=_snap("C", "c", "k|C"),
                              deadline=time.monotonic() + 100)
-    stale.lyrics = Lyrics(lines=[(0.0, "from a song nobody is playing")],
-                          words=[[]], synced=True)
-    stale.lyrics_state = A.LYRICS_PRESENT
-    stale.searched = True
+    panel._shown = A.Track(gen=2, snapshot=_snap("B", "b", "k|B"),
+                           lyrics_state=A.LYRICS_PRESENT, searched=True)
+    panel._worker_results.put(A.WorkerResult(
+        stale.gen, "lyrics",
+        Lyrics(lines=[(0.0, "from a song nobody is playing")],
+               words=[[]], synced=True)))
+    panel._drain_worker_results()
     assert not panel._ready_to_show(), "the abandoned track must not qualify"
-    assert panel.lyrics is not stale.lyrics
+    assert stale.lyrics is before
 
 
 def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
@@ -169,11 +173,82 @@ def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
     panel._retarget_size()
     assert not panel._compact, "nothing is known yet, so nothing moves"
 
-    late.lyrics_state = A.LYRICS_ABSENT           # the provider answers
+    panel._worker_results.put(A.WorkerResult(late.gen, "lyrics", None))
+    panel._drain_worker_results()                 # the provider answers
     panel.lyrics = panel._shown.lyrics            # what the tick does
     panel._lyrics_state = panel._shown.lyrics_state
     panel._retarget_size()
     assert panel._compact, "it has to act on an answer it asked for"
+
+
+def test_late_artwork_and_identity_are_committed_after_promotion(panel):
+    from lyrica import app as A
+
+    panel.fetch_gen = panel._shown.gen
+    release = A.artwork.Release("Billie Eilish", "CHIHIRO", "HIT ME HARD AND SOFT")
+    art = ("thumb", None, "song-colour")
+    panel._worker_results.put(A.WorkerResult(
+        panel._shown.gen, "artwork",
+        A.ArtworkResult(release, b"late cover", art),
+        shape_gen=panel._shape_gen))
+
+    panel._drain_worker_results()
+
+    assert panel._shown.identified is release
+    assert panel._shown.cover == b"late cover"
+    assert panel._cover_data == b"late cover"
+    assert panel._identified is release
+    assert panel._pending_art is art
+    assert panel._card_raw is None, "the catalogue name must be derived again"
+
+
+def test_late_cuts_correct_the_shown_track(panel):
+    from lyrica import app as A
+
+    panel.fetch_gen = panel._shown.gen
+    found = A.sponsorblock.Cuts(((0.0, 21.8),))
+    panel._worker_results.put(A.WorkerResult(panel._shown.gen, "cuts", found))
+
+    panel._drain_worker_results()
+
+    assert panel._shown.cuts is found
+    assert panel._cuts is found
+    assert panel._cuts_checked is None
+    assert panel._cuts_discontinuous is True
+
+
+def test_a_late_cut_lands_on_the_corrected_line_without_a_glide(panel, monkeypatch):
+    from lyrica import app as A
+
+    lyrics = Lyrics(lines=[(0.0, "zero"), (10.0, "ten"), (20.0, "twenty")],
+                    words=[[], [], []], synced=True)
+    panel._shown.lyrics = panel.lyrics = lyrics
+    panel._shown.lyrics_state = A.LYRICS_PRESENT
+    panel._lyrics_state = A.LYRICS_PRESENT
+    panel.fetch_gen = panel._shown.gen
+    snap = panel._shown.snapshot
+    snap.live_position = lambda: 25.0
+    panel.reader.snapshot = snap
+    panel._fetching_key = snap.track_key()
+    panel._go_to_line(2, lyrics)
+    panel._worker_results.put(A.WorkerResult(
+        panel._shown.gen, "cuts", A.sponsorblock.Cuts(((0.0, 20.0),))))
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+    calls = []
+    original = panel._go_to_line
+
+    def recording(index, lyr, *, animate=None):
+        calls.append((index, animate))
+        return original(index, lyr, animate=animate)
+
+    monkeypatch.setattr(panel, "_go_to_line", recording)
+
+    panel._tick()
+
+    assert calls == [(0, False)]
+    assert panel.line_index == 0
+    assert not panel._glides
+    assert panel._cut_fade_at is not None
 
 
 def test_the_shown_track_is_the_state_rather_than_a_copy_of_it(panel):
