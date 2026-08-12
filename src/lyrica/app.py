@@ -585,8 +585,8 @@ class Overlay:
         if wanted is not None:
             self._start_x = max(dleft, min(wanted[0], dleft + dwidth - self.width))
             self._start_y = max(dtop, min(wanted[1], dtop + dheight - self.height))
-        self.root.geometry(
-            f"{self.width}x{self.height}+{self._start_x}+{self._start_y}")
+        self.root.geometry(chrome_mod.geometry(
+            self.width, self.height, self._start_x, self._start_y))
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                 bg=self.chrome.background,
@@ -996,7 +996,7 @@ class Overlay:
         edge, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
         x = max(edge, min(keep, edge + dwidth - width))
         top = max(dtop, top)
-        self.root.geometry(f"{width}x{height}+{x}+{top}")
+        self.root.geometry(chrome_mod.geometry(width, height, x, top))
         self.canvas.configure(width=width, height=height)
         # The border is rebuilt every frame, because it is geometry and not
         # decoration: its segments are laid out for a particular width, so one
@@ -1104,12 +1104,13 @@ class Overlay:
         self.anchor_y = self.height * ANCHOR
 
         # Grown or shrunk about its own middle, so the window stays where the
-        # eye left it instead of walking up-left as it grows. Clamped, because
-        # a window centred near an edge would otherwise grow off the screen.
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x = max(0, min(was[0] - self.width // 2, sw - self.width))
-        y = max(0, min(was[1] - self.height // 2, sh - self.height))
-        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+        # eye left it instead of walking up-left as it grows. Clamp against the
+        # monitor that contained that middle *before* the size changed. Tk's
+        # screen metrics name only the primary display on Windows; using them
+        # here teleported a panel on any other monitor back to the primary one.
+        x, y = chrome_mod.position_in_monitor(
+            self.root, was, (self.width, self.height))
+        self.root.geometry(chrome_mod.geometry(self.width, self.height, x, y))
         self.canvas.configure(width=self.width, height=self.height)
         # After the geometry, never before: the clip region is in device pixels
         # and does not track the window, so applying it early clips the window

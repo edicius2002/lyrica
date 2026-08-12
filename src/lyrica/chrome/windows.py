@@ -129,6 +129,16 @@ SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
 SM_CYVIRTUALSCREEN = 79
+MONITOR_DEFAULTTONEAREST = 2
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
 
 
 def desktop_bounds() -> tuple | None:
@@ -138,6 +148,33 @@ def desktop_bounds() -> tuple | None:
         bounds = (metric(SM_XVIRTUALSCREEN), metric(SM_YVIRTUALSCREEN),
                   metric(SM_CXVIRTUALSCREEN), metric(SM_CYVIRTUALSCREEN))
     except (AttributeError, OSError):
+        return None
+    return bounds if bounds[2] > 0 and bounds[3] > 0 else None
+
+
+def monitor_bounds(x: int, y: int) -> tuple | None:
+    """Bounds of the monitor containing a desktop point, or the nearest one."""
+    try:
+        user32 = ctypes.windll.user32
+        monitor_from_point = user32.MonitorFromPoint
+        monitor_from_point.argtypes = [wintypes.POINT, wintypes.DWORD]
+        monitor_from_point.restype = wintypes.HMONITOR
+        get_monitor_info = user32.GetMonitorInfoW
+        get_monitor_info.argtypes = [wintypes.HMONITOR,
+                                     ctypes.POINTER(_MonitorInfo)]
+        get_monitor_info.restype = wintypes.BOOL
+        monitor = monitor_from_point(
+            wintypes.POINT(int(x), int(y)), MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return None
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not get_monitor_info(monitor, ctypes.byref(info)):
+            return None
+        rect = info.rcMonitor
+        bounds = (rect.left, rect.top,
+                  rect.right - rect.left, rect.bottom - rect.top)
+    except (AttributeError, OSError, TypeError, ValueError):
         return None
     return bounds if bounds[2] > 0 and bounds[3] > 0 else None
 
