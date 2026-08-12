@@ -203,6 +203,7 @@ def _hybrid_source(source, starts, backing=None):
 
 
 def test_verified_ttml_adlibs_are_grafted_onto_richsync_lead():
+    from lyrica.lyrics import BACKING_CROSS_SOURCE_ALIGNED
     from lyrica.providers import _merge_community_backing
 
     rich = _hybrid_source("musixmatch/richsync", [10.2, 20.2, 30.2, 40.2])
@@ -216,7 +217,209 @@ def test_verified_ttml_adlibs_are_grafted_onto_richsync_lead():
     assert hybrid.lines == rich.lines, "Richsync remains the lead lyric and clock"
     assert hybrid.source.endswith("community-ttml-adlibs")
     assert hybrid.backing_at(1) == ("(echo)", [(20.3, 20.5, "(echo)")])
-    assert hybrid.backing_timing_at(1) == "exact"
+    assert hybrid.backing_timing_at(1) == BACKING_CROSS_SOURCE_ALIGNED
+    assert hybrid.backing_alignment_at(1) == {
+        "source": "community-ttml/word",
+        "offset": 0.2,
+        "rate": 1.0,
+        "local_residual": 0.0,
+        "anchors": 3,
+    }
+
+
+def test_repeated_choruses_are_aligned_by_the_whole_sequence_and_time():
+    from lyrica.providers import _line_pairs
+
+    rich = Lyrics(lines=[(0.0, "intro"), (10.0, "chorus"),
+                         (20.0, "chorus"), (30.0, "outro")])
+    community = Lyrics(lines=[(0.0, "intro"), (19.8, "chorus"),
+                              (30.0, "outro")])
+
+    assert _line_pairs(rich, community) == [(0, 0), (2, 1), (3, 2)]
+
+
+def test_n95_split_phrases_align_many_ttml_lines_to_one_richsync_line():
+    """N95 groups long Richsync sentences into several TTML screen rows."""
+    from lyrica.providers import _line_groups
+
+    rich = Lyrics(lines=[
+        (0.0, "Intro anchor"),
+        (10.0, "Take off your idols take off the runway take off to Cairo"),
+        (40.0, "Middle anchor"),
+        (80.0, "Closing anchor"),
+    ])
+    community = Lyrics(lines=[
+        (0.1, "Intro anchor"),
+        (10.1, "Take off your idols"),
+        (11.1, "Take off the runway"),
+        (12.1, "Take off to Cairo"),
+        (40.1, "Middle anchor"),
+        (80.1, "Closing anchor"),
+    ])
+
+    assert ((1,), (1, 2, 3)) in _line_groups(rich, community)
+
+
+def _n95_split_sources(rich_start=12.6):
+    rich_lines = [
+        (0.0, "Intro anchor"),
+        (10.0, "Take off your idols take off the runway take off to Cairo"),
+        (40.0, "Middle anchor"),
+        (80.0, "Closing anchor"),
+    ]
+    rich = Lyrics(
+        lines=rich_lines,
+        words=[[(start, start + 0.5, text)] for start, text in rich_lines],
+        synced=True, source="musixmatch/richsync",
+        backing=["", "(Take that off)", "", ""],
+        backing_words=[[], [(rich_start, rich_start + 0.45, "(Take that off)")],
+                       [], []],
+        backing_timing=["", "inferred", "", ""],
+        backing_modes=["", "sequential", "", ""],
+    )
+    community_lines = [
+        (0.1, "Intro anchor"),
+        (10.1, "Take off your idols"),
+        (11.1, "Take off the runway"),
+        (12.1, "Take off to Cairo"),
+        (40.1, "Middle anchor"),
+        (80.1, "Closing anchor"),
+    ]
+    community = Lyrics(
+        lines=community_lines,
+        words=[[(start, start + 0.5, text)] for start, text in community_lines],
+        synced=True, source="community-ttml/word",
+        backing=["", "", "", "(Take that off)", "", ""],
+        backing_words=[[], [], [], [(12.7, 13.9, "(Take that off)")], [], []],
+    )
+    community.recording_duration = 195.0
+    return rich, community
+
+
+def test_n95_verified_response_keeps_its_entry_and_gains_the_measured_end():
+    from lyrica.lyrics import BACKING_CROSS_SOURCE_ALIGNED
+    from lyrica.providers import _merge_community_backing
+
+    rich, community = _n95_split_sources()
+
+    hybrid = _merge_community_backing(rich, community, 195.0)
+
+    assert hybrid is not None
+    words = hybrid.backing_at(1)[1]
+    assert words[0][0] == pytest.approx(12.6), "the Richsync entry must not jump"
+    assert words[-1][1] == pytest.approx(13.8), "TTML supplies the complete tail"
+    assert hybrid.backing_timing_at(1) == BACKING_CROSS_SOURCE_ALIGNED
+    assert hybrid.backing_alignment_at(1)["local_residual"] <= 0.2
+
+
+def test_n95_response_over_200ms_from_its_richsync_entry_is_refused():
+    from lyrica.providers import _merge_community_backing
+
+    rich, community = _n95_split_sources(rich_start=12.91)
+
+    assert _merge_community_backing(rich, community, 195.0) is None
+
+
+def test_n95_repeated_responses_keep_entries_but_no_longer_end_prematurely():
+    """Two real N95 timings that survived the strict cross-source checks."""
+    from lyrica.providers import _merge_community_backing
+
+    rich_starts = [134.428, 136.84, 138.68, 140.37, 141.96,
+                   145.03, 147.28, 148.47, 152.13, 155.35, 159.04]
+    community_starts = [134.57, 137.01, 138.74, 140.45, 142.21,
+                        145.19, 147.32, 148.53, 152.01, 155.55, 158.92]
+    texts = ["reaction", "think", "aesthetic", "soul", "leverage",
+             "relevant", "hypocrites again", "relevant again", "pocket",
+             "mediocre", "toxic"]
+
+    def source(name, starts):
+        lines = list(zip(starts, texts, strict=True))
+        return Lyrics(
+            lines=lines,
+            words=[[(start, start + 0.5, text)] for start, text in lines],
+            synced=True, source=name,
+            backing=["" for _ in lines], backing_words=[[] for _ in lines],
+            backing_timing=["" for _ in lines],
+            backing_modes=["" for _ in lines],
+        )
+
+    rich = source("musixmatch/richsync", rich_starts)
+    rich.backing[2] = rich.backing[7] = "(Let's go)"
+    rich.backing_words[2] = [(139.89, 140.298, "(Let's go)")]
+    rich.backing_words[7] = [(150.18, 150.684, "(Let's go)")]
+    rich.backing_timing[2] = rich.backing_timing[7] = "inferred"
+    rich.backing_modes[2] = rich.backing_modes[7] = "sequential"
+
+    community = source("community-ttml/word", community_starts)
+    community.backing[2] = community.backing[7] = "(Let's go)"
+    community.backing_words[2] = [(140.00, 140.85, "(Let's go)")]
+    community.backing_words[7] = [(150.36, 151.16, "(Let's go)")]
+    community.recording_duration = 195.0
+
+    hybrid = _merge_community_backing(rich, community, 195.0)
+
+    assert hybrid is not None
+    first, repeated = hybrid.backing_at(2)[1], hybrid.backing_at(7)[1]
+    assert first[0][0] == 139.89 and repeated[0][0] == 150.18
+    assert first[-1][1] > 140.7 and repeated[-1][1] > 150.9
+
+
+def test_an_adlib_failing_its_nearest_anchors_is_not_grafted():
+    from lyrica.providers import _merge_community_backing
+
+    texts = ("one", "two", "three", "four", "five")
+    community_starts = [0.0, 40.0, 80.0, 120.0, 160.0]
+    rich_starts = [0.0, 40.0, 80.3, 120.0, 160.0]
+
+    def source(name, starts, backing):
+        lines = list(zip(starts, texts, strict=True))
+        words = [[(start, start + 0.4, text)] for start, text in lines]
+        backing_words = [[] for _ in lines]
+        backing_words[2] = [(80.1, 80.5, "(echo)")]
+        return Lyrics(lines=lines, words=words, synced=True, source=name,
+                      backing=backing, backing_words=backing_words)
+
+    rich = source("musixmatch/richsync", rich_starts, ["", "", "", "", ""])
+    community = source(
+        "community-ttml/word", community_starts,
+        ["", "", "(echo)", "", ""])
+    community.recording_duration = 180.0
+
+    assert _merge_community_backing(rich, community, 180.0) is None
+
+
+def test_a_grafted_suffix_recovers_its_sequential_mode():
+    from lyrica.providers import _merge_community_backing
+
+    rich = _hybrid_source("musixmatch/richsync", [10.2, 20.2, 30.2, 40.2])
+    community = _hybrid_source("community-ttml/word", [10, 20, 30, 40],
+                               ["", "(echo)", "", ""])
+    community.backing_words[1] = [(20.7, 21.0, "(echo)")]
+    community.recording_duration = 180.0
+
+    hybrid = _merge_community_backing(rich, community, 180.0)
+
+    assert hybrid is not None
+    assert hybrid.backing_mode_at(1) == "sequential"
+
+
+def test_a_tiny_cross_source_rate_difference_is_applied_to_the_adlib():
+    from lyrica.providers import _merge_community_backing
+
+    community_starts = [10.0, 50.0, 90.0, 130.0]
+    rich_starts = [0.2 + 1.001 * start for start in community_starts]
+    rich = _hybrid_source("musixmatch/richsync", rich_starts)
+    community = _hybrid_source("community-ttml/word", community_starts,
+                               ["", "", "(echo)", ""])
+    community.recording_duration = 180.0
+
+    hybrid = _merge_community_backing(rich, community, 180.0)
+
+    assert hybrid is not None
+    start, end, _text = hybrid.backing_at(2)[1][0]
+    assert start == pytest.approx(0.2 + 1.001 * 90.1)
+    assert end == pytest.approx(0.2 + 1.001 * 90.3)
+    assert hybrid.backing_alignment_at(2)["rate"] == pytest.approx(1.001)
 
 
 def test_ttml_adlibs_are_never_borrowed_from_a_different_duration_release():

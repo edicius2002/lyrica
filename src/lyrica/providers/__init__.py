@@ -15,11 +15,17 @@ import queue
 import threading
 import time
 from copy import copy
+from difflib import SequenceMatcher
 from pathlib import Path
 from statistics import median
 
 from lyrica import config
-from lyrica.lyrics import Lyrics, Precision
+from lyrica.lyrics import (
+    BACKING_CROSS_SOURCE_ALIGNED,
+    BACKING_INFERRED,
+    Lyrics,
+    Precision,
+)
 from lyrica.providers.base import LyricsProvider
 from lyrica.providers.community import CommunityTtmlProvider
 from lyrica.providers.lrclib import LrclibProvider
@@ -76,8 +82,17 @@ OVERALL_TIMEOUT_S = 12.0
 # within this small window; after it Richsync is shown as-is.
 HYBRID_GRACE_S = 1.5
 HYBRID_DURATION_TOLERANCE_S = 2.0
-HYBRID_MAX_MEDIAN_RESIDUAL_S = 0.35
-HYBRID_MAX_RESIDUAL_S = 0.75
+HYBRID_MAX_MEDIAN_RESIDUAL_S = 0.18
+HYBRID_MAX_LOCAL_RESIDUAL_S = 0.20
+HYBRID_MAX_RATE_DELTA = 0.0015
+HYBRID_RATE_MIN_SPAN_S = 30.0
+HYBRID_MAX_LINE_JOIN = 4
+HYBRID_GROUP_TEXT_RATIO = 0.90
+HYBRID_SINGLE_TEXT_RATIO = 0.94
+# Equal-duration recordings cannot carry the same lyric sentence many seconds
+# apart. Reject that candidate before the comparatively expensive fuzzy text
+# comparison; the final clock checks below remain much stricter.
+HYBRID_MAX_GROUP_DISTANCE_S = 8.0
 
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
                  "queried")
@@ -107,7 +122,9 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 #    being rendered as overlapping backing layers.
 # 10: those suffixes correctly remain in the backing lane, while their lead
 #     stays current until the sequential response has finished.
-CACHE_VERSION = 10
+# 11: hybrid backing now records cross-source provenance, its affine transform
+#     and local residual instead of caching a transformed clock as "exact".
+CACHE_VERSION = 11
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -130,10 +147,27 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     know whether a better source had been asked.
     """
     d = json.loads(path.read_text(encoding="utf-8"))
-    if d.get("v") != CACHE_VERSION:
-        # Written by an older shape. Reported as a miss nobody has been asked
-        # about, which is what sends it round the providers again.
-        return None, []
+    version = d.get("v")
+    if version != CACHE_VERSION:
+        # Version 10 already contains every field required by direct TTML and
+        # Richsync. Preserve those entries: invalidating the entire listening
+        # history would burst requests into Musixmatch's throttle. Only its old
+        # hybrids are unsafe because they cached a transformed clock as
+        # ``exact`` without the residual needed to validate it locally.
+        source = str(d.get("source", ""))
+        inferred_backing = (
+            source.startswith("musixmatch/richsync")
+            and any(d.get("backing", []))
+            and any(timing == BACKING_INFERRED
+                    for timing in d.get("backing_timing", [])))
+        old_safe = (version == 10
+                    and not source.startswith(
+                        "musixmatch/richsync+community-ttml-adlibs")
+                    and not inferred_backing)
+        if not old_safe:
+            # Reported as a miss nobody has been asked about, which sends only
+            # the unsafe/unknown shape round the providers again.
+            return None, []
     asked = d.get("asked", [])
     if d.get("miss"):
         return None, asked
@@ -150,6 +184,7 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     lyr.backing_words = [[tuple(w) for w in line]
                          for line in d.get("backing_words", [])]
     lyr.backing_timing = list(d.get("backing_timing", []))
+    lyr.backing_alignment = list(d.get("backing_alignment", []))
     lyr.backing_modes = list(d.get("backing_modes", []))
     lyr.voices = list(d.get("voices", []))
     lyr.singers = dict(d.get("singers", {}))
@@ -163,6 +198,7 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
         payload = {"lines": result.lines, "words": result.words, "asked": asked,
                    "backing": result.backing, "backing_words": result.backing_words,
                    "backing_timing": result.backing_timing,
+                   "backing_alignment": result.backing_alignment,
                    "backing_modes": result.backing_modes,
                    "voices": result.voices, "singers": result.singers,
                    "v": CACHE_VERSION}
@@ -198,25 +234,133 @@ def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
     return _staged(new) and not _staged(best)
 
 
-def _line_pairs(richsync: Lyrics, community: Lyrics) -> list[tuple[int, int]]:
-    """Pair identically transcribed lead lines while preserving their order.
+def _line_groups(richsync: Lyrics, community: Lyrics) -> list[tuple[tuple, tuple]]:
+    """Best ordered text alignment, including differently split lead lines.
 
-    A repeated chorus is deliberately paired with its next occurrence, not
-    merely with the closest timestamp.  The latter would make a shifted live
-    recording appear to validate itself.
+    Richsync commonly writes one long sentence where TTML has two to four
+    screen-sized lines. A plain LCS loses that whole region, then has no local
+    anchors with which to judge its adlibs. This dynamic alignment can join a
+    short consecutive run on either side, while its score still considers the
+    whole song before choosing among repeated choruses.
     """
-    pairs: list[tuple[int, int]] = []
-    rich_at = 0
-    for community_at, (_start, text) in enumerate(community.lines):
-        key = fold(text)
-        if not key:
-            continue
-        for candidate in range(rich_at, len(richsync.lines)):
-            if fold(richsync.lines[candidate][1]) == key:
-                pairs.append((candidate, community_at))
-                rich_at = candidate + 1
-                break
-    return pairs
+    rows, cols = len(richsync.lines), len(community.lines)
+
+    def key(lines: list, start: int, span: int) -> str:
+        return " ".join(fold(lines[i][1]) for i in range(start, start + span))
+
+    rich_keys = {(start, span): key(richsync.lines, start, span)
+                 for start in range(rows)
+                 for span in range(1, min(HYBRID_MAX_LINE_JOIN, rows - start) + 1)}
+    community_keys = {(start, span): key(community.lines, start, span)
+                      for start in range(cols)
+                      for span in range(
+                          1, min(HYBRID_MAX_LINE_JOIN, cols - start) + 1)}
+
+    # covered lines, group count, textual similarity, negative clock distance.
+    # Coverage first makes a genuine 1:3 sentence more useful than one small
+    # exact fragment; similarity and time settle repeated refrains.
+    scores: list[list[tuple | None]] = [
+        [None for _ in range(cols + 1)] for _ in range(rows + 1)]
+    parents: list[list[tuple | None]] = [
+        [None for _ in range(cols + 1)] for _ in range(rows + 1)]
+    scores[0][0] = (0, 0, 0.0, 0.0)
+
+    def offer(ri: int, ci: int, score: tuple, parent: tuple) -> None:
+        if scores[ri][ci] is None or score > scores[ri][ci]:
+            scores[ri][ci], parents[ri][ci] = score, parent
+
+    spans = ([(1, size) for size in range(1, HYBRID_MAX_LINE_JOIN + 1)]
+             + [(size, 1) for size in range(2, HYBRID_MAX_LINE_JOIN + 1)])
+    for ri in range(rows + 1):
+        for ci in range(cols + 1):
+            score = scores[ri][ci]
+            if score is None:
+                continue
+            if ri < rows:
+                offer(ri + 1, ci, score, (ri, ci, None))
+            if ci < cols:
+                offer(ri, ci + 1, score, (ri, ci, None))
+            for rich_span, community_span in spans:
+                if ri + rich_span > rows or ci + community_span > cols:
+                    continue
+                rich_text = rich_keys[(ri, rich_span)]
+                community_text = community_keys[(ci, community_span)]
+                if not rich_text or not community_text:
+                    continue
+                distance = abs(richsync.lines[ri][0]
+                               - community.lines[ci][0])
+                if distance > HYBRID_MAX_GROUP_DISTANCE_S:
+                    continue
+                exact = rich_text == community_text
+                ratio = (1.0 if exact else SequenceMatcher(
+                    None, rich_text, community_text, autojunk=False).ratio())
+                threshold = (HYBRID_SINGLE_TEXT_RATIO
+                             if rich_span == community_span == 1
+                             else HYBRID_GROUP_TEXT_RATIO)
+                if not exact and (min(len(rich_text), len(community_text)) < 12
+                                  or ratio < threshold):
+                    continue
+                matched = (score[0] + rich_span + community_span,
+                           score[1] + 1, score[2] + ratio,
+                           score[3] - distance)
+                group = (tuple(range(ri, ri + rich_span)),
+                         tuple(range(ci, ci + community_span)))
+                offer(ri + rich_span, ci + community_span, matched,
+                      (ri, ci, group))
+
+    groups: list[tuple[tuple, tuple]] = []
+    ri, ci = rows, cols
+    while ri or ci:
+        parent = parents[ri][ci]
+        if parent is None:
+            break
+        previous_ri, previous_ci, group = parent
+        if group is not None:
+            groups.append(group)
+        ri, ci = previous_ri, previous_ci
+    groups.reverse()
+    return groups
+
+
+def _line_pairs(richsync: Lyrics, community: Lyrics) -> list[tuple[int, int]]:
+    """Clock anchors at the beginning of each aligned sequential group."""
+    return [(rich_indices[0], community_indices[0])
+            for rich_indices, community_indices
+            in _line_groups(richsync, community)]
+
+
+def _hybrid_clock(richsync: Lyrics, community: Lyrics,
+                  pairs: list[tuple[int, int]]) -> tuple[float, float, dict] | None:
+    """Robust affine CommunityTTML -> Richsync clock and anchor residuals."""
+    slopes = []
+    for at, (ri, ci) in enumerate(pairs):
+        rich_start, community_start = richsync.lines[ri][0], community.lines[ci][0]
+        for rj, cj in pairs[at + 1:]:
+            community_span = community.lines[cj][0] - community_start
+            if community_span >= HYBRID_RATE_MIN_SPAN_S:
+                slopes.append((richsync.lines[rj][0] - rich_start) / community_span)
+    rate = median(slopes) if slopes else 1.0
+    if abs(rate - 1.0) > HYBRID_MAX_RATE_DELTA:
+        return None
+    offset = median(richsync.lines[ri][0] - rate * community.lines[ci][0]
+                    for ri, ci in pairs)
+    residuals = {
+        (ri, ci): abs(richsync.lines[ri][0]
+                      - (offset + rate * community.lines[ci][0]))
+        for ri, ci in pairs
+    }
+    if median(residuals.values()) > HYBRID_MAX_MEDIAN_RESIDUAL_S:
+        return None
+    return offset, rate, residuals
+
+
+def _local_alignment_error(community: Lyrics, ci: int,
+                           pairs: list[tuple[int, int]], residuals: dict) -> float:
+    """Worst residual among the three timeline anchors nearest one adlib."""
+    target = community.lines[ci][0]
+    nearest = sorted(
+        pairs, key=lambda pair: abs(community.lines[pair[1]][0] - target))[:3]
+    return max(residuals[pair] for pair in nearest)
 
 
 def _merge_community_backing(richsync: Lyrics | None, community: Lyrics | None,
@@ -241,43 +385,92 @@ def _merge_community_backing(richsync: Lyrics | None, community: Lyrics | None,
                           or abs(recorded - duration) > HYBRID_DURATION_TOLERANCE_S)):
         return None
 
-    pairs = _line_pairs(richsync, community)
+    groups = _line_groups(richsync, community)
+    pairs = [(rich_indices[0], community_indices[0])
+             for rich_indices, community_indices in groups]
     required = min(3, len(richsync.lines), len(community.lines))
     if len(pairs) < required:
         return None
-    offsets = [richsync.lines[ri][0] - community.lines[ci][0]
-               for ri, ci in pairs]
-    offset = median(offsets)
-    residuals = [abs(value - offset) for value in offsets]
-    if (median(residuals) > HYBRID_MAX_MEDIAN_RESIDUAL_S
-            or max(residuals) > HYBRID_MAX_RESIDUAL_S):
+    clock = _hybrid_clock(richsync, community, pairs)
+    if clock is None:
         return None
+    offset, rate, residuals = clock
 
-    by_community = {ci: ri for ri, ci in pairs}
+    by_community = {
+        ci: rich_indices[0]
+        for rich_indices, community_indices in groups if len(rich_indices) == 1
+        for ci in community_indices
+    }
     backed = [ci for ci, text in enumerate(community.backing) if text]
-    # We never move a response to a "similar" line.  Every TTML backing line
-    # must have an ordered, text-identical Richsync anchor.
-    if not backed or any(ci not in by_community for ci in backed):
+    if not backed:
         return None
 
     merged = copy(richsync)
     merged.backing = list(richsync.backing)
     merged.backing_words = [list(words) for words in richsync.backing_words]
     merged.backing_timing = list(richsync.backing_timing)
+    merged.backing_modes = list(richsync.backing_modes)
+    merged.backing_alignment = list(richsync.backing_alignment)
     while len(merged.backing) < len(merged.lines):
         merged.backing.append("")
     while len(merged.backing_words) < len(merged.lines):
         merged.backing_words.append([])
     while len(merged.backing_timing) < len(merged.lines):
         merged.backing_timing.append("")
+    while len(merged.backing_modes) < len(merged.lines):
+        merged.backing_modes.append("")
+    while len(merged.backing_alignment) < len(merged.lines):
+        merged.backing_alignment.append({})
+    accepted = 0
     for ci in backed:
+        if ci not in by_community:
+            continue
+        local_error = _local_alignment_error(community, ci, pairs, residuals)
+        if local_error > HYBRID_MAX_LOCAL_RESIDUAL_S:
+            continue
         ri = by_community[ci]
-        merged.backing[ri] = community.backing[ci]
-        merged.backing_words[ri] = [
-            (start + offset, end + offset, text)
+        transformed = [
+            (offset + rate * start, offset + rate * end, text)
             for start, end, text in community.backing_words[ci]
         ]
-        merged.backing_timing[ri] = "exact"
+        if not transformed:
+            continue
+        existing_text, existing_words = richsync.backing_at(ri)
+        if existing_text and existing_words:
+            text_ratio = SequenceMatcher(
+                None, fold(existing_text), fold(community.backing[ci]),
+                autojunk=False).ratio()
+            if text_ratio < HYBRID_GROUP_TEXT_RATIO:
+                continue
+            start_error = abs(existing_words[0][0] - transformed[0][0])
+            local_error = max(local_error, start_error)
+            if local_error > HYBRID_MAX_LOCAL_RESIDUAL_S:
+                continue
+            # Richsync owns the lead clock and has a source-native adlib start.
+            # TTML supplies its measured internal rhythm and end, shifted by at
+            # most the verified 200 ms so the response never jumps entry.
+            shift = existing_words[0][0] - transformed[0][0]
+            transformed = [(start + shift, end + shift, text)
+                           for start, end, text in transformed]
+        merged.backing[ri] = community.backing[ci]
+        merged.backing_words[ri] = transformed
+        merged.backing_timing[ri] = BACKING_CROSS_SOURCE_ALIGNED
+        lead_words = merged.words_at(ri)
+        lead_end = max((end for _start, end, _text in lead_words), default=0.0)
+        merged.backing_modes[ri] = (
+            "sequential" if lead_end
+            and transformed[0][0] >= lead_end - local_error
+            else "overlapping")
+        merged.backing_alignment[ri] = {
+            "source": community.source,
+            "offset": round(offset, 6),
+            "rate": round(rate, 9),
+            "local_residual": round(local_error, 6),
+            "anchors": min(3, len(pairs)),
+        }
+        accepted += 1
+    if not accepted:
+        return None
     merged.source = "musixmatch/richsync+community-ttml-adlibs"
     return merged
 

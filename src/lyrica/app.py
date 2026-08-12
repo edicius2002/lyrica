@@ -13,6 +13,7 @@ Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
 """
 import logging
 import logging.handlers
+import math
 import os
 import queue
 import threading
@@ -44,8 +45,14 @@ from lyrica import (
 )
 from lyrica import palette as palette_mod
 from lyrica.lineview import LineView
-from lyrica.lyrics import Lyrics, progress_in
-from lyrica.overlay_text import OUTLINE_COLOUR
+from lyrica.lyrics import (
+    BACKING_CROSS_SOURCE_ALIGNED,
+    BACKING_INFERRED,
+    BACKING_SOURCE_EXACT,
+    Lyrics,
+    progress_in,
+)
+from lyrica.overlay_text import OUTLINE_COLOUR, measure, split_for_wrapping
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -56,9 +63,9 @@ from lyrica.sessions import Snapshot, create_reader
 # derived, not chosen, and shrinking the count is what shrinks the window.
 WIDTH, HEIGHT = 900, 320
 WRAP = 760
-# A backing line occupies the lower corner between two main rows. This gap
-# includes the echo font, its outer bloom and both lines' maximum growth, so a
-# response never has to share pixels with the line arriving below it.
+# A backing line occupies the lower corner between two main rows. The gap keeps
+# the actual glyph boxes separate; their soft outer halos may meet, but the
+# echo is layered behind both lead rows so that light can never cover letters.
 ROW_GAP = 50
 
 # The band at each edge where a line fades away. Shallower now that only one
@@ -86,20 +93,20 @@ FONT_LINE = ("Segoe UI", -30, "bold")
 # the singer, and it should look it.
 FONT_ECHO = ("Segoe UI", -20, "italic")
 
-# How far below the line it answers a backing vocal sits, as a fraction of the
-# line's own height, and how much of the palette's light it keeps. Both exist
-# because neither alone was enough: on the same baseline it read as part of the
-# line, and a rung down the ladder gave it the exact colour of the main line's
-# unsung half.
-# Slightly below the previous two-thirds drop. This leaves a deliberate small
-# breathing gap below the lead while still fitting before the next lyric row.
-ECHO_DROP = 0.77
+# Keep a backing vocal visibly separate from the lead and slightly dimmer. On
+# the same baseline it reads as part of the main lyric; with the lead's exact
+# colour it reads as its unsung half.
 ECHO_KEEP = 0.72
+ECHO_VERTICAL_GAP = 2
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
 # own window inside the line — it answers a phrase rather than lasting as long
 # as one — so it comes and goes on that window rather than on the line's.
 ECHO_FADE_S = 0.30
+# A transformed TTML clock is locally verified but not source-native. Keep its
+# presentation transition inside the same 150-200 ms error budget instead of
+# giving it the full direct-TTML preview on top of alignment uncertainty.
+ECHO_ALIGNED_FADE_S = 0.15
 # Richsync has only word starts; its final token can therefore receive a
 # near-zero inferred duration.  Only a genuinely microscopic *whole ad-lib*
 # receives the conservative path: most serial Richsync timings, including
@@ -110,6 +117,11 @@ ECHO_INFERRED_FADE_S = 0.10
 # milliseconds is long enough to read without making the fallback feel like a
 # separate lyric line; source timestamps remain untouched.
 ECHO_INFERRED_MIN_VISIBLE_S = 0.45
+# Lead lyrics are previewed because they must be read before the voice. A small
+# backing response is perceived rather than read and already owns a fade-in;
+# advancing its entire clock by the lead's 150 ms made aligned adlibs end early.
+BACKING_SOURCE_LEAD_S = 0.05
+BACKING_ALIGNED_LEAD_S = 0.0
 
 # A late SponsorBlock answer can move the recording clock by whole seconds.
 # Landing on the corrected row is honest; scrolling every intervening row is
@@ -125,11 +137,47 @@ LYRICS_FADE_S = 0.16
 
 
 def _needs_inferred_backing_fallback(lyr: Lyrics, line_index: int) -> bool:
-    """Whether a Richsync backing window is too short to render literally."""
-    if lyr.backing_timing_at(line_index) != "inferred":
+    """Whether Richsync inferred a microscopic final backing token."""
+    if lyr.backing_timing_at(line_index) != BACKING_INFERRED:
         return False
     _text, words = lyr.backing_at(line_index)
-    return bool(words and words[-1][1] - words[0][0] <= ECHO_INFERRED_MAX_SOURCE_S)
+    return bool(words and words[-1][1] - words[-1][0]
+                <= ECHO_INFERRED_MAX_SOURCE_S)
+
+
+def _backing_lead_s(lyr: Lyrics, line_index: int) -> float:
+    """Small provenance-aware perceptual lead for a backing clock."""
+    timing = lyr.backing_timing_at(line_index)
+    if timing == BACKING_SOURCE_EXACT:
+        return BACKING_SOURCE_LEAD_S
+    if timing in (BACKING_CROSS_SOURCE_ALIGNED, BACKING_INFERRED):
+        return BACKING_ALIGNED_LEAD_S
+    return 0.0
+
+
+def _backing_window(lyr: Lyrics, line_index: int) -> tuple[float, float, float]:
+    """Effective open, visible-end and fade duration for one backing line."""
+    _text, words = lyr.backing_at(line_index)
+    if not words:
+        return 0.0, 0.0, ECHO_FADE_S
+    timing = lyr.backing_timing_at(line_index)
+    inferred = timing == BACKING_INFERRED
+    short_final = _needs_inferred_backing_fallback(lyr, line_index)
+    if short_final:
+        fade_s = ECHO_INFERRED_FADE_S
+    elif timing == BACKING_CROSS_SOURCE_ALIGNED:
+        fade_s = ECHO_ALIGNED_FADE_S
+    else:
+        fade_s = ECHO_FADE_S
+    visible_end = words[-1][1]
+    if inferred:
+        # Richsync starts are useful but its final duration is inferred. Base
+        # the safety floor on that final token, not on the whole multi-word
+        # response, whose long prefix used to hide a near-zero tail.
+        visible_end = max(visible_end,
+                          words[-1][0] + ECHO_INFERRED_MIN_VISIBLE_S)
+    opens = words[0][0] if inferred else words[0][0] - fade_s
+    return opens, visible_end, fade_s
 
 
 def _display_line_index(lyr: Lyrics, pos: float) -> int:
@@ -138,8 +186,9 @@ def _display_line_index(lyr: Lyrics, pos: float) -> int:
     while index > 0:
         previous = index - 1
         _text, backing_words = lyr.backing_at(previous)
+        _opens, visible_end, _fade = _backing_window(lyr, previous)
         if (lyr.backing_mode_at(previous) != "sequential" or not backing_words
-                or pos >= backing_words[-1][1]):
+                or pos + _backing_lead_s(lyr, previous) >= visible_end):
             break
         # The response remains small and below this preceding lead, but must
         # not be visually overlaid by the following lead line.
@@ -226,16 +275,6 @@ CLICK_SLACK = 4
 SEEK_SETTLED_S = 2.5
 
 logger = logging.getLogger(__name__)
-
-
-def _below(view) -> float:
-    """Where a backing line's top goes, under the line it answers.
-
-    From the *last* row rather than the first: a line long enough to wrap has
-    two, and dropping from the top would land the backing inside the second one.
-    """
-    return (view.y + view.height - view.line_height
-            + view.line_height * ECHO_DROP)
 
 
 def _between(low: tuple, high: str, k: float) -> str:
@@ -383,6 +422,31 @@ def _font_that_fits_width(font: tuple, measured: float, available: float) -> tup
     return (font[0], -reduced if size < 0 else reduced, *font[2:])
 
 
+def _single_row_width(text: str, font: tuple) -> int:
+    """Measure the exact unwrapped row shape LineView will later construct."""
+    font_obj = tkfont.Font(font=font)
+    key = tuple(sorted(font_obj.actual().items()))
+    space = measure(font_obj, key, " ")
+    width = 0
+    for index, (piece, glued) in enumerate(split_for_wrapping(text)):
+        if index and not glued:
+            width += space
+        width += measure(font_obj, key, piece)
+    return width
+
+
+def _font_for_single_row(text: str, font: tuple, available: float) -> tuple:
+    """Choose an unwrapped font before any canvas items are constructed."""
+    fitted = font
+    for _attempt in range(8):
+        measured = _single_row_width(text, fitted)
+        smaller = _font_that_fits_width(fitted, measured, available)
+        if smaller == fitted:
+            return fitted
+        fitted = smaller
+    return fitted
+
+
 class Overlay:
     def __init__(self):
         self.reader = create_reader(interval=0.5)
@@ -436,6 +500,7 @@ class Overlay:
         self._echo_fade_s = ECHO_FADE_S
         self._echo_opens = 0.0
         self._echo_ends = 0.0
+        self._echo_blocked: tuple | None = None
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
         self._growth = config.growth_factor()
@@ -1672,21 +1737,16 @@ class Overlay:
         if self._echo is not None and self._advance_backing(pos, effects=effects):
             self._order_text_layers()
             return
-        self._clear_backing()
+        self._clear_backing(preserve_block=True)
 
         text, words = lyr.backing_at(self.line_index)
         active = self._views.get(self.line_index)
         if not text or not words or active is None or not self._views:
             return
-        inferred = lyr.backing_timing_at(self.line_index) == "inferred"
-        short_inferred = _needs_inferred_backing_fallback(lyr, self.line_index)
-        fade_s = ECHO_INFERRED_FADE_S if short_inferred else ECHO_FADE_S
-        visible_end = max(words[-1][1], words[0][0] + ECHO_INFERRED_MIN_VISIBLE_S) \
-            if short_inferred else words[-1][1]
-        # Richsync provides serial source offsets, so presenting it before its
-        # first one changes an otherwise good recording's perceived timing.
-        # TTML has independently measured word windows and keeps its preview.
-        opens = words[0][0] if inferred else words[0][0] - fade_s
+        block_key = (id(lyr), self.line_index, self.width, self.height, self.row_gap)
+        if self._echo_blocked == block_key:
+            return
+        opens, visible_end, fade_s = _backing_window(lyr, self.line_index)
         if not opens <= pos <= visible_end + fade_s:
             return
         active_side = self._voice_sides(lyr).get(lyr.voice_at(self.line_index), 0)
@@ -1695,25 +1755,16 @@ class Overlay:
         echo_side = -active_side if active_side else 1
         margin = self.chrome.px(ECHO_SAFE_MARGIN)
         available = max(1.0, self.width - 2 * margin)
-        echo_font = self.f_echo
+        echo_font = _font_for_single_row(text, self.f_echo, available)
         # Backing vocals are a single responding voice, never a second lyric
-        # block. Let a long one use the whole safe width, then reduce only its
-        # own font until it fits that one row. The normal lead font and layout
-        # are untouched.
-        for _attempt in range(8):
-            self._echo = LineView(
-                self.canvas, self.width // 2, _below(active), text, words,
-                font=echo_font, wrap=10**9,
-                palette=self.palette.dimmed(ECHO_KEEP),
-                scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
-            echo_left = min(a for a, _b in self._echo._row_spans)
-            echo_right = max(b for _a, b in self._echo._row_spans)
-            fitted_font = _font_that_fits_width(echo_font, echo_right - echo_left,
-                                                 available)
-            if fitted_font == echo_font:
-                break
-            self._echo.destroy()
-            echo_font = fitted_font
+        # block. Keep the designed echo size consistently; only a genuinely
+        # long response is reduced enough to remain inside the safe width. Its
+        # final size is known now, so canvas glyphs and effects are built once.
+        self._echo = LineView(
+            self.canvas, self.width // 2, active.y + active.height, text, words,
+            font=echo_font, wrap=10**9,
+            palette=self.palette.dimmed(ECHO_KEEP),
+            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
         self._echo_line, self._echo_words = self.line_index, words
         self._echo_fade_s, self._echo_opens, self._echo_ends = fade_s, opens, visible_end
         self._echo_side = echo_side
@@ -1729,26 +1780,43 @@ class Overlay:
         middle = self.width / 2
         self._echo_origin_lean = origin - middle
         self._echo_target_lean = target - middle
-        self._place_backing_y(active)
-        self._advance_backing(pos, effects=effects)
+        if not self._advance_backing(pos, effects=effects):
+            # A very tall lead at the lower edge can leave no honest lane for
+            # the response. Missing it is preferable to drawing it through the
+            # main lyric or through the following row.
+            moving_anchor = self.line_index in self._glides
+            self._clear_backing()
+            # An incoming row starts near the lower edge and gains room as it
+            # glides to the anchor. Retry on the next frame instead of turning
+            # that temporary lack of space into a whole-line suppression.
+            if not moving_anchor:
+                self._echo_blocked = block_key
+            return
+        self._echo_blocked = None
         self._order_text_layers()
 
-    def _place_backing_y(self, anchor: LineView) -> None:
-        """Hang the echo below its lead without entering the following row."""
-        self._echo.move_to(self._safe_view_y(self._echo, _below(anchor)))
-        # Font raster bounds vary by a pixel or two across Windows runners.
-        # Use the visual boxes instead of assuming the nominal drop clears the
-        # following line on every font backend and at every intermediate size.
-        following = self._views.get(self._echo_line + 1)
-        if following is None:
-            return
-        echo_bottom = self._echo.visual_vertical_span()[1]
-        following_top = following.visual_vertical_span()[0]
-        if echo_bottom > following_top:
-            # `LineView.move_to` deliberately lands on device pixels. The
-            # extra pixel prevents a fractional overlap surviving that round.
-            self._echo.move_to(
-                self._echo.y - (echo_bottom - following_top) - 1.0)
+    def _place_backing_y(self, anchor: LineView) -> bool:
+        """Centre the echo in the reserved row gap below the lead.
+
+        Return false when canvas clipping or an unusually tall glyph leaves no
+        non-overlapping position. The caller then suppresses this response
+        instead of allowing the edge clamp to push it over the lead.
+        """
+        gap = self.chrome.px(ECHO_VERTICAL_GAP)
+        lane_top = anchor.y + anchor.height + gap
+        lane_bottom = anchor.y + anchor.height + self.row_gap - gap
+        if self._echo.height > lane_bottom - lane_top + 0.5:
+            return False
+        wanted = lane_top
+        safe = self._safe_view_y(self._echo, wanted)
+        safe_top = safe
+        safe_bottom = safe + self._echo.height
+        if safe_top < lane_top - 0.5 or safe_bottom > lane_bottom + 0.5:
+            return False
+        # The lane itself is relative to the lead. A moving following row no
+        # longer pulls the response upward through the line it belongs to.
+        self._echo.move_to(safe)
+        return True
 
     def _advance_backing(self, pos: float, *, effects: bool = True) -> bool:
         """Carry the backing through its own window. False once it is spent.
@@ -1765,8 +1833,8 @@ class Overlay:
         if not opens <= pos <= closes:
             return False
         anchor = self._views.get(self._echo_line)
-        if anchor is not None:
-            self._place_backing_y(anchor)
+        if anchor is not None and not self._place_backing_y(anchor):
+            return False
         # Enter from the lead towards its corner and settle there with an
         # ordinary ease-in-out. On departure it yields only a quarter of that
         # short journey, so the response remains attached to the phrase.
@@ -1789,7 +1857,7 @@ class Overlay:
         if pos < words[0][0]:
             self._echo.set_active(False)
             self._echo.show_inactive(_between(pal.backdrop, pal.unsung,
-                                              (pos - opens) / ECHO_FADE_S))
+                                              (pos - opens) / self._echo_fade_s))
         elif pos > self._echo_ends:
             # Struck first, so `set_active(False)` puts back any letter still
             # standing in for itself before the colour takes over.
@@ -1804,7 +1872,7 @@ class Overlay:
                 self._echo.advance_bloom(time.monotonic())
         return True
 
-    def _clear_backing(self) -> None:
+    def _clear_backing(self, *, preserve_block: bool = False) -> None:
         if self._echo is not None:
             self._echo.destroy()
         self._echo, self._echo_line, self._echo_side = None, -1, 0
@@ -1813,15 +1881,20 @@ class Overlay:
         self._echo_fade_s = ECHO_FADE_S
         self._echo_opens = 0.0
         self._echo_ends = 0.0
+        if not preserve_block:
+            self._echo_blocked = None
 
     def _order_text_layers(self) -> None:
         """Keep opaque fading glyphs below the text they must never cover."""
         active = self._views.get(self.line_index)
+        if self._echo is not None:
+            # Its wide translucent halo may enter a neighbour's visual box,
+            # but it remains behind every main lyric glyph. This preserves the
+            # designed echo size without letting its light muddy either row.
+            self._echo.raise_layer()
         for index, view in self._views.items():
             if index != self.line_index:
                 view.raise_layer()
-        if self._echo is not None:
-            self._echo.raise_layer()
         if active is not None:
             active.raise_layer()
 
@@ -1884,10 +1957,34 @@ class Overlay:
                 # Displacement decaying, not a position being driven: a change
                 # landing mid-glide adds to the journey instead of restarting it.
                 remaining = self._glides[index].offset() if index in self._glides else 0.0
+                duration, curve = self._row_glide_motion(index, view)
                 self._glides[index] = motion.Glide(
-                    previous - target + remaining,
-                    motion.row_duration(index, self.line_index))
+                    previous - target + remaining, duration, curve)
             y += view.height + self.row_gap
+
+    def _row_glide_motion(self, index: int, view: LineView) -> tuple[float, tuple]:
+        """Clock and curve for one row, coupling multi-row neighbours.
+
+        Ordinarily the stagger is the motion's character. Two wrapped rows
+        amplify its relative displacement enough for the new active line to
+        catch the outgoing one, though. Move that pair as one slower, gently
+        eased block: both the outgoing and incoming lines rise gradually, and
+        the outgoing line can settle as context without a fade pulse.
+        """
+        active = self._views.get(self.line_index)
+        both_multiline = (
+            active is not None
+            and view.height > view.line_height
+            and active.height > active.line_height)
+        adjacent_pair = abs(index - self.line_index) == 1 and both_multiline
+        active_has_pair = (
+            index == self.line_index and both_multiline
+            and any(abs(other - index) == 1
+                    and other_view.height > other_view.line_height
+                    for other, other_view in self._views.items()))
+        if adjacent_pair or active_has_pair:
+            return motion.MULTILINE_DURATION_MS, motion.MULTILINE_CURVE
+        return motion.row_duration(index, self.line_index), motion.SCROLL_CURVE
 
     def _advance_glides(self) -> bool:
         moving = False
@@ -1903,7 +2000,39 @@ class Overlay:
                 del self._glides[index]
             else:
                 moving = True
+        self._keep_gliding_rows_apart()
         return moving
+
+    def _keep_gliding_rows_apart(self) -> None:
+        """Keep staggered row trajectories from crossing the active row.
+
+        Adjacent multi-row views normally share a duration, so this is chiefly
+        the fallback for a new line change interrupting an older stagger. In
+        that case anchor the active view and push rows above and below away
+        only for the overlapping part of that frame; their individual glides
+        still determine every other pixel of the journey.
+        """
+        ordered = sorted(self._views)
+        if self.line_index not in self._views:
+            return
+        active_at = ordered.index(self.line_index)
+        active = self._views[self.line_index]
+
+        lower_top = active.visual_vertical_span()[0]
+        for index in reversed(ordered[:active_at]):
+            view = self._views[index]
+            _top, bottom = view.visual_vertical_span()
+            if bottom > lower_top:
+                view.move_to(view.y - math.ceil(bottom - lower_top))
+            lower_top = view.visual_vertical_span()[0]
+
+        upper_bottom = active.visual_vertical_span()[1]
+        for index in ordered[active_at + 1:]:
+            view = self._views[index]
+            top, _bottom = view.visual_vertical_span()
+            if top < upper_bottom:
+                view.move_to(view.y + math.ceil(upper_bottom - top))
+            upper_bottom = view.visual_vertical_span()[1]
 
     def _fade_text_scene(self, progress: float) -> None:
         """Present every lyric glyph between the wash and its true colour."""
@@ -1958,6 +2087,56 @@ class Overlay:
         moving, self._cut_fade_at = self._advance_fade(
             self._cut_fade_at, CUT_CORRECTION_FADE_S, appearing=True)
         return moving
+
+    def _mount_static_lyrics(self, snap: Snapshot) -> None:
+        """Build one truthful paused frame without advancing presentation time.
+
+        A promotion is still a visual state change when the player is paused:
+        its card, geometry and words all belong together.  What pause forbids
+        is motion, not construction.  This path therefore lands directly at
+        the target size and reported playback position, with no beam, glides,
+        bloom or transition clocks.  The word sweep is painted once at that
+        position and remains frozen until live transport resumes.
+        """
+        self._retarget_size(animate=False)
+        self._collapse = None
+        self._glides.clear()
+        self._cuts_discontinuous = False
+        self._cut_fade_at = None
+        self._lyrics_reveal_pending = False
+        self._lyrics_fade_at = None
+
+        lyr = self.lyrics
+        if lyr is None or not lyr.synced or not lyr.lines:
+            self._clear_views()
+            self.line_index = -1
+            return
+
+        self._settle_cuts(lyr, snap)
+        pos = self._cuts.to_song(snap.live_position()) + self.offset
+        index = _display_line_index(lyr, pos)
+        waiting = index < 0
+        if waiting:
+            index = 0
+        self._go_to_line(index, lyr, animate=False)
+        self._glides.clear()
+
+        active = self._views.get(self.line_index)
+        if active is not None:
+            if waiting:
+                active.show_inactive(self.palette.unsung)
+            elif active.words:
+                word, fraction = lyr.word_progress_at(
+                    self.line_index, pos + WORD_LEAD_S)
+                active.show_sweep(word, fraction)
+            else:
+                active.show_lit()
+
+        backing_pos = pos + _backing_lead_s(lyr, self.line_index)
+        self._show_backing(lyr, backing_pos, effects=False)
+        # A previous scene may have left presentation colours between the wash
+        # and their targets. Static mounting has no fade clock to finish them.
+        self._fade_text_scene(1.0)
 
     # --- render ---
     def _tick(self):
@@ -2023,9 +2202,11 @@ class Overlay:
         self.lyrics = self._shown.lyrics
         self._lyrics_state = self._shown.lyrics_state
         late_reveal = False
+        scene_changed = promoted
         if (self._shown.scene == SCENE_CARD_ONLY
                 and self._lyrics_state != LYRICS_UNKNOWN):
             self._shown.scene = SCENE_READY
+            scene_changed = True
             if self._lyrics_state == LYRICS_PRESENT:
                 # CARD_ONLY contains no lyric items. The first render below
                 # builds the right three rows directly at the current playback
@@ -2058,7 +2239,13 @@ class Overlay:
             self._lay_out_card(title, artists)
             self._place_thumb()
 
-        if live_transport:
+        paused_current = (
+            snap.ok and not snap.playing and self._shown.snapshot.ok
+            and snap.track_key() == self._shown.snapshot.track_key())
+        static_mounted = scene_changed and paused_current
+        if static_mounted:
+            self._mount_static_lyrics(snap)
+        elif live_transport:
             if self._advance_beam():
                 interval = BEAM_TICK_MS
             self._retarget_size()
@@ -2077,7 +2264,8 @@ class Overlay:
         lyr = self.lyrics
         lyrics_revealing = (
             self._lyrics_reveal_pending or self._lyrics_fade_at is not None)
-        render_lyrics = live_transport or late_reveal or lyrics_revealing
+        render_lyrics = (not static_mounted
+                         and (live_transport or late_reveal or lyrics_revealing))
         if render_lyrics and lyr is not None and lyr.synced and lyr.lines:
             self._settle_cuts(lyr, snap)
             # Through the cuts first: the player's position is a place in a
@@ -2149,8 +2337,7 @@ class Overlay:
             # Outside every branch, so a line with no word timings takes its
             # backing down instead of leaving the last one frozen over it.
             if self._cut_fade_at is None:
-                backing_pos = pos + (0.0 if lyr.backing_timing_at(self.line_index)
-                                     == "inferred" else WORD_LEAD_S)
+                backing_pos = pos + _backing_lead_s(lyr, self.line_index)
                 self._show_backing(
                     lyr, backing_pos, effects=not lyrics_revealing)
             else:

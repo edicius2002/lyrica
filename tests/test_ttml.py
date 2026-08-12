@@ -309,6 +309,7 @@ def test_an_unmarked_parenthetical_suffix_keeps_its_own_timing_as_backing():
     assert lyrics.lines[0][1] == "Lead"
     assert lyrics.words_at(0) == [(0.0, 0.8, "Lead")]
     assert lyrics.backing_at(0) == ("(yeah)", [(0.8, 1.3, "(yeah)")])
+    assert lyrics.backing_mode_at(0) == "sequential"
 
 
 def test_a_line_with_nothing_behind_it_says_so():

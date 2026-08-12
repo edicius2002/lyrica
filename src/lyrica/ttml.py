@@ -37,7 +37,7 @@ this that could be wrong about a real person, and nothing here would show them.
 import re
 import xml.etree.ElementTree as ET
 
-from lyrica.lyrics import Lyrics, split_parenthetical_adlib
+from lyrica.lyrics import BACKING_SOURCE_EXACT, Lyrics, split_parenthetical_adlib
 
 TTML_NS = "http://www.w3.org/ns/ttml"
 TTM_NS = "http://www.w3.org/ns/ttml#metadata"
@@ -246,6 +246,7 @@ def parse_ttml(body: str) -> Lyrics | None:
     backing: list = []
     backing_words: list = []
     backing_timing: list = []
+    backing_modes: list = []
     voices: list = []
     for p in root.iter():
         if _local(p.tag) != "p":
@@ -271,11 +272,20 @@ def parse_ttml(body: str) -> Lyrics | None:
         if inferred is not None:
             backing.append(backing_text)
             backing_words.append(backing_line_words)
-            backing_timing.append("exact")
+            backing_timing.append(BACKING_SOURCE_EXACT)
+            lead_end = max((end for _start, end, _text in line_words), default=0.0)
+            backing_modes.append(
+                "sequential" if lead_end and backing_line_words[0][0] >= lead_end
+                else "overlapping")
         else:
             backing.append(" ".join("".join(x + tail for _s, _e, x, tail in echo).split()))
-            backing_words.append(_words(echo))
-            backing_timing.append("exact" if echo else "")
+            echo_words = _words(echo)
+            backing_words.append(echo_words)
+            backing_timing.append(BACKING_SOURCE_EXACT if echo else "")
+            lead_end = max((end for _start, end, _text in line_words), default=0.0)
+            backing_modes.append(
+                "sequential" if echo_words and lead_end
+                and echo_words[0][0] >= lead_end else "overlapping" if echo_words else "")
 
     if not lines:
         return None
@@ -288,6 +298,7 @@ def parse_ttml(body: str) -> Lyrics | None:
     backing = [backing[i] for i in order]
     backing_words = [backing_words[i] for i in order]
     backing_timing = [backing_timing[i] for i in order]
+    backing_modes = [backing_modes[i] for i in order]
     voices = [voices[i] for i in order]
 
     # Dropped whole when no line names a singer, so a document without agents
@@ -298,6 +309,7 @@ def parse_ttml(body: str) -> Lyrics | None:
     return Lyrics(lines=lines, words=words, synced=True,
                   backing=backing, backing_words=backing_words,
                   backing_timing=backing_timing,
+                  backing_modes=backing_modes,
                   voices=voices,
                   singers=_declared_agents(root) if voices else {})
 
