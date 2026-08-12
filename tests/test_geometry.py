@@ -352,6 +352,132 @@ def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
               for item in view.item_ids())
 
 
+def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
+    from lyrica.lyrics import Lyrics
+
+    wrapped = ("upcoming wrapped context remains visible below the current "
+               "line throughout the preview before its natural rise")
+    lyrics = Lyrics(
+        lines=[(0.0, "short current row"), (3.0, wrapped),
+               (6.0, "following row")],
+        words=[[], [], []], synced=True)
+
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+
+    incoming = overlay._views[1]
+    assert incoming.height > incoming.line_height
+    assert overlay._visibility(incoming) > 0.0
+    assert incoming._visible is True
+
+
+def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 236.0
+        height = 70
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel._content_top = 88
+
+    # The halo touches y=320, but the grown letters end at y=309 and should be
+    # shown as the next-line preview rather than hidden wholesale.
+    assert View().visual_vertical_span()[1] == panel.height
+    assert panel._visibility(View()) == pytest.approx(11 / 42)
+
+
+def test_the_upper_card_boundary_still_counts_the_complete_halo():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 102.0
+        height = 70
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel._content_top = 88
+
+    assert View().visual_vertical_span()[0] == panel._content_top
+    assert panel._visibility(View()) == 0.0
+
+
+@pytest.mark.parametrize("line_height", [32, 35, 41])
+def test_one_to_wrapped_layout_shows_the_incoming_row_below(line_height):
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        def __init__(self, rows):
+            self.line_height = line_height
+            self.height = line_height * rows
+            self.effect_padding = math.ceil(11 + line_height * 0.14 / 2)
+            self.glyph_padding = math.ceil(line_height * 0.14 / 2)
+            self.y = 0.0
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel.line_index = 0
+    panel._views = {0: View(1), 1: View(2)}
+
+    targets = panel._row_targets([0, 1])
+    incoming = panel._views[1]
+    incoming.y = targets[1]
+
+    assert targets[0] == 176
+    assert incoming.visual_vertical_span()[1] <= panel.height
+    assert panel._visibility(incoming) > 0.0
+
+
 def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     from lyrica.app import Overlay
 

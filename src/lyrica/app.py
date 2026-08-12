@@ -2482,9 +2482,17 @@ class Overlay:
         A line fades as it nears either edge and is gone before it reaches one.
         That is what stops a line ever being seen half-clipped by the frame: it
         has already faded out by the time the edge would cut it.
+
+        The upper edge reserves the card lane, so even a soft halo must be gone
+        before entering it. At the lower edge the complete halo is already kept
+        on-canvas by ``_safe_view_y``; fade against the grown glyph box there.
+        A wrapped upcoming row otherwise lands with its halo exactly at the
+        canvas edge and is assigned zero visibility despite all of its text
+        being safely present.
         """
         fade = max(1, self.chrome.px(FADE_ZONE))
-        top, bottom = view.visual_vertical_span()
+        top, _visual_bottom = view.visual_vertical_span()
+        _glyph_top, bottom = view.glyph_vertical_span()
         room = min((top - self._content_top) / fade,
                    (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
