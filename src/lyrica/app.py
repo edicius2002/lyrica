@@ -1730,6 +1730,16 @@ class Overlay:
         self._echo_origin_lean = origin - middle
         self._echo_target_lean = target - middle
         self._echo.move_to(self._safe_view_y(self._echo, _below(active)))
+        # Font raster bounds vary by a pixel or two across Windows runners.
+        # Keep the complete echo inside the row gap using the visual boxes,
+        # rather than trusting that the nominal ECHO_DROP always clears the
+        # following line on every font backend.
+        following = self._views.get(self.line_index + 1)
+        if following is not None:
+            echo_bottom = self._echo.visual_vertical_span()[1]
+            following_top = following.visual_vertical_span()[0]
+            if echo_bottom > following_top:
+                self._echo.move_to(self._echo.y - (echo_bottom - following_top))
         self._advance_backing(pos, effects=effects)
         self._order_text_layers()
 

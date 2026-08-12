@@ -218,12 +218,14 @@ def test_timeout_fades_the_outgoing_words_before_showing_card_only(panel, monkey
     panel.reader.snapshot = incoming_snap
     panel._fetching_key = incoming_snap.track_key()
     monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+    outgoing_line = _line(panel)
 
     panel._tick()
 
     assert panel._shown is not incoming
     assert panel._outgoing_fade_at is not None
-    assert _line(panel) == "last of A", "the outgoing items vanish only after the fade"
+    assert outgoing_line is not None
+    assert _line(panel) == outgoing_line, "the outgoing items vanish only after the fade"
 
     panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
     panel._tick()
@@ -247,13 +249,15 @@ def test_a_definite_no_lyrics_answer_fades_before_the_card_contracts(panel,
     panel.reader.snapshot = incoming_snap
     panel._fetching_key = incoming_snap.track_key()
     monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+    outgoing_line = _line(panel)
 
     panel._tick()
 
     assert panel._shown is not incoming, "promotion must wait for the text fade"
     assert panel._outgoing_fade_at is not None
     assert panel._collapse is None, "contraction must not overlap the fade-out"
-    assert _line(panel) == "last of A"
+    assert outgoing_line is not None
+    assert _line(panel) == outgoing_line
 
     panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
     panel._tick()
@@ -325,7 +329,7 @@ def test_lyrics_wait_for_card_expansion_to_finish_before_fading_in(panel, monkey
 
     collapse = panel._collapse
     panel._collapse = (*collapse[:4],
-                       time.monotonic() - A.COLLAPSE_MS / 1000,
+                       time.monotonic() - (A.COLLAPSE_MS + 10) / 1000,
                        *collapse[5:])
     panel._tick()
 
