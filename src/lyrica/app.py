@@ -98,6 +98,39 @@ ECHO_KEEP = 0.72
 # own window inside the line — it answers a phrase rather than lasting as long
 # as one — so it comes and goes on that window rather than on the line's.
 ECHO_FADE_S = 0.30
+# Richsync has only word starts; its final token can therefore receive a
+# near-zero inferred duration.  Only a genuinely microscopic *whole ad-lib*
+# receives the conservative path: most serial Richsync timings, including
+# N95's, are visually sound and retain the normal TTML-like animation.
+ECHO_INFERRED_MAX_SOURCE_S = 0.15
+ECHO_INFERRED_FADE_S = 0.10
+# A Richsync suffix can infer to only a few frames.  Four hundred and fifty
+# milliseconds is long enough to read without making the fallback feel like a
+# separate lyric line; source timestamps remain untouched.
+ECHO_INFERRED_MIN_VISIBLE_S = 0.45
+
+
+def _needs_inferred_backing_fallback(lyr: Lyrics, line_index: int) -> bool:
+    """Whether a Richsync backing window is too short to render literally."""
+    if lyr.backing_timing_at(line_index) != "inferred":
+        return False
+    _text, words = lyr.backing_at(line_index)
+    return bool(words and words[-1][1] - words[0][0] <= ECHO_INFERRED_MAX_SOURCE_S)
+
+
+def _display_line_index(lyr: Lyrics, pos: float) -> int:
+    """Lead row to display, holding it through a sequential response."""
+    index = lyr.line_index_at(pos + LINE_LEAD_S)
+    while index > 0:
+        previous = index - 1
+        _text, backing_words = lyr.backing_at(previous)
+        if (lyr.backing_mode_at(previous) != "sequential" or not backing_words
+                or pos >= backing_words[-1][1]):
+            break
+        # The response remains small and below this preceding lead, but must
+        # not be visually overlaid by the following lead line.
+        index = previous
+    return index
 
 # Backing vocals hang from the lower outer corner of the line they answer. The
 # inset lets the two boxes meet visually without laying one word over another.
@@ -229,6 +262,19 @@ class Track:
         return self.searched and self.lyrics_state != LYRICS_UNKNOWN
 
 
+def transport_is_live(track: Track, snap: Snapshot) -> bool:
+    """Whether ``snap`` may advance the track currently on screen.
+
+    The latest media-session report can already name the next song while the
+    panel is deliberately holding the previous one during its background
+    lookup. Letting that new clock drive the old lyrics makes them sing to a
+    recording that is no longer playing. A paused or unavailable session has
+    no moving clock either, so its last rendered frame remains the truth.
+    """
+    return (snap.ok and snap.playing and track.snapshot.ok
+            and snap.track_key() == track.snapshot.track_key())
+
+
 def should_animate(step: int | None, dragging: bool) -> bool:
     """Whether a move between lines should glide or simply land.
 
@@ -341,6 +387,9 @@ class Overlay:
         self._echo_origin_lean = 0.0
         self._echo_target_lean = 0.0
         self._echo_words: list = []
+        self._echo_fade_s = ECHO_FADE_S
+        self._echo_opens = 0.0
+        self._echo_ends = 0.0
         self._feather = config.sweep_feather()
         self._bloom = config.bloom_factor()
         self._growth = config.growth_factor()
@@ -1456,7 +1505,16 @@ class Overlay:
         active = self._views.get(self.line_index)
         if not text or not words or active is None or not self._views:
             return
-        if not words[0][0] - ECHO_FADE_S <= pos <= words[-1][1] + ECHO_FADE_S:
+        inferred = lyr.backing_timing_at(self.line_index) == "inferred"
+        short_inferred = _needs_inferred_backing_fallback(lyr, self.line_index)
+        fade_s = ECHO_INFERRED_FADE_S if short_inferred else ECHO_FADE_S
+        visible_end = max(words[-1][1], words[0][0] + ECHO_INFERRED_MIN_VISIBLE_S) \
+            if short_inferred else words[-1][1]
+        # Richsync provides serial source offsets, so presenting it before its
+        # first one changes an otherwise good recording's perceived timing.
+        # TTML has independently measured word windows and keeps its preview.
+        opens = words[0][0] if inferred else words[0][0] - fade_s
+        if not opens <= pos <= visible_end + fade_s:
             return
         active_side = self._voice_sides(lyr).get(lyr.voice_at(self.line_index), 0)
         # The supporting voice answers from the open lane. A centred or
@@ -1484,6 +1542,7 @@ class Overlay:
             self._echo.destroy()
             echo_font = fitted_font
         self._echo_line, self._echo_words = self.line_index, words
+        self._echo_fade_s, self._echo_opens, self._echo_ends = fade_s, opens, visible_end
         self._echo_side = echo_side
         active_left, active_right = active._row_spans[-1]
         echo_left = min(a for a, _b in self._echo._row_spans)
@@ -1511,8 +1570,8 @@ class Overlay:
         words = self._echo_words
         if not words:
             return False
-        opens = words[0][0] - ECHO_FADE_S
-        closes = words[-1][1] + ECHO_FADE_S
+        opens = self._echo_opens
+        closes = self._echo_ends + self._echo_fade_s
         if not opens <= pos <= closes:
             return False
         anchor = self._views.get(self._echo_line)
@@ -1522,11 +1581,11 @@ class Overlay:
         # ordinary ease-in-out. On departure it yields only a quarter of that
         # short journey, so the response remains attached to the phrase.
         if pos < words[0][0]:
-            phase = (pos - opens) / ECHO_FADE_S
+            phase = (pos - opens) / self._echo_fade_s
             lane = ECHO_ENTRY_LANE + (1.0 - ECHO_ENTRY_LANE) * motion.cubic_bezier(
                 phase, motion.RESIZE_CURVE)
-        elif pos > words[-1][1]:
-            phase = (pos - words[-1][1]) / ECHO_FADE_S
+        elif pos > self._echo_ends:
+            phase = (pos - self._echo_ends) / self._echo_fade_s
             lane = 1.0 - (1.0 - ECHO_EXIT_LANE) * motion.cubic_bezier(
                 phase, motion.RESIZE_CURVE)
         else:
@@ -1541,12 +1600,12 @@ class Overlay:
             self._echo.set_active(False)
             self._echo.show_inactive(_between(pal.backdrop, pal.unsung,
                                               (pos - opens) / ECHO_FADE_S))
-        elif pos > words[-1][1]:
+        elif pos > self._echo_ends:
             # Struck first, so `set_active(False)` puts back any letter still
             # standing in for itself before the colour takes over.
             self._echo.set_active(False)
             self._echo.show_inactive(_between(pal.backdrop, pal.sung,
-                                              (closes - pos) / ECHO_FADE_S))
+                                              (closes - pos) / self._echo_fade_s))
         else:
             self._echo.set_active(True)
             word, fraction = progress_in(words, pos)
@@ -1560,6 +1619,9 @@ class Overlay:
         self._echo, self._echo_line, self._echo_side = None, -1, 0
         self._echo_origin_lean = self._echo_target_lean = 0.0
         self._echo_words: list = []
+        self._echo_fade_s = ECHO_FADE_S
+        self._echo_opens = 0.0
+        self._echo_ends = 0.0
 
     def _order_text_layers(self) -> None:
         """Keep opaque fading glyphs below the text they must never cover."""
@@ -1673,8 +1735,10 @@ class Overlay:
             # and its last line until there is a complete one to replace them.
             self._fetching_key = snap.track_key()
             self._start_fetch(snap)
+        promoted = False
         if self._loading is not self._shown and self._ready_to_show():
             self._promote()
+            promoted = True
         # Read from the shown track rather than kept as a copy of it. A song put
         # up on the deadline goes up not knowing whether it has words, and its
         # answer lands in the same `Track` a moment later — copied at the
@@ -1684,10 +1748,15 @@ class Overlay:
         self.lyrics = self._shown.lyrics
         self._lyrics_state = self._shown.lyrics_state
 
-        # No longer gated: the gate moved to the promotion, which is the only
-        # place a song's data changes now. What is on screen is whatever was
-        # last promoted, and it is always one song's worth.
-        self._apply_art()
+        # The old visual state may be held while the next track is assembling,
+        # but it must never move to the next track's clock. The same gate stops
+        # every time-based visual when playback is paused or the session drops.
+        live_transport = transport_is_live(self._shown, snap)
+        if live_transport or promoted:
+            # A promotion owns a single, atomic visual change even when the
+            # newly selected track is paused. Otherwise artwork waits with the
+            # frozen frame instead of quietly changing beneath it.
+            self._apply_art()
         card = self._card_for(self._shown.snapshot if self._shown.snapshot.ok
                               else snap)
         if card != self._card_text:
@@ -1699,15 +1768,16 @@ class Overlay:
             self._place_thumb()
 
         interval = SLOW_TICK_MS
-        if self._advance_beam():
-            interval = BEAM_TICK_MS
-        self._retarget_size()
-        if self._advance_collapse():
-            interval = FAST_TICK_MS
-        self._refit_views()
+        if live_transport:
+            if self._advance_beam():
+                interval = BEAM_TICK_MS
+            self._retarget_size()
+            if self._advance_collapse():
+                interval = FAST_TICK_MS
+            self._refit_views()
 
         lyr = self.lyrics
-        if lyr is not None and lyr.synced and lyr.lines:
+        if live_transport and lyr is not None and lyr.synced and lyr.lines:
             self._settle_cuts(lyr, snap)
             # Through the cuts first: the player's position is a place in a
             # video, and the lyrics are written against the recording. Without
@@ -1724,7 +1794,7 @@ class Overlay:
                     self._awaiting_seek = None      # the player caught up
                 else:
                     pos = assumed                   # trust the jump, not the poll
-            index = lyr.line_index_at(pos + LINE_LEAD_S)
+            index = _display_line_index(lyr, pos)
             # Before the first line there is no active line, and the panel used
             # to sit empty until the singing started — which on a video with a
             # twenty-second intro is twenty seconds of the overlay pretending it
@@ -1764,7 +1834,9 @@ class Overlay:
                 active.show_lit()
             # Outside every branch, so a line with no word timings takes its
             # backing down instead of leaving the last one frozen over it.
-            self._show_backing(lyr, pos + WORD_LEAD_S)
+            backing_pos = pos + (0.0 if lyr.backing_timing_at(self.line_index)
+                                 == "inferred" else WORD_LEAD_S)
+            self._show_backing(lyr, backing_pos)
 
         self.root.after(interval, self._tick)
 

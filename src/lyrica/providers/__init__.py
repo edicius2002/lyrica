@@ -14,7 +14,9 @@ import logging
 import queue
 import threading
 import time
+from copy import copy
 from pathlib import Path
+from statistics import median
 
 from lyrica import config
 from lyrica.lyrics import Lyrics, Precision
@@ -23,6 +25,7 @@ from lyrica.providers.community import CommunityTtmlProvider
 from lyrica.providers.lrclib import LrclibProvider
 from lyrica.providers.musixmatch import MusixmatchProvider
 from lyrica.providers.netease import NeteaseProvider
+from lyrica.textmatch import fold
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,13 @@ PROVIDERS: list[LyricsProvider] = [
 # timeout, but a stalled connection that never returns would otherwise leave the
 # search waiting on a name that is never coming.
 OVERALL_TIMEOUT_S = 12.0
+# A hybrid is an improvement, never a reason to leave a fresh track blank
+# behind a slow community lookup.  Most successful CommunityTTML replies land
+# within this small window; after it Richsync is shown as-is.
+HYBRID_GRACE_S = 1.5
+HYBRID_DURATION_TOLERANCE_S = 2.0
+HYBRID_MAX_MEDIAN_RESIDUAL_S = 0.35
+HYBRID_MAX_RESIDUAL_S = 0.75
 
 _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
                  "queried")
@@ -89,7 +99,15 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 #    be separated into the backing channel.
 # 6: Richsync parenthetical suffixes were not normalized into the backing
 #    channel, even though they carried usable serial word timings.
-CACHE_VERSION = 6
+# 7: backing timing confidence lets short Richsync suffixes use a conservative
+#    visual window, while exact TTML backing keeps its normal animation.
+# 8: inferred Richsync backing tails gained 250 ms, bounded by the raised
+#    1.75 s word cap, so older serial end times must be refreshed.
+# 9: sequential Richsync suffixes became their own timeline rows instead of
+#    being rendered as overlapping backing layers.
+# 10: those suffixes correctly remain in the backing lane, while their lead
+#     stays current until the sequential response has finished.
+CACHE_VERSION = 10
 
 
 def _cache_path(artist: str, title: str, duration: float) -> Path:
@@ -131,6 +149,8 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     lyr.backing = list(d.get("backing", []))
     lyr.backing_words = [[tuple(w) for w in line]
                          for line in d.get("backing_words", [])]
+    lyr.backing_timing = list(d.get("backing_timing", []))
+    lyr.backing_modes = list(d.get("backing_modes", []))
     lyr.voices = list(d.get("voices", []))
     lyr.singers = dict(d.get("singers", {}))
     return lyr, asked
@@ -142,6 +162,8 @@ def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
     else:
         payload = {"lines": result.lines, "words": result.words, "asked": asked,
                    "backing": result.backing, "backing_words": result.backing_words,
+                   "backing_timing": result.backing_timing,
+                   "backing_modes": result.backing_modes,
                    "voices": result.voices, "singers": result.singers,
                    "v": CACHE_VERSION}
         payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
@@ -174,6 +196,102 @@ def _better(new: Lyrics | None, best: Lyrics | None) -> bool:
     if new.precision != best.precision:
         return new.precision > best.precision
     return _staged(new) and not _staged(best)
+
+
+def _line_pairs(richsync: Lyrics, community: Lyrics) -> list[tuple[int, int]]:
+    """Pair identically transcribed lead lines while preserving their order.
+
+    A repeated chorus is deliberately paired with its next occurrence, not
+    merely with the closest timestamp.  The latter would make a shifted live
+    recording appear to validate itself.
+    """
+    pairs: list[tuple[int, int]] = []
+    rich_at = 0
+    for community_at, (_start, text) in enumerate(community.lines):
+        key = fold(text)
+        if not key:
+            continue
+        for candidate in range(rich_at, len(richsync.lines)):
+            if fold(richsync.lines[candidate][1]) == key:
+                pairs.append((candidate, community_at))
+                rich_at = candidate + 1
+                break
+    return pairs
+
+
+def _merge_community_backing(richsync: Lyrics | None, community: Lyrics | None,
+                             duration: float) -> Lyrics | None:
+    """Attach verified TTML backing to Richsync's more complete lead lyric.
+
+    This is intentionally much stricter than provider title matching.  It
+    borrows *absolute* timestamps, so an alternate album/live/remix recording
+    is worse than no borrowing at all.  Equal duration, several ordered text
+    anchors, and a stable clock offset are all required before any x-bg timing
+    crosses from CommunityTTML into the Richsync result.
+    """
+    if (richsync is None or community is None
+            or not richsync.source.startswith("musixmatch/richsync")
+            or not community.source.startswith("community-ttml")
+            or richsync.precision is not Precision.WORD
+            or community.precision is not Precision.WORD
+            or not any(community.backing)):
+        return None
+    recorded = float(getattr(community, "recording_duration", 0.0) or 0.0)
+    if (duration > 1 and (recorded <= 1
+                          or abs(recorded - duration) > HYBRID_DURATION_TOLERANCE_S)):
+        return None
+
+    pairs = _line_pairs(richsync, community)
+    required = min(3, len(richsync.lines), len(community.lines))
+    if len(pairs) < required:
+        return None
+    offsets = [richsync.lines[ri][0] - community.lines[ci][0]
+               for ri, ci in pairs]
+    offset = median(offsets)
+    residuals = [abs(value - offset) for value in offsets]
+    if (median(residuals) > HYBRID_MAX_MEDIAN_RESIDUAL_S
+            or max(residuals) > HYBRID_MAX_RESIDUAL_S):
+        return None
+
+    by_community = {ci: ri for ri, ci in pairs}
+    backed = [ci for ci, text in enumerate(community.backing) if text]
+    # We never move a response to a "similar" line.  Every TTML backing line
+    # must have an ordered, text-identical Richsync anchor.
+    if not backed or any(ci not in by_community for ci in backed):
+        return None
+
+    merged = copy(richsync)
+    merged.backing = list(richsync.backing)
+    merged.backing_words = [list(words) for words in richsync.backing_words]
+    merged.backing_timing = list(richsync.backing_timing)
+    while len(merged.backing) < len(merged.lines):
+        merged.backing.append("")
+    while len(merged.backing_words) < len(merged.lines):
+        merged.backing_words.append([])
+    while len(merged.backing_timing) < len(merged.lines):
+        merged.backing_timing.append("")
+    for ci in backed:
+        ri = by_community[ci]
+        merged.backing[ri] = community.backing[ci]
+        merged.backing_words[ri] = [
+            (start + offset, end + offset, text)
+            for start, end, text in community.backing_words[ci]
+        ]
+        merged.backing_timing[ri] = "exact"
+    merged.source = "musixmatch/richsync+community-ttml-adlibs"
+    return merged
+
+
+def _waiting_for_hybrid(best: Lyrics | None,
+                        pending: dict[str, LyricsProvider]) -> bool:
+    """Whether one half of a possible Richsync/TTML hybrid is still in flight."""
+    if best is None:
+        return False
+    if best.source.startswith("musixmatch/richsync"):
+        return "community-ttml" in pending
+    if best.source.startswith("community-ttml"):
+        return "musixmatch" in pending
+    return False
 
 
 def _nothing_left_to_beat(best: Lyrics | None, remaining: list[LyricsProvider]) -> bool:
@@ -266,6 +384,7 @@ def _ask_providers(artist: str, title: str, duration: float,
     best: Lyrics | None = None
     asked: list[str] = []
     pending = {p.name: p for p in PROVIDERS}
+    answers_by_provider: dict[str, Lyrics | None] = {}
     answers: queue.Queue = queue.Queue()
 
     for provider in PROVIDERS:
@@ -280,24 +399,40 @@ def _ask_providers(artist: str, title: str, duration: float,
             name=f"lyrics-{provider.name}", daemon=True).start()
 
     deadline = time.monotonic() + OVERALL_TIMEOUT_S
+    hybrid_deadline: float | None = None
     while pending:
         try:
+            wait_until = min(deadline, hybrid_deadline or deadline)
             provider, result = answers.get(
-                timeout=max(0.05, deadline - time.monotonic()))
+                timeout=max(0.05, wait_until - time.monotonic()))
         except queue.Empty:
             logger.info("gave up waiting on %s for %r - %r",
                         sorted(pending), artist, title)
             break
         asked.append(provider.name)
         pending.pop(provider.name, None)
-        if _better(result, best):
+        answers_by_provider[provider.name] = result
+        richsync = answers_by_provider.get("musixmatch")
+        community = answers_by_provider.get("community-ttml")
+        hybrid = _merge_community_backing(richsync, community, duration)
+        if richsync is not None and community is not None:
+            # The product decision here is deliberate: Richsync owns the lead
+            # lyric.  CommunityTTML may improve it only by passing the strict
+            # backing-timing proof above; a near-match must not win a race and
+            # replace the fallback with an alternate recording.
+            best = hybrid or richsync
+        elif hybrid is not None:
+            best = hybrid
+        elif _better(result, best):
             best = result
         waiting = list(pending.values())
-        if _nothing_left_to_beat(best, waiting) and not _may_add_backing(
-                best, waiting):
+        if (_nothing_left_to_beat(best, waiting) and not _may_add_backing(
+                best, waiting) and not _waiting_for_hybrid(best, pending)):
             # Nothing still in flight could improve on this, so the track has
             # its lyrics now. The rest finish into a queue nobody reads.
             break
+        if _waiting_for_hybrid(best, pending) and hybrid_deadline is None:
+            hybrid_deadline = time.monotonic() + HYBRID_GRACE_S
 
     return best, asked
 

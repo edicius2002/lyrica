@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from lyrica.lyrics import Lyrics
+from lyrica.sessions import Snapshot
 
 
 def _snap(title, artist, key):
@@ -35,6 +36,17 @@ def panel(overlay):
 def _line(panel):
     view = panel._views.get(panel.line_index)
     return view.text if view is not None else None
+
+
+def _rendered_frame(panel):
+    """The visible lyric state that a stopped transport must preserve exactly."""
+    return (
+        panel.line_index,
+        tuple((index, view.y,
+               tuple(tuple(panel.canvas.coords(entry[2])) for entry in view._items),
+               tuple(panel.canvas.itemcget(entry[2], "fill") for entry in view._items))
+              for index, view in sorted(panel._views.items())),
+    )
 
 
 def test_the_outgoing_song_keeps_its_last_line_until_the_next_is_whole(panel):
@@ -171,3 +183,87 @@ def test_the_shown_track_is_the_state_rather_than_a_copy_of_it(panel):
     assert panel._shown.lyrics_state == panel._lyrics_state
     assert panel._shown.gen == 1 and panel._loading is panel._shown
     assert isinstance(panel._shown, A.Track)
+
+
+def _forbid_transport_animation(panel, monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a frozen transport must not animate")
+
+    for name in ("_apply_art", "_advance_beam", "_retarget_size",
+                 "_advance_collapse", "_refit_views", "_settle_cuts",
+                 "_go_to_line", "_show_backing"):
+        monkeypatch.setattr(panel, name, forbidden)
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+
+def test_a_new_track_freezes_the_outgoing_frame_while_it_loads(panel, monkeypatch):
+    incoming = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    panel.reader.snapshot = incoming
+    panel._fetching_key = "k|A"
+    started = []
+    monkeypatch.setattr(panel, "_start_fetch", lambda snap: started.append(snap))
+    _forbid_transport_animation(panel, monkeypatch)
+    before = _rendered_frame(panel)
+
+    panel._tick()
+
+    assert started == [incoming]
+    assert panel._shown.snapshot.track_key() == "k|A"
+    assert _rendered_frame(panel) == before
+
+
+@pytest.mark.parametrize("snapshot", [
+    pytest.param(_snap("Traductor", "Tiago PZK", "k|A"), id="paused"),
+    pytest.param(Snapshot(), id="no-session"),
+])
+def test_a_paused_or_missing_transport_freezes_every_animation(panel, monkeypatch, snapshot):
+    if snapshot.ok:
+        snapshot.playing = False
+    panel.reader.snapshot = snapshot
+    panel._fetching_key = "k|A"
+    _forbid_transport_animation(panel, monkeypatch)
+    before = _rendered_frame(panel)
+
+    panel._tick()
+
+    assert _rendered_frame(panel) == before
+
+
+@pytest.mark.parametrize("playing", [True, False], ids=["playing", "paused"])
+def test_an_abrupt_new_track_at_zero_never_resets_the_outgoing_lyrics(panel, monkeypatch,
+                                                                       playing):
+    incoming = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming.position = 0.0
+    incoming.playing = playing
+    incoming.live_position = lambda: 0.0
+    panel.reader.snapshot = incoming
+    panel._fetching_key = "k|A"
+    monkeypatch.setattr(panel, "_start_fetch", lambda _snap: None)
+    _forbid_transport_animation(panel, monkeypatch)
+    before = _rendered_frame(panel)
+
+    panel._tick()
+
+    assert _rendered_frame(panel) == before
+
+
+def test_a_promoted_track_uses_its_own_clock_on_the_same_tick(panel, monkeypatch):
+    from lyrica import app as A
+
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming_snap.live_position = lambda: 6.0
+    incoming = A.Track(
+        gen=2, snapshot=incoming_snap,
+        lyrics=Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
+                      words=[[], []], synced=True),
+        lyrics_state=A.LYRICS_PRESENT, searched=True)
+    panel._loading = incoming
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = "k|B"
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._shown is incoming
+    assert panel.track_key == "k|B"
+    assert _line(panel) == "second of B"

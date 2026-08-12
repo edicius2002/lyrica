@@ -13,7 +13,7 @@ Word = tuple[float, float, str]
 # A word whose end has to be inferred from the next word's start is capped at
 # this. Musixmatch's richsync gives offsets but no durations, so a word before
 # an instrumental break would otherwise stay lit for the length of the break.
-MAX_INFERRED_WORD_S = 1.5
+MAX_INFERRED_WORD_S = 1.75
 
 
 def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
@@ -151,6 +151,13 @@ class Lyrics:
     # being sung, so one sequence would interleave them into nonsense.
     backing: list = field(default_factory=list)
     backing_words: list = field(default_factory=list)
+    # Timing confidence for each backing line.  ``inferred`` means a source
+    # supplied word starts but not word durations (Richsync); the renderer can
+    # then avoid making a very short guessed window look like an early flash.
+    backing_timing: list = field(default_factory=list)
+    # Richsync suffixes can be sequential rather than sung behind the lead.
+    # They remain an ad-lib lane visually, but hold their lead row until done.
+    backing_modes: list = field(default_factory=list)
     # Who sings each line, as the source's own agent id, index-matched to
     # `lines`. Empty when the source does not say — which is most of them.
     voices: list = field(default_factory=list)
@@ -201,6 +208,18 @@ class Lyrics:
                      if line_index < len(self.backing_words) else [])
             return self.backing[line_index], words
         return "", []
+
+    def backing_timing_at(self, line_index: int) -> str:
+        """Whether this backing line has exact or inferred timing."""
+        if 0 <= line_index < len(self.backing_timing):
+            return self.backing_timing[line_index]
+        return "exact"
+
+    def backing_mode_at(self, line_index: int) -> str:
+        """Whether a backing vocal overlaps or follows its lead."""
+        if 0 <= line_index < len(self.backing_modes):
+            return self.backing_modes[line_index]
+        return ""
 
     @property
     def precision(self) -> Precision:
