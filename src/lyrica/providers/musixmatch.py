@@ -46,6 +46,11 @@ COOLDOWN_S = 900
 
 logger = logging.getLogger(__name__)
 
+# Richsync has no measured word ends.  A parenthetical suffix is displayed on
+# its own lane, so its final token needs a small readable tail rather than
+# disappearing at the source's next coarse offset.
+INFERRED_BACKING_TAIL_S = 0.25
+
 
 def richsync_to_words(parsed: list) -> tuple[list, list]:
     """Convert richsync's line list into (lines, words).
@@ -108,19 +113,40 @@ def richsync_to_lyrics(parsed: list) -> Lyrics:
     lines, words = richsync_to_words(parsed)
     backing: list = []
     backing_words: list = []
+    backing_timing: list = []
+    backing_modes: list = []
     for index, (start, text) in enumerate(lines):
         inferred = split_parenthetical_adlib(text, words[index])
         if inferred is None:
             backing.append("")
             backing_words.append([])
+            backing_timing.append("")
+            backing_modes.append("")
             continue
         lead_text, lead_words, backing_text, timed_backing = inferred
+        # Preserve every source start and every interior hand-off.  Only the
+        # final inferred token is extended, never beyond the same 1.75 s cap
+        # that protects an ordinary Richsync word before a silent gap.
+        last_start, last_end, last_text = timed_backing[-1]
+        timed_backing[-1] = (
+            last_start,
+            min(last_end + INFERRED_BACKING_TAIL_S,
+                last_start + MAX_INFERRED_WORD_S),
+            last_text,
+        )
+        # The suffix stays visually in the backing lane.  Its relation to the
+        # lead decides whether that lane is concurrent or appears afterwards.
+        lead_end = max(end for _begin, end, _text in lead_words)
+        sequential = timed_backing[0][0] >= lead_end
         lines[index] = (start, lead_text)
         words[index] = lead_words
         backing.append(backing_text)
         backing_words.append(timed_backing)
+        backing_timing.append("inferred")
+        backing_modes.append("sequential" if sequential else "overlapping")
     return Lyrics(lines=lines, words=words, synced=True,
                   backing=backing, backing_words=backing_words,
+                  backing_timing=backing_timing, backing_modes=backing_modes,
                   source="musixmatch/richsync", exact=True)
 
 

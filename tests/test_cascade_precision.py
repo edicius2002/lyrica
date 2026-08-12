@@ -184,3 +184,74 @@ def test_backing_breaks_a_tie_between_equal_precisions():
                   backing=["(oh)"], backing_words=[[(0.5, 0.9, "(oh)")]])
     assert _better(rich, plain) is True
     assert _better(plain, rich) is False, "and it does not swing back"
+
+
+# --- CommunityTTML backing graft -------------------------------------------
+
+def _hybrid_source(source, starts, backing=None):
+    lines = [(start, text) for start, text in zip(starts, ("one", "two", "three", "four"),
+                                                   strict=True)]
+    words = [[(start, start + 0.4, text)] for start, text in lines]
+    backing = backing or ["", "", "", ""]
+    backing_words = [[] for _ in lines]
+    for i, text in enumerate(backing):
+        if text:
+            backing_words[i] = [(starts[i] + 0.1, starts[i] + 0.3, text)]
+    return Lyrics(lines=lines, words=words, synced=True, source=source,
+                  backing=backing, backing_words=backing_words,
+                  backing_timing=["inferred" if text else "" for text in backing])
+
+
+def test_verified_ttml_adlibs_are_grafted_onto_richsync_lead():
+    from lyrica.providers import _merge_community_backing
+
+    rich = _hybrid_source("musixmatch/richsync", [10.2, 20.2, 30.2, 40.2])
+    community = _hybrid_source("community-ttml/word", [10, 20, 30, 40],
+                               ["", "(echo)", "", ""])
+    community.recording_duration = 180.0
+
+    hybrid = _merge_community_backing(rich, community, 180.0)
+
+    assert hybrid is not None
+    assert hybrid.lines == rich.lines, "Richsync remains the lead lyric and clock"
+    assert hybrid.source.endswith("community-ttml-adlibs")
+    assert hybrid.backing_at(1) == ("(echo)", [(20.3, 20.5, "(echo)")])
+    assert hybrid.backing_timing_at(1) == "exact"
+
+
+def test_ttml_adlibs_are_never_borrowed_from_a_different_duration_release():
+    from lyrica.providers import _merge_community_backing
+
+    rich = _hybrid_source("musixmatch/richsync", [10, 20, 30, 40])
+    community = _hybrid_source("community-ttml/word", [10, 20, 30, 40],
+                               ["", "(echo)", "", ""])
+    community.recording_duration = 191.0
+
+    assert _merge_community_backing(rich, community, 180.0) is None
+
+
+def test_ttml_adlibs_are_rejected_when_their_clock_drifts_between_anchors():
+    from lyrica.providers import _merge_community_backing
+
+    rich = _hybrid_source("musixmatch/richsync", [10, 22, 35, 49])
+    community = _hybrid_source("community-ttml/word", [10, 20, 30, 40],
+                               ["", "(echo)", "", ""])
+    community.recording_duration = 180.0
+
+    assert _merge_community_backing(rich, community, 180.0) is None
+
+
+def test_a_failed_hybrid_falls_back_to_richsync_not_the_ttml_race_winner(monkeypatch):
+    from lyrica import providers
+
+    rich = _hybrid_source("musixmatch/richsync", [10, 20, 30, 40])
+    community = _hybrid_source("community-ttml/word", [10, 20, 30, 40],
+                               ["", "(echo)", "", ""])
+    community.recording_duration = 191.0
+    use(monkeypatch,
+        Fake("community-ttml", community, Precision.WORD),
+        Fake("musixmatch", rich, Precision.WORD, delay=0.01))
+
+    result, _asked = providers._ask_providers("A", "B", 180.0, "")
+
+    assert result is rich

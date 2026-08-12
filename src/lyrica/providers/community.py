@@ -98,6 +98,9 @@ class CommunityTtmlProvider(LyricsProvider):
             return None
         lyrics.source = f"community-ttml/{rec.get('timing_type', '?')}"
         lyrics.exact = score >= self.EXACT_SCORE
+        # Kept on the live result so a hybrid can reject another release of
+        # the same title before borrowing any of its timings.
+        lyrics.recording_duration = float(rec.get("duration") or 0.0)
         return lyrics
 
     def _best_match(self, artist: str, title: str,

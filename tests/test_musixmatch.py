@@ -110,11 +110,21 @@ def test_lines_without_usable_events_are_skipped():
     assert lines == []
 
 
-def test_a_parenthetical_richsync_suffix_becomes_a_timed_backing_adlib():
+def test_a_sequential_parenthetical_richsync_suffix_stays_in_the_backing_lane():
     lyrics = richsync_to_lyrics(PARENTHETICAL_RICHSYNC)
     assert lyrics.lines[0] == (10.0, "lead")
     assert lyrics.words_at(0) == [(10.0, 10.8, "lead")]
-    assert lyrics.backing_at(0) == ("(echo)", [(10.8, 12.0, "(echo)")])
+    assert lyrics.backing_at(0) == ("(echo)", [(10.8, 12.25, "(echo)")])
+    assert lyrics.backing_mode_at(0) == "sequential"
+
+
+def test_an_inferred_backing_tail_never_exceeds_the_raised_word_cap():
+    long_suffix = [{"ts": 0.0, "te": 40.0, "x": "lead (echo)",
+                    "l": [{"c": "lead", "o": 0.0}, {"c": " (echo)", "o": 1.0}]}]
+
+    lyrics = richsync_to_lyrics(long_suffix)
+
+    assert lyrics.backing_at(0)[1] == [(1.0, 2.75, "(echo)")]
 
 
 def test_richsync_keeps_inline_and_entire_parenthetical_lines_as_lead():
@@ -138,7 +148,8 @@ def test_a_match_returns_word_level_lyrics(wired):
 def test_a_match_keeps_a_parenthetical_suffix_as_a_backing_adlib(wired):
     wired["responses"] = working(richsync=PARENTHETICAL_RICHSYNC)
     result = MusixmatchProvider().fetch("A", "B", 200.0)
-    assert result.backing_at(0) == ("(echo)", [(10.8, 12.0, "(echo)")])
+    assert result.backing_at(0) == ("(echo)", [(10.8, 12.25, "(echo)")])
+    assert result.backing_mode_at(0) == "sequential"
 
 
 def test_a_track_flagged_without_richsync_is_not_fetched(wired):

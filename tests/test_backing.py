@@ -53,6 +53,57 @@ def test_a_sequential_parenthetical_suffix_is_visible_on_its_own_timing(panel):
     assert panel._echo.text == "(yeah)"
 
 
+def test_an_inferred_short_richsync_adlib_does_not_preview_early_or_flash(panel):
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (2.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(2.0, 2.5, "Next")]],
+        synced=True, backing=["(yeah)", ""],
+        backing_words=[[(1.0, 1.03, "(yeah)")], []],
+        backing_timing=["inferred", ""])
+    panel._go_to_line(0, panel.lyrics)
+
+    panel._show_backing(panel.lyrics, 0.85)
+    assert panel._echo is None, "inferred timing has no 300 ms TTML preview"
+
+    panel._show_backing(panel.lyrics, 1.02)
+    assert panel._echo is not None
+    panel._show_backing(panel.lyrics, 1.40)
+    assert panel._echo is not None, "the visual dwell is readable despite a 30 ms source window"
+
+
+def test_a_normal_length_richsync_adlib_keeps_the_original_animation(panel):
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (2.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(2.0, 2.5, "Next")]],
+        synced=True, backing=["(yeah)", ""],
+        backing_words=[[(1.0, 1.25, "(yeah)")], []],
+        backing_timing=["inferred", ""])
+    panel._go_to_line(0, panel.lyrics)
+
+    panel._show_backing(panel.lyrics, 0.75)
+    assert panel._echo is None, "a 250 ms N95-like suffix may not preview before its offset"
+    panel._show_backing(panel.lyrics, 1.0)
+    assert panel._echo is not None
+
+
+def test_a_sequential_richsync_adlib_owns_the_display_until_its_tail_ends():
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (1.2, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(1.2, 1.8, "Next")]],
+        synced=True, backing=["(echo)", ""],
+        backing_words=[[(1.0, 1.45, "(echo)")], []],
+        backing_modes=["sequential", ""])
+
+    assert _display_line_index(lyrics, 0.9) == 0
+    assert _display_line_index(lyrics, 1.0) == 0
+    assert _display_line_index(lyrics, 1.3) == 0
+    assert _display_line_index(lyrics, 1.45) == 1
+
+
+
+
 def test_a_long_adlib_stays_on_one_row_inside_the_panel(panel):
     tokens = ["(this"] + ["long" for _ in range(42)] + ["echo)"]
     text = " ".join(tokens)
