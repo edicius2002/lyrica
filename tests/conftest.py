@@ -80,7 +80,9 @@ def overlay(_overlay_once):
     bloom._cache.clear()
     bloom._fonts.clear()
     o._clear_views()
+    o._compact = False
     o._collapse = None
+    o._resize_window(*o._target_size())
     o.line_index = -1
     o.lyrics = None
     o.offset = 0.0

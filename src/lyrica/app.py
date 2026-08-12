@@ -1729,19 +1729,23 @@ class Overlay:
         middle = self.width / 2
         self._echo_origin_lean = origin - middle
         self._echo_target_lean = target - middle
-        self._echo.move_to(self._safe_view_y(self._echo, _below(active)))
-        # Font raster bounds vary by a pixel or two across Windows runners.
-        # Keep the complete echo inside the row gap using the visual boxes,
-        # rather than trusting that the nominal ECHO_DROP always clears the
-        # following line on every font backend.
-        following = self._views.get(self.line_index + 1)
-        if following is not None:
-            echo_bottom = self._echo.visual_vertical_span()[1]
-            following_top = following.visual_vertical_span()[0]
-            if echo_bottom > following_top:
-                self._echo.move_to(self._echo.y - (echo_bottom - following_top))
+        self._place_backing_y(active)
         self._advance_backing(pos, effects=effects)
         self._order_text_layers()
+
+    def _place_backing_y(self, anchor: LineView) -> None:
+        """Hang the echo below its lead without entering the following row."""
+        self._echo.move_to(self._safe_view_y(self._echo, _below(anchor)))
+        # Font raster bounds vary by a pixel or two across Windows runners.
+        # Use the visual boxes instead of assuming the nominal drop clears the
+        # following line on every font backend and at every intermediate size.
+        following = self._views.get(self._echo_line + 1)
+        if following is None:
+            return
+        echo_bottom = self._echo.visual_vertical_span()[1]
+        following_top = following.visual_vertical_span()[0]
+        if echo_bottom > following_top:
+            self._echo.move_to(self._echo.y - (echo_bottom - following_top))
 
     def _advance_backing(self, pos: float, *, effects: bool = True) -> bool:
         """Carry the backing through its own window. False once it is spent.
@@ -1759,7 +1763,7 @@ class Overlay:
             return False
         anchor = self._views.get(self._echo_line)
         if anchor is not None:
-            self._echo.move_to(self._safe_view_y(self._echo, _below(anchor)))
+            self._place_backing_y(anchor)
         # Enter from the lead towards its corner and settle there with an
         # ordinary ease-in-out. On departure it yields only a quarter of that
         # short journey, so the response remains attached to the phrase.
