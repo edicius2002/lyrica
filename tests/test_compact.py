@@ -116,6 +116,16 @@ class Reveal:
         finally:
             _time.monotonic = real
 
+    def scene(self):
+        import time as _time
+
+        from lyrica.app import Overlay
+        real, _time.monotonic = _time.monotonic, lambda: self.now
+        try:
+            return Overlay._promotion_scene(self)
+        finally:
+            _time.monotonic = real
+
 
 def test_a_song_goes_up_only_when_all_of_it_has_arrived():
     from lyrica.app import LYRICS_ABSENT, LYRICS_PRESENT
@@ -145,9 +155,20 @@ def test_the_search_being_over_is_not_the_search_having_found_something():
 
 
 def test_a_source_that_never_answers_does_not_strand_the_panel():
+    from lyrica.app import SCENE_CARD_ONLY
+
     r = Reveal()
     r._loading.deadline = 50.0
     r.now = 49.0
     assert not r.ready()
     r.now = 50.0
     assert r.ready(), "the deadline has to release it"
+    assert r.scene() == SCENE_CARD_ONLY
+
+
+def test_a_definite_answer_promotes_a_ready_scene_even_at_the_deadline():
+    from lyrica.app import LYRICS_PRESENT, SCENE_READY
+
+    r = Reveal(now=100.0)
+    r._loading.lyrics_state = LYRICS_PRESENT
+    assert r.scene() == SCENE_READY
