@@ -1784,8 +1784,13 @@ class Overlay:
             # A very tall lead at the lower edge can leave no honest lane for
             # the response. Missing it is preferable to drawing it through the
             # main lyric or through the following row.
+            moving_anchor = self.line_index in self._glides
             self._clear_backing()
-            self._echo_blocked = block_key
+            # An incoming row starts near the lower edge and gains room as it
+            # glides to the anchor. Retry on the next frame instead of turning
+            # that temporary lack of space into a whole-line suppression.
+            if not moving_anchor:
+                self._echo_blocked = block_key
             return
         self._echo_blocked = None
         self._order_text_layers()

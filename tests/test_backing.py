@@ -185,7 +185,7 @@ def test_a_long_adlib_stays_on_one_row_inside_the_panel(panel):
     assert sum(right._row_spans[0]) / 2 >= panel.width / 2
 
     panel._clear_backing()
-    panel._go_to_line(1, panel.lyrics)
+    panel._go_to_line(1, panel.lyrics, animate=False)
     panel._show_backing(panel.lyrics, 1.4)
     left = panel._echo
     assert len(left._row_spans) == 1
@@ -262,7 +262,7 @@ def test_it_hangs_from_the_lines_lower_right_corner(panel):
 
 
 def test_it_answers_from_the_lane_opposite_the_lead(panel):
-    panel._go_to_line(1, panel.lyrics)
+    panel._go_to_line(1, panel.lyrics, animate=False)
     panel._show_backing(panel.lyrics, 3.3)
     active = panel._views[1]
     echo = panel._echo
@@ -286,7 +286,7 @@ def test_left_and_right_adlibs_stay_on_safe_outer_corners(panel):
     assert max(b for _a, b in right._row_spans) <= panel.width - margin
 
     panel._clear_backing()
-    panel._go_to_line(1, panel.lyrics)
+    panel._go_to_line(1, panel.lyrics, animate=False)
     panel._show_backing(panel.lyrics, 3.3)
     left = panel._echo
     active = panel._views[1]
@@ -365,6 +365,20 @@ def test_canvas_clipping_never_pushes_an_adlib_back_over_its_lead():
 
     assert not panel._place_backing_y(anchor)
     assert panel._echo.y == 0.0, "the edge clamp moved it through the lead"
+
+
+def test_an_adlib_retries_after_its_incoming_line_gains_room(panel):
+    panel._go_to_line(1, panel.lyrics)
+    panel._show_backing(panel.lyrics, 3.3)
+
+    if panel._echo is None:
+        assert panel._echo_blocked is None
+    for glide in panel._glides.values():
+        glide.started -= glide.duration + 1.0
+    panel._advance_glides()
+    panel._show_backing(panel.lyrics, 3.3)
+
+    assert panel._echo is not None
 
 
 def test_every_transition_endpoint_keeps_complete_glyphs_on_canvas(panel):
