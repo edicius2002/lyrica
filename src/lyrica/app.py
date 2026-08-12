@@ -466,6 +466,7 @@ class Overlay:
         self._views: dict[int, LineView] = {}
         self._glides: dict[int, motion.Glide] = {}
         self._targets: dict[int, float] = {}
+        self._relay_hold: set[int] = set()
         self._header_text = None
         self._dragging = False
         self._drag_at = (None, None)
@@ -833,11 +834,20 @@ class Overlay:
 
     def _go_to_line(self, index: int, lyr: Lyrics, *, animate: bool | None = None) -> None:
         """Make `index` the current line, animating when the move is small."""
-        step = abs(index - self.line_index) if self.line_index >= 0 else None
+        previous_index = self.line_index
+        step = abs(index - previous_index) if previous_index >= 0 else None
         self.line_index = index
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
         move = should_animate(step, self._dragging) if animate is None else animate
+        previous = self._views.get(previous_index)
+        active = self._views.get(index)
+        self._relay_hold = (
+            {previous_index, index}
+            if (move and step == 1 and previous is not None and active is not None
+                and previous.height > previous.line_height
+                and active.height > active.line_height)
+            else set())
         self._retarget(indices, animate=move)
         self._restyle(indices)
 
@@ -1134,6 +1144,7 @@ class Overlay:
         self._views.clear()
         self._glides.clear()
         self._targets.clear()
+        self._relay_hold.clear()
         self.line_index = -1
 
         # The cover has to be re-derived: both images were built for the old
@@ -1640,6 +1651,7 @@ class Overlay:
         self._views.clear()
         self._glides.clear()
         self._targets.clear()
+        self._relay_hold.clear()
 
     def _visible_indices(self, count: int) -> list[int]:
         if self.line_index < 0:
@@ -1932,23 +1944,79 @@ class Overlay:
         self._views.clear()
         self._glides.clear()
         self._targets.clear()
+        self._relay_hold.clear()
         self.line_index = -1        # the next tick builds them at the new width
 
+    def _multiline_relay_slots(
+            self, indices: list[int]) -> tuple[float, float, float] | None:
+        """Fixed top, middle and bottom positions for a wrapped hand-off."""
+        active = self._views.get(self.line_index)
+        if active is None or active.height <= active.line_height:
+            return None
+        neighbours = [self._views[index] for index in indices
+                      if abs(index - self.line_index) == 1
+                      and index in self._views
+                      and self._views[index].height > self._views[index].line_height]
+        if not neighbours:
+            return None
+        pair = [active, *neighbours]
+        top = float(max(view.effect_padding for view in pair))
+        bottom = float(min(self.height - view.height - view.effect_padding
+                           for view in pair))
+        if bottom <= top:
+            return None
+        step = (bottom - top) / 2
+        required = max(
+            upper.height + upper.glyph_padding + lower.glyph_padding + 1
+            for upper in pair for lower in pair)
+        if step < required:
+            return None
+        return top, top + step, bottom
+
+    def _row_targets(self, indices: list[int]) -> dict[int, float]:
+        """Resting row positions, including fixed wrapped relay slots."""
+        slots = self._multiline_relay_slots(indices)
+        active_y = slots[1] if slots is not None else self.anchor_y
+        targets = {self.line_index: self._safe_view_y(
+            self._views[self.line_index], active_y)}
+
+        cursor = active_y
+        for index in sorted((i for i in indices if i < self.line_index),
+                            reverse=True):
+            view = self._views[index]
+            if (slots is not None and index == self.line_index - 1
+                    and view.height > view.line_height):
+                cursor = slots[0]
+            else:
+                cursor -= view.height + self.row_gap
+            targets[index] = self._safe_view_y(view, cursor)
+
+        cursor = active_y
+        upper = self._views[self.line_index]
+        for index in sorted(i for i in indices if i > self.line_index):
+            view = self._views[index]
+            if (slots is not None and index == self.line_index + 1
+                    and view.height > view.line_height):
+                cursor = slots[2]
+            else:
+                cursor += upper.height + self.row_gap
+            targets[index] = self._safe_view_y(view, cursor)
+            upper = view
+            cursor = targets[index]
+        return targets
+
     def _retarget(self, indices: list[int], animate: bool) -> None:
-        """Place the active line at the anchor and stack the rest around it."""
+        """Place the active line and stack the rest around its relay slots."""
         if self.line_index not in self._views:
             return
-        y = self.anchor_y
-        for index in sorted(indices):
-            if index < self.line_index:
-                y -= self._views[index].height + self.row_gap
+        targets = self._row_targets(indices)
         for index in sorted(indices):
             view = self._views[index]
             # A view seen for the first time starts from wherever it was born,
             # so it travels in with the rest. Snapping it into place was what
             # made arriving lines land on top of lines still moving.
             previous = self._targets.get(index, view.y)
-            target = self._safe_view_y(view, y)
+            target = targets[index]
             self._targets[index] = target
             if not animate:
                 view.move_to(target)
@@ -1957,19 +2025,20 @@ class Overlay:
                 # Displacement decaying, not a position being driven: a change
                 # landing mid-glide adds to the journey instead of restarting it.
                 remaining = self._glides[index].offset() if index in self._glides else 0.0
-                duration, curve = self._row_glide_motion(index, view)
+                distance = previous - target + remaining
+                duration, curve = self._row_glide_motion(index, view, distance)
                 self._glides[index] = motion.Glide(
-                    previous - target + remaining, duration, curve)
-            y += view.height + self.row_gap
+                    distance, duration, curve)
 
-    def _row_glide_motion(self, index: int, view: LineView) -> tuple[float, tuple]:
+    def _row_glide_motion(self, index: int, view: LineView,
+                          distance: float = 0.0) -> tuple[float, tuple]:
         """Clock and curve for one row, coupling multi-row neighbours.
 
         Ordinarily the stagger is the motion's character. Two wrapped rows
         amplify its relative displacement enough for the new active line to
-        catch the outgoing one, though. Move that pair as one slower, gently
-        eased block: both the outgoing and incoming lines rise gradually, and
-        the outgoing line can settle as context without a fade pulse.
+        catch the outgoing one, though. Use the ordinary weighted curve and
+        request its full 45 ms drag, reducing only the unsafe fraction against
+        the actual visual clearance between these two views.
         """
         active = self._views.get(self.line_index)
         both_multiline = (
@@ -1982,12 +2051,32 @@ class Overlay:
             and any(abs(other - index) == 1
                     and other_view.height > other_view.line_height
                     for other, other_view in self._views.items()))
-        if adjacent_pair or active_has_pair:
-            return motion.MULTILINE_DURATION_MS, motion.MULTILINE_CURVE
+        slots = self._multiline_relay_slots(sorted(self._views))
+        relay_step = slots[1] - slots[0] if slots is not None else None
+        base_duration = (motion.multiline_duration(
+            relay_step if relay_step is not None else abs(distance),
+            view.line_height, self.row_gap)
+            if active_has_pair or adjacent_pair else motion.DURATION_MS)
+        if active_has_pair:
+            return base_duration, motion.MULTILINE_CURVE
+        if adjacent_pair:
+            if relay_step is None:
+                nominal_gap = self.row_gap
+            elif index < self.line_index:
+                nominal_gap = relay_step - view.height
+            else:
+                nominal_gap = relay_step - active.height
+            clearance = max(0.0, nominal_gap - active.glyph_padding
+                            - view.glyph_padding - 1)
+            stagger = motion.safe_stagger(
+                abs(distance), clearance, base_duration,
+                motion.MULTILINE_STAGGER_MS, motion.MULTILINE_CURVE)
+            return base_duration + stagger, motion.MULTILINE_CURVE
         return motion.row_duration(index, self.line_index), motion.SCROLL_CURVE
 
     def _advance_glides(self) -> bool:
         moving = False
+        settled = False
         for index, glide in list(self._glides.items()):
             view = self._views.get(index)
             if view is None:
@@ -1998,19 +2087,28 @@ class Overlay:
             if glide.done:
                 view.move_to(self._targets[index])
                 del self._glides[index]
+                settled = True
             else:
                 moving = True
         self._keep_gliding_rows_apart()
-        return moving
+        relay_hold = getattr(self, "_relay_hold", set())
+        relay_finished = (bool(relay_hold)
+                          and not any(index in self._glides
+                                      for index in relay_hold))
+        if relay_finished:
+            relay_hold.clear()
+        # One final restyle is required after settling: held multiline rows
+        # remain fully visible during the relay and disappear only now.
+        return moving or settled or relay_finished
 
     def _keep_gliding_rows_apart(self) -> None:
         """Keep staggered row trajectories from crossing the active row.
 
-        Adjacent multi-row views normally share a duration, so this is chiefly
-        the fallback for a new line change interrupting an older stagger. In
-        that case anchor the active view and push rows above and below away
-        only for the overlapping part of that frame; their individual glides
-        still determine every other pixel of the journey.
+        A regular multi-row relay pre-bounds its stagger against the available
+        gap, so this is chiefly the fallback for a new line change interrupting
+        an older glide. In that case anchor the active view and push rows above
+        and below away only for the overlapping part of that frame; their
+        individual glides still determine every other pixel of the journey.
         """
         ordered = sorted(self._views)
         if self.line_index not in self._views:
@@ -2018,21 +2116,21 @@ class Overlay:
         active_at = ordered.index(self.line_index)
         active = self._views[self.line_index]
 
-        lower_top = active.visual_vertical_span()[0]
+        lower_top = active.glyph_vertical_span()[0]
         for index in reversed(ordered[:active_at]):
             view = self._views[index]
-            _top, bottom = view.visual_vertical_span()
+            _top, bottom = view.glyph_vertical_span()
             if bottom > lower_top:
                 view.move_to(view.y - math.ceil(bottom - lower_top))
-            lower_top = view.visual_vertical_span()[0]
+            lower_top = view.glyph_vertical_span()[0]
 
-        upper_bottom = active.visual_vertical_span()[1]
+        upper_bottom = active.glyph_vertical_span()[1]
         for index in ordered[active_at + 1:]:
             view = self._views[index]
-            top, _bottom = view.visual_vertical_span()
+            top, _bottom = view.glyph_vertical_span()
             if top < upper_bottom:
                 view.move_to(view.y + math.ceil(upper_bottom - top))
-            upper_bottom = view.visual_vertical_span()[1]
+            upper_bottom = view.glyph_vertical_span()[1]
 
     def _fade_text_scene(self, progress: float) -> None:
         """Present every lyric glyph between the wash and its true colour."""
@@ -2379,6 +2477,27 @@ class Overlay:
                    (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
 
+    def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
+        """Fade a wrapped outgoing row before it enters the card's lane.
+
+        A fixed three-slot relay deliberately sends the outgoing row farther
+        than the ordinary lyric lane can display. Start from its actual resting
+        position at full strength and reach zero exactly when the complete
+        visual box touches ``_content_top``. The glide may then finish behind
+        the reserved lane, but no lyric pixel can appear beneath the cover or
+        either card label.
+        """
+        glide = self._glides.get(index)
+        target = self._targets.get(index)
+        if glide is None or target is None:
+            return 0.0
+        start_y = target + glide.distance
+        hidden_y = self._content_top + view.effect_padding
+        span = start_y - hidden_y
+        if span <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (view.y - hidden_y) / span))
+
     def _restyle(self, indices: list[int] | None = None) -> None:
         for index in (indices if indices is not None else list(self._views)):
             view = self._views.get(index)
@@ -2388,6 +2507,13 @@ class Overlay:
             view.set_active(active)
             if active:
                 view.set_visible(True)
+                continue
+            if (index in getattr(self, "_relay_hold", set())
+                    and index in self._glides):
+                visibility = self._relay_outgoing_visibility(index, view)
+                view.set_visible(visibility > 0.0)
+                view.show_inactive(self.palette.faded(
+                    abs(index - self.line_index), visibility))
                 continue
             visibility = self._visibility(view)
             view.set_visible(visibility > 0.0)

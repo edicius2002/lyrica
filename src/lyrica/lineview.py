@@ -273,9 +273,26 @@ class LineView:
         growth = self.line_height * self.growth / 2
         return math.ceil(max(self.palette.outline, halo) + growth)
 
+    @property
+    def glyph_padding(self) -> int:
+        """Ink outside the resting box, excluding the deliberately soft halo.
+
+        Adjacent lyric rows may let their light meet, just as two lit words in
+        one row do. Their actual glyphs, outlines and maximum growth may not.
+        Keeping this separate from ``effect_padding`` prevents a harmless halo
+        intersection from turning into a sudden geometric correction.
+        """
+        growth = self.line_height * self.growth / 2
+        return math.ceil(max(self.palette.outline, growth))
+
     def visual_vertical_span(self) -> tuple[float, float]:
         """Top and bottom of every possible visible pixel in this line."""
         pad = self.effect_padding
+        return self.y - pad, self.y + self.height + pad
+
+    def glyph_vertical_span(self) -> tuple[float, float]:
+        """Top and bottom that another lyric's actual ink must not cross."""
+        pad = self.glyph_padding
         return self.y - pad, self.y + self.height + pad
 
     # --- lifecycle ---
