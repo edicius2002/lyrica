@@ -93,6 +93,9 @@ def overlay(_overlay_once):
     o._cuts_checked = None
     o._cuts_discontinuous = False
     o._cut_fade_at = None
+    o._outgoing_fade_at = None
+    o._lyrics_fade_at = None
+    o._lyrics_reveal_pending = False
     o._pending_art = None
     o.root.update()
     try:

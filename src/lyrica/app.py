@@ -117,6 +117,12 @@ ECHO_INFERRED_MIN_VISIBLE_S = 0.45
 # the discontinuity read as deliberate rather than as a flash.
 CUT_CORRECTION_FADE_S = 0.12
 
+# A timed-out lookup has two deliberate visual moves: the outgoing words sink
+# into the wash before the incoming card replaces them, and lyrics that answer
+# afterwards rise from that same wash already laid out at their current time.
+OUTGOING_FADE_S = 0.25
+LYRICS_FADE_S = 0.16
+
 
 def _needs_inferred_backing_fallback(lyr: Lyrics, line_index: int) -> bool:
     """Whether a Richsync backing window is too short to render literally."""
@@ -166,11 +172,10 @@ SUSPEND_GLASS_WHILE_DRAGGING = True
 # begins, so it has to be there fractionally before the voice. better-lyrics
 # settled on the same correction, and those numbers are adopted, not guessed.
 # How long the card will wait for every part of itself before going up with
-# whatever it has. Long enough to cover a cold fetch on a slow connection —
-# measured at about a second for the cover and one and a half for the lyrics —
-# short enough that a source which never answers does not strand the panel on
-# the previous song.
-REVEAL_WAIT_S = 3.0
+# whatever it has. One second keeps the outgoing song from lingering while a
+# slow provider continues in the background; late results are revealed through
+# CARD_ONLY instead of holding the whole transition open.
+REVEAL_WAIT_S = 1.0
 
 LINE_LEAD_S = 0.115
 WORD_LEAD_S = 0.150
@@ -197,6 +202,15 @@ BEAM_TICK_MS = FAST_TICK_MS
 # has any", and a panel that collapsed on the first would shrink and grow again
 # on every single track change.
 LYRICS_UNKNOWN, LYRICS_PRESENT, LYRICS_ABSENT = "unknown", "present", "absent"
+
+# The visual lifecycle of a track change. OUTGOING and PREPARING coexist on
+# different Track objects while a lookup is in flight; CARD_ONLY is specifically
+# an incoming track promoted by the deadline before its lyric answer; READY has
+# a definite lyric answer, including a definite absence.
+SCENE_OUTGOING = "outgoing"
+SCENE_PREPARING = "preparing"
+SCENE_CARD_ONLY = "card_only"
+SCENE_READY = "ready"
 
 # The panel with nothing to say: the card, and the same margin under it as
 # above it. Everything else was the room the lyrics needed.
@@ -252,6 +266,7 @@ class Track:
     offset: float = 0.0
     lyrics: Lyrics | None = None
     lyrics_state: str = LYRICS_UNKNOWN
+    scene: str = SCENE_READY
     identified: artwork.Release = field(default_factory=artwork.Release)
     cuts: sponsorblock.Cuts = field(default_factory=sponsorblock.Cuts)
     cover: bytes | None = None
@@ -439,6 +454,9 @@ class Overlay:
         self._cuts_checked = None
         self._cuts_discontinuous = False
         self._cut_fade_at: float | None = None
+        self._outgoing_fade_at: float | None = None
+        self._lyrics_fade_at: float | None = None
+        self._lyrics_reveal_pending = False
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -1150,9 +1168,26 @@ class Overlay:
         keep its last line and makes a half-changed panel impossible rather
         than unlikely.
         """
+        # A rapid second skip may interrupt either presentation fade. Restore
+        # the frame's true colours before freezing it, and never let the first
+        # incoming track's expired deadline promote the second one early.
+        if self._lyrics_reveal_pending:
+            # These glyphs are already indistinguishable from the wash. Drop
+            # them without first making them flash into view as outgoing text.
+            self._clear_views()
+            self.line_index = -1
+        elif (self._outgoing_fade_at is not None or self._lyrics_fade_at is not None
+              or self._cut_fade_at is not None):
+            self._fade_text_scene(1.0)
+        self._outgoing_fade_at = None
+        self._lyrics_fade_at = None
+        self._lyrics_reveal_pending = False
+        self._cut_fade_at = None
         self.fetch_gen += 1
+        self._shown.scene = SCENE_OUTGOING
         loading = Track(gen=self.fetch_gen, snapshot=snap,
-                        offset=config.saved_offset(snap.track_key()))
+                        offset=config.saved_offset(snap.track_key()),
+                        scene=SCENE_PREPARING)
         loading.deadline = time.monotonic() + REVEAL_WAIT_S
         self._loading = loading
 
@@ -1365,7 +1400,7 @@ class Overlay:
         if len(box) >= 2:
             self.canvas.coords(self._thumb_image, box[0], box[1])
 
-    def _promote(self) -> None:
+    def _promote(self, scene: str | None = None, *, fade_lyrics: bool = False) -> None:
         """Put the assembled track up — all of it, in one assignment each.
 
         The panel used to switch four times: the card on one clock, the lyric
@@ -1374,6 +1409,8 @@ class Overlay:
         is no interval in which two songs are on screen at once.
         """
         track = self._loading
+        track.scene = scene or (
+            SCENE_CARD_ONLY if track.lyrics_state == LYRICS_UNKNOWN else SCENE_READY)
         self._shown = track
         self.track_key = track.snapshot.track_key()
         self.offset = track.offset
@@ -1392,6 +1429,16 @@ class Overlay:
         self._awaiting_seek = None
         self._cuts_discontinuous = False
         self._cut_fade_at = None
+        self._outgoing_fade_at = None
+        # From a card-only panel the window must make room first. Building the
+        # rows while it expands is useful — they track the changing anchor —
+        # but revealing them at the same time makes the text look attached to
+        # the stretching edge. Keep it in the wash until expansion has landed.
+        expanding_for_lyrics = (
+            track.lyrics_state == LYRICS_PRESENT and self._compact)
+        self._lyrics_reveal_pending = expanding_for_lyrics
+        self._lyrics_fade_at = (
+            time.monotonic() if fade_lyrics and not expanding_for_lyrics else None)
         self._clear_views()
         self.line_index = -1
         self._card_raw = None       # so the card re-derives against the new song
@@ -1432,8 +1479,17 @@ class Overlay:
         The deadline is what keeps a source that never answers — no network, no
         cover anywhere — from holding the panel on the last song forever.
         """
-        return (self._loading.whole
-                or time.monotonic() >= self._loading.deadline)
+        return Overlay._promotion_scene(self) is not None
+
+    def _promotion_scene(self) -> str | None:
+        """The incoming scene that may be shown now, or None while preparing."""
+        if self._loading.whole:
+            return SCENE_READY
+        if time.monotonic() < self._loading.deadline:
+            return None
+        if self._loading.lyrics_state == LYRICS_UNKNOWN:
+            return SCENE_CARD_ONLY
+        return SCENE_READY
 
     def _settle_cuts(self, lyr: Lyrics, snap: Snapshot) -> None:
         """Refuse a set of cuts the recording cannot fit inside the video.
@@ -1596,7 +1652,7 @@ class Overlay:
             return (self.height - view.height) / 2
         return max(low, min(float(wanted), high))
 
-    def _show_backing(self, lyr: Lyrics, pos: float) -> None:
+    def _show_backing(self, lyr: Lyrics, pos: float, *, effects: bool = True) -> None:
         """Draw what is sung behind the active line, on its lower corner.
 
         It sits below the line without joining the main column's row stack, so
@@ -1613,7 +1669,7 @@ class Overlay:
         # it was answering the one before, and an ad-lib usually answers the end
         # of a phrase, so the line moves on exactly as it is fading. Tying it to
         # the line is what made it vanish mid-fade instead of sinking away.
-        if self._echo is not None and self._advance_backing(pos):
+        if self._echo is not None and self._advance_backing(pos, effects=effects):
             self._order_text_layers()
             return
         self._clear_backing()
@@ -1674,10 +1730,10 @@ class Overlay:
         self._echo_origin_lean = origin - middle
         self._echo_target_lean = target - middle
         self._echo.move_to(self._safe_view_y(self._echo, _below(active)))
-        self._advance_backing(pos)
+        self._advance_backing(pos, effects=effects)
         self._order_text_layers()
 
-    def _advance_backing(self, pos: float) -> bool:
+    def _advance_backing(self, pos: float, *, effects: bool = True) -> bool:
         """Carry the backing through its own window. False once it is spent.
 
         It follows the line it answers for as long as that line is still on
@@ -1727,7 +1783,8 @@ class Overlay:
             self._echo.set_active(True)
             word, fraction = progress_in(words, pos)
             self._echo.show_sweep(word, fraction)
-            self._echo.advance_bloom(time.monotonic())
+            if effects:
+                self._echo.advance_bloom(time.monotonic())
         return True
 
     def _clear_backing(self) -> None:
@@ -1831,29 +1888,59 @@ class Overlay:
                 moving = True
         return moving
 
-    def _advance_cut_fade(self) -> bool:
-        """Bring a clock-corrected scene out of the wash without scrolling it."""
-        if self._cut_fade_at is None:
-            return False
-        elapsed = time.monotonic() - self._cut_fade_at
-        done = elapsed >= CUT_CORRECTION_FADE_S
-        progress = motion.cubic_bezier(
-            1.0 if done else elapsed / CUT_CORRECTION_FADE_S,
-            motion.RESIZE_CURVE)
+    def _fade_text_scene(self, progress: float) -> None:
+        """Present every lyric glyph between the wash and its true colour."""
         # `entry[3]` remains the renderer's target colour. Only the colour sent
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
-        for view in self._views.values():
+        views = list(self._views.values())
+        if self._echo is not None:
+            views.append(self._echo)
+        for view in views:
             for entry in view._items:
                 self.canvas.itemconfigure(
                     entry[2], fill=_between(view.palette.backdrop, entry[3], progress))
             for item in view._outline:
                 self.canvas.itemconfigure(
                     item, fill=_between(view.palette.backdrop, OUTLINE_COLOUR, progress))
+
+    def _advance_fade(self, started: float | None, duration: float,
+                      *, appearing: bool) -> tuple[bool, float | None]:
+        """Advance one text-scene fade and return (still_moving, new_start)."""
+        if started is None:
+            return False, None
+        elapsed = time.monotonic() - started
+        done = elapsed >= duration
+        progress = motion.cubic_bezier(
+            1.0 if done else elapsed / duration, motion.RESIZE_CURVE)
+        self._fade_text_scene(progress if appearing else 1.0 - progress)
         if done:
-            self._cut_fade_at = None
-            return False
-        return True
+            return False, None
+        return True, started
+
+    def _begin_outgoing_fade(self) -> None:
+        """Settle non-colour effects before the outgoing lyrics dissolve."""
+        for view in self._views.values():
+            view.set_active(False)
+        if self._echo is not None:
+            self._echo.set_active(False)
+        self._outgoing_fade_at = time.monotonic()
+
+    def _advance_outgoing_fade(self) -> bool:
+        moving, self._outgoing_fade_at = self._advance_fade(
+            self._outgoing_fade_at, OUTGOING_FADE_S, appearing=False)
+        return moving
+
+    def _advance_lyrics_fade(self) -> bool:
+        moving, self._lyrics_fade_at = self._advance_fade(
+            self._lyrics_fade_at, LYRICS_FADE_S, appearing=True)
+        return moving
+
+    def _advance_cut_fade(self) -> bool:
+        """Bring a clock-corrected scene out of the wash without scrolling it."""
+        moving, self._cut_fade_at = self._advance_fade(
+            self._cut_fade_at, CUT_CORRECTION_FADE_S, appearing=True)
+        return moving
 
     # --- render ---
     def _tick(self):
@@ -1881,10 +1968,35 @@ class Overlay:
         # generation first keeps that late answer from repainting the frame we
         # deliberately froze.
         self._drain_worker_results()
+        interval = SLOW_TICK_MS
         promoted = False
-        if self._loading is not self._shown and self._ready_to_show():
-            self._promote()
-            promoted = True
+        if self._loading is not self._shown:
+            target_scene = self._promotion_scene()
+            if self._outgoing_fade_at is not None:
+                if self._advance_outgoing_fade():
+                    interval = FAST_TICK_MS
+                else:
+                    # An answer may change while the outgoing words fade. Use
+                    # its newest state: a late positive answer can replace the
+                    # empty scene and reveal its lyrics from the settled panel.
+                    target_scene = self._promotion_scene() or SCENE_CARD_ONLY
+                    self._promote(
+                        target_scene,
+                        fade_lyrics=(target_scene == SCENE_READY
+                                     and self._loading.lyrics_state == LYRICS_PRESENT))
+                    promoted = True
+            elif (target_scene is not None
+                  and self._loading.lyrics_state != LYRICS_PRESENT
+                  and (self._views or self._echo)):
+                # Both a timed-out unknown answer and a definite no-lyrics
+                # answer lead to an empty column. Dissolve the old words first;
+                # promotion then starts the card contraction on a later frame.
+                self._begin_outgoing_fade()
+                self._advance_outgoing_fade()
+                interval = FAST_TICK_MS
+            elif target_scene is not None:
+                self._promote(target_scene)
+                promoted = True
         # Read from the shown track rather than kept as a copy of it. A song put
         # up on the deadline goes up not knowing whether it has words, and its
         # answer lands in the same `Track` a moment later — copied at the
@@ -1893,6 +2005,20 @@ class Overlay:
         # same song, so there is nothing crossed about hearing it out.
         self.lyrics = self._shown.lyrics
         self._lyrics_state = self._shown.lyrics_state
+        late_reveal = False
+        if (self._shown.scene == SCENE_CARD_ONLY
+                and self._lyrics_state != LYRICS_UNKNOWN):
+            self._shown.scene = SCENE_READY
+            if self._lyrics_state == LYRICS_PRESENT:
+                # CARD_ONLY contains no lyric items. The first render below
+                # builds the right three rows directly at the current playback
+                # time, then this clock reveals them as one scene.
+                if self._compact:
+                    self._lyrics_reveal_pending = True
+                    self._lyrics_fade_at = None
+                else:
+                    self._lyrics_fade_at = time.monotonic()
+                late_reveal = True
 
         # The old visual state may be held while the next track is assembling,
         # but it must never move to the next track's clock. The same gate stops
@@ -1915,7 +2041,6 @@ class Overlay:
             self._lay_out_card(title, artists)
             self._place_thumb()
 
-        interval = SLOW_TICK_MS
         if live_transport:
             if self._advance_beam():
                 interval = BEAM_TICK_MS
@@ -1924,8 +2049,19 @@ class Overlay:
                 interval = FAST_TICK_MS
             self._refit_views()
 
+        # `_advance_collapse` clears its clock only after applying the exact
+        # final geometry. Start the lyric clock after that point, never on the
+        # last resize frame, so the two effects cannot visually overlap.
+        if (self._lyrics_reveal_pending and not self._compact
+                and self._collapse is None):
+            self._lyrics_reveal_pending = False
+            self._lyrics_fade_at = time.monotonic()
+
         lyr = self.lyrics
-        if live_transport and lyr is not None and lyr.synced and lyr.lines:
+        lyrics_revealing = (
+            self._lyrics_reveal_pending or self._lyrics_fade_at is not None)
+        render_lyrics = live_transport or late_reveal or lyrics_revealing
+        if render_lyrics and lyr is not None and lyr.synced and lyr.lines:
             self._settle_cuts(lyr, snap)
             # Through the cuts first: the player's position is a place in a
             # video, and the lyrics are written against the recording. Without
@@ -1958,10 +2094,13 @@ class Overlay:
                 # the intervening lyrics would briefly present every one as if
                 # it were being sung.
                 self._glides.clear()
-                self._cut_fade_at = time.monotonic()
+                if not lyrics_revealing:
+                    self._cut_fade_at = time.monotonic()
                 self._cuts_discontinuous = False
             if index != self.line_index:
-                self._go_to_line(index, lyr, animate=False if corrected else None)
+                self._go_to_line(
+                    index, lyr,
+                    animate=False if corrected or late_reveal else None)
 
             if self._advance_glides():
                 # Brightness follows position, so it has to be recomputed while
@@ -1983,7 +2122,7 @@ class Overlay:
                 # Advanced every frame rather than only when the front moves:
                 # the bloom is a decay in time, and between two words the front
                 # stands still while the light behind it still has to drain.
-                if (self._cut_fade_at is None
+                if (self._cut_fade_at is None and not lyrics_revealing
                         and active.advance_bloom(time.monotonic())) or word >= 0:
                     interval = FAST_TICK_MS
             else:
@@ -1995,10 +2134,20 @@ class Overlay:
             if self._cut_fade_at is None:
                 backing_pos = pos + (0.0 if lyr.backing_timing_at(self.line_index)
                                      == "inferred" else WORD_LEAD_S)
-                self._show_backing(lyr, backing_pos)
+                self._show_backing(
+                    lyr, backing_pos, effects=not lyrics_revealing)
             else:
                 self._clear_backing()
             if self._advance_cut_fade():
+                interval = FAST_TICK_MS
+            if self._lyrics_reveal_pending:
+                # The renderer updates true target colours on every frame;
+                # overwrite only their presentation colour until the resize
+                # has completely settled.
+                self._fade_text_scene(0.0)
+                if live_transport and self._collapse is not None:
+                    interval = FAST_TICK_MS
+            elif self._advance_lyrics_fade():
                 interval = FAST_TICK_MS
 
         self.root.after(interval, self._tick)

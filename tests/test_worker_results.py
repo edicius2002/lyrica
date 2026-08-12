@@ -102,6 +102,7 @@ def test_a_cut_correction_fades_the_landed_scene_out_of_the_wash(monkeypatch):
             palette=SimpleNamespace(backdrop=(0, 0, 0)),
             _items=[[0, 0, "glyph", "#ffffff"]], _outline=[])
     }
+    panel._echo = None
     panel._cut_fade_at = 10.0
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.06)
 

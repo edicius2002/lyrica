@@ -101,10 +101,34 @@ def test_a_new_song_loads_its_own_remembered_offset(panel, monkeypatch):
             self.target()
 
     monkeypatch.setattr(A.threading, "Thread", ImmediateThread)
+    started_at = time.monotonic()
     panel._start_fetch(_snap("B", "b", "k|B"))
+    finished_at = time.monotonic()
 
     assert requested == ["k|B"]
     assert panel._loading.offset == 0.75
+    assert panel._shown.scene == A.SCENE_OUTGOING
+    assert panel._loading.scene == A.SCENE_PREPARING
+    assert started_at + 1.0 <= panel._loading.deadline <= finished_at + 1.0
+
+
+def test_a_rapid_second_skip_cancels_the_first_transition_deadline(panel, monkeypatch):
+    from lyrica import app as A
+
+    panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
+    def thread(**_kwargs):
+        return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(A.threading, "Thread", thread)
+    monkeypatch.setattr(panel, "_start_artwork", lambda _track: None)
+    monkeypatch.setattr(panel, "_start_cuts", lambda _track: None)
+
+    panel._start_fetch(_snap("C", "c", "k|C"))
+
+    assert panel._outgoing_fade_at is None
+    assert panel._loading.snapshot.track_key() == "k|C"
+    assert panel._loading.deadline > time.monotonic()
+    assert panel._loading.scene == A.SCENE_PREPARING
 
 
 def test_a_seek_does_not_outlive_the_song_it_was_made_on(panel):
@@ -169,6 +193,7 @@ def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
     panel._loading = late
     assert panel._ready_to_show(), "the deadline has passed"
     panel._promote()
+    assert panel._shown.scene == A.SCENE_CARD_ONLY
     panel._card_text = ("B", "b")
     panel._retarget_size()
     assert not panel._compact, "nothing is known yet, so nothing moves"
@@ -179,6 +204,134 @@ def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
     panel._lyrics_state = panel._shown.lyrics_state
     panel._retarget_size()
     assert panel._compact, "it has to act on an answer it asked for"
+
+
+def test_timeout_fades_the_outgoing_words_before_showing_card_only(panel, monkeypatch):
+    from lyrica import app as A
+
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming = A.Track(gen=2, snapshot=incoming_snap, searched=True,
+                       deadline=time.monotonic() - 1, scene=A.SCENE_PREPARING)
+    panel._shown.scene = A.SCENE_OUTGOING
+    panel._loading = incoming
+    panel.fetch_gen = incoming.gen
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._shown is not incoming
+    assert panel._outgoing_fade_at is not None
+    assert _line(panel) == "last of A", "the outgoing items vanish only after the fade"
+
+    panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
+    panel._tick()
+
+    assert panel._shown is incoming
+    assert panel._shown.scene == A.SCENE_CARD_ONLY
+    assert not panel._views
+
+
+def test_a_definite_no_lyrics_answer_fades_before_the_card_contracts(panel,
+                                                                     monkeypatch):
+    from lyrica import app as A
+
+    incoming_snap = _snap("Instrumental", "B", "k|B")
+    incoming = A.Track(
+        gen=2, snapshot=incoming_snap, searched=True,
+        lyrics_state=A.LYRICS_ABSENT, scene=A.SCENE_PREPARING)
+    panel._shown.scene = A.SCENE_OUTGOING
+    panel._loading = incoming
+    panel.fetch_gen = incoming.gen
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._shown is not incoming, "promotion must wait for the text fade"
+    assert panel._outgoing_fade_at is not None
+    assert panel._collapse is None, "contraction must not overlap the fade-out"
+    assert _line(panel) == "last of A"
+
+    panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
+    panel._tick()
+
+    assert panel._shown is incoming
+    assert panel._shown.scene == A.SCENE_READY
+    assert panel._outgoing_fade_at is None
+    assert panel._compact
+    assert panel._collapse is not None, "contraction begins after the fade settles"
+    assert not panel._views
+
+
+def test_late_lyrics_are_built_at_the_current_line_and_fade_in(panel, monkeypatch):
+    from lyrica import app as A
+
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming_snap.live_position = lambda: 6.0
+    incoming = A.Track(gen=2, snapshot=incoming_snap, searched=True,
+                       deadline=time.monotonic() - 1)
+    panel._loading = incoming
+    panel.fetch_gen = incoming.gen
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    panel._promote(A.SCENE_CARD_ONLY)
+    lyrics = Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
+                    words=[[], []], synced=True)
+    panel._worker_results.put(A.WorkerResult(incoming.gen, "lyrics", lyrics))
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._shown.scene == A.SCENE_READY
+    assert _line(panel) == "second of B"
+    assert panel._lyrics_fade_at is not None
+    assert not panel._glides
+    active = panel._views[panel.line_index]
+    assert panel.canvas.itemcget(active._items[0][2], "fill") != active._items[0][3]
+
+
+def test_lyrics_wait_for_card_expansion_to_finish_before_fading_in(panel, monkeypatch):
+    from lyrica import app as A
+
+    # Begin where a lyric-less song leaves the overlay: hugging only its card.
+    panel._clear_views()
+    panel.line_index = -1
+    panel._lyrics_state = A.LYRICS_ABSENT
+    panel._compact = True
+    panel._resize_window(*panel._target_size())
+
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming_snap.live_position = lambda: 6.0
+    incoming = A.Track(
+        gen=2, snapshot=incoming_snap,
+        lyrics=Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
+                      words=[[], []], synced=True),
+        lyrics_state=A.LYRICS_PRESENT, searched=True)
+    panel._loading = incoming
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._collapse is not None, "the card is still expanding"
+    assert panel._lyrics_reveal_pending
+    assert panel._lyrics_fade_at is None, "the fade clock must not overlap expansion"
+    active = panel._views[panel.line_index]
+    assert panel.canvas.itemcget(active._items[0][2], "fill") != active._items[0][3]
+
+    collapse = panel._collapse
+    panel._collapse = (*collapse[:4],
+                       time.monotonic() - A.COLLAPSE_MS / 1000,
+                       *collapse[5:])
+    panel._tick()
+
+    assert panel._collapse is None
+    assert not panel._lyrics_reveal_pending
+    assert panel._lyrics_fade_at is not None, "fade begins only after final geometry"
 
 
 def test_late_artwork_and_identity_are_committed_after_promotion(panel):
