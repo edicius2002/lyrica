@@ -15,6 +15,14 @@ Word = tuple[float, float, str]
 # an instrumental break would otherwise stay lit for the length of the break.
 MAX_INFERRED_WORD_S = 1.75
 
+# Where a backing clock came from.  These are deliberately about timing, not
+# about whether parentheses were semantically a backing vocal: direct TTML has
+# measured starts and ends, a hybrid has measured TTML windows transformed onto
+# another source's clock, and Richsync has source starts with inferred ends.
+BACKING_SOURCE_EXACT = "source_exact"
+BACKING_CROSS_SOURCE_ALIGNED = "cross_source_aligned"
+BACKING_INFERRED = "inferred"
+
 
 def split_parenthetical_adlib(text: str, words: list[Word]) -> tuple | None:
     """Separate a timed parenthetical backing phrase from one lyric line.
@@ -151,10 +159,15 @@ class Lyrics:
     # being sung, so one sequence would interleave them into nonsense.
     backing: list = field(default_factory=list)
     backing_words: list = field(default_factory=list)
-    # Timing confidence for each backing line.  ``inferred`` means a source
-    # supplied word starts but not word durations (Richsync); the renderer can
-    # then avoid making a very short guessed window look like an early flash.
+    # Timing provenance for each backing line: direct measured source timing,
+    # a locally validated cross-source transform, or inferred Richsync ends.
+    # Kept per line because one hybrid can contain both transformed TTML and
+    # untouched Richsync responses.
     backing_timing: list = field(default_factory=list)
+    # Diagnostics for transformed backing clocks, index-matched to ``lines``.
+    # Empty for direct-source and inferred timings. A hybrid entry records the
+    # affine transform and the local anchor error which justified this graft.
+    backing_alignment: list = field(default_factory=list)
     # Richsync suffixes can be sequential rather than sung behind the lead.
     # They remain an ad-lib lane visually, but hold their lead row until done.
     backing_modes: list = field(default_factory=list)
@@ -210,10 +223,19 @@ class Lyrics:
         return "", []
 
     def backing_timing_at(self, line_index: int) -> str:
-        """Whether this backing line has exact or inferred timing."""
+        """The provenance/confidence class of this backing line's timing."""
         if 0 <= line_index < len(self.backing_timing):
-            return self.backing_timing[line_index]
-        return "exact"
+            value = self.backing_timing[line_index]
+            # Temporary source compatibility for callers constructing Lyrics
+            # directly; disk entries are invalidated by the cache version.
+            return BACKING_SOURCE_EXACT if value == "exact" else value
+        return BACKING_SOURCE_EXACT
+
+    def backing_alignment_at(self, line_index: int) -> dict:
+        """Cross-source alignment diagnostics for one backing line."""
+        if 0 <= line_index < len(self.backing_alignment):
+            return self.backing_alignment[line_index]
+        return {}
 
     def backing_mode_at(self, line_index: int) -> str:
         """Whether a backing vocal overlaps or follows its lead."""

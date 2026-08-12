@@ -1,4 +1,6 @@
 """How a backing vocal comes, is sung, and goes."""
+from types import SimpleNamespace
+
 import pytest
 
 from lyrica.lyrics import Lyrics
@@ -69,6 +71,65 @@ def test_an_inferred_short_richsync_adlib_does_not_preview_early_or_flash(panel)
     assert panel._echo is not None
     panel._show_backing(panel.lyrics, 1.40)
     assert panel._echo is not None, "the visual dwell is readable despite a 30 ms source window"
+
+
+def test_an_inferred_multiword_adlib_protects_its_short_final_token(panel):
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (3.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(3.0, 3.5, "Next")]],
+        synced=True, backing=["(long echo)", ""],
+        backing_words=[[(1.0, 1.8, "(long"), (1.8, 1.82, "echo)")], []],
+        backing_timing=["inferred", ""], backing_modes=["sequential", ""])
+    panel._go_to_line(0, panel.lyrics)
+
+    panel._show_backing(panel.lyrics, 2.2)
+
+    assert panel._echo is not None, "the long prefix must not hide a 20 ms final token"
+
+
+def test_a_sequential_row_uses_the_same_protected_end_as_the_renderer():
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (1.9, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(1.9, 2.5, "Next")]], synced=True,
+        backing=["(long echo)", ""],
+        backing_words=[[(1.0, 1.8, "(long"), (1.8, 1.82, "echo)")], []],
+        backing_timing=["inferred", ""], backing_modes=["sequential", ""])
+
+    assert _display_line_index(lyrics, 2.1) == 0
+    assert _display_line_index(lyrics, 2.25) == 1
+
+
+def test_backing_lead_is_smaller_and_removed_for_uncertain_clocks():
+    from lyrica import app as A
+    from lyrica.lyrics import (
+        BACKING_CROSS_SOURCE_ALIGNED,
+        BACKING_INFERRED,
+        BACKING_SOURCE_EXACT,
+    )
+
+    def lead(timing):
+        lyrics = Lyrics(backing=["(x)"], backing_words=[[(1.0, 1.5, "(x)")]],
+                        backing_timing=[timing])
+        return A._backing_lead_s(lyrics, 0)
+
+    assert lead(BACKING_SOURCE_EXACT) == 0.05
+    assert lead(BACKING_CROSS_SOURCE_ALIGNED) == 0.0
+    assert lead(BACKING_INFERRED) == 0.0
+
+
+def test_cross_source_timing_uses_a_shorter_presentation_window():
+    from lyrica import app as A
+    from lyrica.lyrics import BACKING_CROSS_SOURCE_ALIGNED, BACKING_SOURCE_EXACT
+
+    def window(timing):
+        lyrics = Lyrics(backing=["(x)"], backing_words=[[(1.0, 1.5, "(x)")]],
+                        backing_timing=[timing])
+        return A._backing_window(lyrics, 0)
+
+    assert window(BACKING_SOURCE_EXACT) == (0.7, 1.5, 0.3)
+    assert window(BACKING_CROSS_SOURCE_ALIGNED) == (0.85, 1.5, 0.15)
 
 
 def test_a_normal_length_richsync_adlib_keeps_the_original_animation(panel):
@@ -162,11 +223,11 @@ def test_it_sweeps_on_its_own_timings_while_it_is_sung(panel):
 
 
 def test_it_hangs_from_the_lines_lower_right_corner(panel):
-    from lyrica.app import ECHO_CORNER_INSET, ECHO_DROP
+    from lyrica.app import ECHO_CORNER_INSET
 
     panel._show_backing(panel.lyrics, 1.3)
     line, echo = panel._views[0], panel._echo
-    assert echo.y == pytest.approx(line.y + line.line_height * ECHO_DROP, abs=1.0)
+    assert line.y + line.height < echo.y
     left = min(s for s, _e in echo._row_spans)
     corner = max(e for _s, e in line._row_spans)
     assert left == pytest.approx(
@@ -227,10 +288,56 @@ def test_an_adlib_eases_into_and_out_of_its_lane(panel):
 
 def test_the_row_gap_contains_the_complete_adlib_and_next_line(panel):
     panel._show_backing(panel.lyrics, 1.3)
-    echo_bottom = panel._echo.visual_vertical_span()[1]
-    next_top = panel._views[1].visual_vertical_span()[0]
+    lead_bottom = panel._views[0].y + panel._views[0].height
+    echo_top = panel._echo.y
+    echo_bottom = panel._echo.y + panel._echo.height
+    next_top = panel._views[1].y
+    assert lead_bottom < echo_top, "the ad-lib still overlaps the line it answers"
     assert echo_bottom <= next_top, (
         "the ad-lib still shares pixels with the line below")
+
+
+def test_an_ordinary_adlib_keeps_the_designed_echo_size(panel):
+    panel._show_backing(panel.lyrics, 1.3)
+
+    assert panel._echo._font == panel.f_echo
+
+
+def test_the_adlib_sits_at_the_safe_edge_below_the_lead(panel):
+    from lyrica.app import ECHO_VERTICAL_GAP
+
+    panel._show_backing(panel.lyrics, 1.3)
+    lead = panel._views[0]
+
+    assert panel._echo.y == pytest.approx(
+        lead.y + lead.height + panel.chrome.px(ECHO_VERTICAL_GAP), abs=0.5)
+
+
+def test_canvas_clipping_never_pushes_an_adlib_back_over_its_lead():
+    from lyrica.app import Overlay
+
+    class Echo:
+        y = 0.0
+        height = 10
+        effect_padding = 2
+
+        def visual_vertical_span(self):
+            return self.y - self.effect_padding, self.y + self.height + self.effect_padding
+
+        def move_to(self, y):
+            self.y = y
+
+    panel = Overlay.__new__(Overlay)
+    panel.height = 100
+    panel.row_gap = 50
+    panel.chrome = SimpleNamespace(px=lambda value: value)
+    panel._echo = Echo()
+    panel._echo_line = 0
+    panel._views = {}
+    anchor = SimpleNamespace(y=85, height=20, effect_padding=2)
+
+    assert not panel._place_backing_y(anchor)
+    assert panel._echo.y == 0.0, "the edge clamp moved it through the lead"
 
 
 def test_every_transition_endpoint_keeps_complete_glyphs_on_canvas(panel):

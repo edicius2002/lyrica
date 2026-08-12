@@ -25,7 +25,13 @@ from pathlib import Path
 
 import requests
 
-from lyrica.lyrics import MAX_INFERRED_WORD_S, Lyrics, Precision, split_parenthetical_adlib
+from lyrica.lyrics import (
+    BACKING_INFERRED,
+    MAX_INFERRED_WORD_S,
+    Lyrics,
+    Precision,
+    split_parenthetical_adlib,
+)
 from lyrica.providers.base import LyricsProvider
 
 BASE = "https://apic-desktop.musixmatch.com/ws/1.1"
@@ -142,7 +148,7 @@ def richsync_to_lyrics(parsed: list) -> Lyrics:
         words[index] = lead_words
         backing.append(backing_text)
         backing_words.append(timed_backing)
-        backing_timing.append("inferred")
+        backing_timing.append(BACKING_INFERRED)
         backing_modes.append("sequential" if sequential else "overlapping")
     return Lyrics(lines=lines, words=words, synced=True,
                   backing=backing, backing_words=backing_words,

@@ -499,3 +499,126 @@ def test_a_promoted_track_uses_its_own_clock_on_the_same_tick(panel, monkeypatch
     assert panel._shown is incoming
     assert panel.track_key == "k|B"
     assert _line(panel) == "second of B"
+
+
+def test_a_paused_promotion_mounts_lyrics_after_settling_full_geometry(panel,
+                                                                      monkeypatch):
+    from lyrica import app as A
+
+    panel._clear_views()
+    panel.line_index = -1
+    panel._lyrics_state = A.LYRICS_ABSENT
+    panel._compact = True
+    panel._resize_window(*panel._target_size())
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming_snap.playing = False
+    incoming_snap.live_position = lambda: 6.0
+    lyrics = Lyrics(
+        lines=[(0.0, "first of B"), (5.0, "second of B")],
+        words=[[], [(5.0, 7.0, "second of B")]], synced=True,
+        backing=["", "(echo)"],
+        backing_words=[[], [(5.5, 6.5, "(echo)")]])
+    incoming = A.Track(
+        gen=2, snapshot=incoming_snap, lyrics=lyrics,
+        lyrics_state=A.LYRICS_PRESENT, searched=True)
+    panel._loading = incoming
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a static mount must not advance animation")
+
+    for name in ("_advance_beam", "_advance_collapse", "_advance_glides"):
+        monkeypatch.setattr(panel, name, forbidden)
+    monkeypatch.setattr(A.LineView, "advance_bloom", forbidden)
+    resize_modes = []
+    original_resize = panel._retarget_size
+    monkeypatch.setattr(
+        panel, "_retarget_size",
+        lambda animate=True: (resize_modes.append(animate),
+                              original_resize(animate=animate))[1])
+    backing_effects = []
+    original_backing = panel._show_backing
+    monkeypatch.setattr(
+        panel, "_show_backing",
+        lambda lyr, pos, *, effects=True: (
+            backing_effects.append(effects),
+            original_backing(lyr, pos, effects=effects))[1])
+
+    panel._tick()
+
+    assert panel._shown is incoming
+    assert not panel._compact
+    assert (panel.width, panel.height) == panel._target_size()
+    assert panel._collapse is None
+    assert resize_modes == [False]
+    assert _line(panel) == "second of B"
+    assert panel._echo is not None and panel._echo.text == "(echo)"
+    assert backing_effects == [False]
+    assert not panel._glides
+    assert not panel._lyrics_reveal_pending
+    assert panel._lyrics_fade_at is None
+
+
+def test_a_paused_no_lyrics_promotion_settles_compact_geometry(panel, monkeypatch):
+    from lyrica import app as A
+
+    incoming_snap = _snap("Instrumental", "B", "k|B")
+    incoming_snap.playing = False
+    incoming = A.Track(
+        gen=2, snapshot=incoming_snap, lyrics_state=A.LYRICS_ABSENT,
+        searched=True, scene=A.SCENE_PREPARING)
+    panel._shown.scene = A.SCENE_OUTGOING
+    panel._loading = incoming
+    panel.fetch_gen = incoming.gen
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+    monkeypatch.setattr(
+        panel, "_advance_beam",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("a static mount must not advance the beam")))
+
+    panel._tick()
+
+    assert panel._shown is incoming
+    assert panel._compact
+    assert (panel.width, panel.height) == panel._target_size()
+    assert panel._collapse is None
+    assert not panel._views
+
+
+def test_late_paused_lyrics_replace_card_only_with_a_static_scene(panel,
+                                                                  monkeypatch):
+    from lyrica import app as A
+
+    panel._clear_views()
+    panel.line_index = -1
+    panel._lyrics_state = A.LYRICS_ABSENT
+    panel._compact = True
+    panel._resize_window(*panel._target_size())
+    incoming_snap = _snap("CHIHIRO", "Billie Eilish", "k|B")
+    incoming_snap.playing = False
+    incoming_snap.live_position = lambda: 6.0
+    incoming = A.Track(gen=2, snapshot=incoming_snap, searched=True)
+    panel._loading = incoming
+    panel.fetch_gen = incoming.gen
+    panel.reader.snapshot = incoming_snap
+    panel._fetching_key = incoming_snap.track_key()
+    panel._promote(A.SCENE_CARD_ONLY)
+    panel._worker_results.put(A.WorkerResult(
+        incoming.gen, "lyrics",
+        Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
+               words=[[], []], synced=True)))
+    monkeypatch.setattr(panel.root, "after", lambda *_args: None)
+
+    panel._tick()
+
+    assert panel._shown.scene == A.SCENE_READY
+    assert not panel._compact
+    assert panel._collapse is None
+    assert _line(panel) == "second of B"
+    assert not panel._lyrics_reveal_pending
+    assert panel._lyrics_fade_at is None

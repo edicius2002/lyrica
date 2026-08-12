@@ -284,7 +284,12 @@ def test_backing_vocals_survive_the_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
     fresh = Lyrics(lines=[(0.0, "I need you all night")],
                    words=[[(0.0, 1.0, "I")]], synced=True, source="stub",
-                   backing=["(You)"], backing_words=[[(0.5, 0.9, "(You)")]])
+                   backing=["(You)"], backing_words=[[(0.5, 0.9, "(You)")]],
+                   backing_timing=["cross_source_aligned"],
+                   backing_alignment=[{
+                       "source": "community-ttml/word", "offset": 0.2,
+                       "rate": 1.0, "local_residual": 0.04, "anchors": 3,
+                   }])
     monkeypatch.setattr(providers, "_ask_providers",
                         lambda *a: (fresh, providers._provider_names()))
     providers.fetch_lyrics("Dua Lipa", "Levitating")
@@ -293,6 +298,8 @@ def test_backing_vocals_survive_the_cache(tmp_path, monkeypatch):
                         lambda *a: pytest.fail("the cache should have answered"))
     again = providers.fetch_lyrics("Dua Lipa", "Levitating")
     assert again.backing_at(0) == ("(You)", [(0.5, 0.9, "(You)")])
+    assert again.backing_timing_at(0) == "cross_source_aligned"
+    assert again.backing_alignment_at(0)["local_residual"] == 0.04
 
 
 def test_an_entry_of_an_older_shape_is_fetched_again(tmp_path, monkeypatch):
@@ -318,3 +325,36 @@ def test_an_entry_of_an_older_shape_is_fetched_again(tmp_path, monkeypatch):
     got = providers.fetch_lyrics("A", "B")
     assert asked, "an entry without a version has to be fetched again"
     assert got.lines[0][1] == "new"
+
+
+def test_only_unsafe_adlib_timings_are_refetched_from_cache_v10(tmp_path, monkeypatch):
+    import json
+
+    from lyrica import providers
+
+    monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
+
+    def write(title, source, backing=None, timing=None):
+        providers._cache_path("A", title, 0.0).write_text(json.dumps({
+            "v": 10, "lines": [[0.0, "line"]], "words": [[]],
+            "synced": True, "source": source,
+            "backing": backing or [""], "backing_words": [[]],
+            "backing_timing": timing or [""],
+            "asked": providers._provider_names(),
+        }), encoding="utf-8")
+
+    write("direct", "community-ttml/word")
+    write("plain-richsync", "musixmatch/richsync")
+    write("inferred", "musixmatch/richsync", ["(echo)"], ["inferred"])
+    write("hybrid", "musixmatch/richsync+community-ttml-adlibs")
+    calls = []
+    monkeypatch.setattr(
+        providers, "_ask_providers",
+        lambda *_args: calls.append(1) or (
+            synced("fresh"), providers._provider_names()))
+
+    assert providers.fetch_lyrics("A", "direct").source == "community-ttml/word"
+    assert providers.fetch_lyrics("A", "plain-richsync").source == "musixmatch/richsync"
+    assert providers.fetch_lyrics("A", "inferred").source == "fresh"
+    assert providers.fetch_lyrics("A", "hybrid").source == "fresh"
+    assert calls == [1, 1]
