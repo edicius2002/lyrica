@@ -2497,6 +2497,29 @@ class Overlay:
                    (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
 
+    def _single_row_context_visibility(self, view: LineView) -> float:
+        """Visibility the upcoming row would receive in a 1 -> 1 layout."""
+        fade = max(1, self.chrome.px(FADE_ZONE))
+        wanted = self.anchor_y + view.line_height + self.row_gap
+        low = float(view.effect_padding)
+        high = float(self.height - view.line_height - view.effect_padding)
+        reference_y = max(low, min(wanted, high))
+        top = reference_y - view.effect_padding
+        bottom = reference_y + view.line_height + view.glyph_padding
+        room = min((top - self._content_top) / fade,
+                   (self.height - bottom) / fade, 1.0)
+        return max(0.0, room)
+
+    def _context_visibility(self, index: int, view: LineView) -> float:
+        """Consistent preview strength for incoming one- or two-row lyrics."""
+        visibility = self._visibility(view)
+        glide = self._glides.get(index)
+        entering_from_below = glide is None or glide.distance >= 0
+        if index > self.line_index and entering_from_below:
+            visibility = max(
+                visibility, self._single_row_context_visibility(view))
+        return visibility
+
     def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
         """Fade a wrapped outgoing row before it enters the card's lane.
 
@@ -2535,7 +2558,7 @@ class Overlay:
                 view.show_inactive(self.palette.faded(
                     abs(index - self.line_index), visibility))
                 continue
-            visibility = self._visibility(view)
+            visibility = self._context_visibility(index, view)
             view.set_visible(visibility > 0.0)
             view.show_inactive(self.palette.faded(
                 abs(index - self.line_index), visibility))

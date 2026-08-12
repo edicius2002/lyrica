@@ -368,6 +368,8 @@ def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
     incoming = overlay._views[1]
     assert incoming.height > incoming.line_height
     assert overlay._visibility(incoming) > 0.0
+    assert overlay._context_visibility(1, incoming) == pytest.approx(
+        overlay._single_row_context_visibility(incoming))
     assert incoming._visible is True
 
 
@@ -476,6 +478,93 @@ def test_one_to_wrapped_layout_shows_the_incoming_row_below(line_height):
     assert targets[0] == 176
     assert incoming.visual_vertical_span()[1] <= panel.height
     assert panel._visibility(incoming) > 0.0
+
+
+@pytest.mark.parametrize("active_rows,incoming_rows", [
+    (1, 1), (1, 2), (2, 1), (2, 2),
+])
+def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
+        active_rows, incoming_rows):
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        line_height = 35
+        effect_padding = 14
+        glyph_padding = 3
+
+        def __init__(self, rows):
+            self.height = self.line_height * rows
+            self.y = 0.0
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel.line_index = 0
+    panel._views = {0: View(active_rows), 1: View(incoming_rows)}
+    panel._glides = {}
+
+    targets = panel._row_targets([0, 1])
+    incoming = panel._views[1]
+    incoming.y = targets[1]
+    reference = panel._single_row_context_visibility(incoming)
+
+    assert reference > 0.0
+    assert panel._context_visibility(1, incoming) == pytest.approx(reference)
+
+
+def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 236.0
+        height = 70
+        line_height = 35
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    class DownwardGlide:
+        distance = -50
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel.line_index = 0
+    panel._glides = {1: DownwardGlide()}
+    view = View()
+
+    assert panel._context_visibility(1, view) == panel._visibility(view)
 
 
 def test_staggered_multiline_exit_never_crosses_the_new_active_line():
