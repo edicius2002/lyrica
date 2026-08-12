@@ -86,7 +86,7 @@ def test_the_curve_used_is_the_scroll_curve():
     assert motion.SCROLL_CURVE == (0.86, 0.0, 0.2, 1.0)
 
 
-def test_a_glide_can_use_the_gentler_multiline_curve(monkeypatch):
+def test_a_glide_can_use_the_multiline_motion_contract(monkeypatch):
     now = [10.0]
     monkeypatch.setattr(motion.time, "monotonic", lambda: now[0])
     glide = Glide(100, 1000, motion.MULTILINE_CURVE)
@@ -96,11 +96,39 @@ def test_a_glide_can_use_the_gentler_multiline_curve(monkeypatch):
     assert glide.offset() == pytest.approx(expected)
 
 
-def test_multiline_relay_is_longer_and_less_middle_heavy():
-    scroll_middle = (cubic_bezier(0.66, motion.SCROLL_CURVE)
-                     - cubic_bezier(0.33, motion.SCROLL_CURVE))
-    multiline_middle = (cubic_bezier(0.66, motion.MULTILINE_CURVE)
-                        - cubic_bezier(0.33, motion.MULTILINE_CURVE))
+def test_multiline_relay_uses_the_same_weighted_curve_and_stagger_goal():
+    assert motion.MULTILINE_CURVE == motion.SCROLL_CURVE
+    assert motion.MULTILINE_STAGGER_MS == motion.STAGGER_MS
 
-    assert motion.MULTILINE_DURATION_MS > motion.DURATION_MS
-    assert multiline_middle < scroll_middle
+
+def test_multiline_clock_preserves_the_spatial_speed_of_one_row():
+    base = motion.multiline_duration(110, 30, 50)
+    ordinary_speed = (30 + 50) / motion.DURATION_MS
+    wrapped_speed = 110 / base
+
+    assert base == pytest.approx(632.5)
+    assert wrapped_speed == pytest.approx(ordinary_speed)
+
+
+def test_multiline_stagger_uses_the_full_drag_when_clearance_allows_it():
+    base = motion.multiline_duration(60, 30, 50)
+    assert motion.safe_stagger(110, 43, base,
+                               motion.MULTILINE_STAGGER_MS) \
+        == motion.MULTILINE_STAGGER_MS
+
+
+def test_multiline_stagger_shrinks_only_enough_to_preserve_clearance():
+    base = motion.multiline_duration(60, 30, 50)
+    safe = motion.safe_stagger(180, 20, base,
+                               motion.MULTILINE_STAGGER_MS)
+    lead = motion._maximum_phase_lead(
+        base,
+        base + safe,
+        motion.MULTILINE_CURVE)
+    assert 0 < safe < motion.MULTILINE_STAGGER_MS
+    assert lead * 180 <= 20
+    next_lead = motion._maximum_phase_lead(
+        base,
+        base + safe + 1,
+        motion.MULTILINE_CURVE)
+    assert next_lead * 180 > 20

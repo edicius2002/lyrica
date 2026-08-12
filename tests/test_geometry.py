@@ -4,6 +4,7 @@ All six of these came out of review rather than use, and they share a cause —
 the panel has two sizes, and code written for one of them assumed the other.
 """
 import itertools
+import math
 
 import pytest
 
@@ -251,6 +252,7 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
             self.y = float(y)
             self.height = 60       # two lyric rows
             self.effect_padding = 10
+            self.glyph_padding = 3
 
         def move_to(self, y):
             self.y = float(y)
@@ -258,6 +260,10 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
         def visual_vertical_span(self):
             return (self.y - self.effect_padding,
                     self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
 
     class Glide:
         done = False
@@ -278,27 +284,230 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
 
     assert panel._advance_glides()
 
-    outgoing_bottom = panel._views[0].visual_vertical_span()[1]
-    active_top = panel._views[1].visual_vertical_span()[0]
+    outgoing_bottom = panel._views[0].glyph_vertical_span()[1]
+    active_top = panel._views[1].glyph_vertical_span()[0]
     assert outgoing_bottom <= active_top
 
 
-def test_adjacent_multiline_rows_share_a_fluid_glide_duration():
+def test_multiline_glide_does_not_jump_when_only_soft_halos_meet():
+    from lyrica.app import Overlay
+
+    class View:
+        height = 60
+        effect_padding = 14
+        glyph_padding = 3
+
+        def __init__(self, y):
+            self.y = float(y)
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    class Glide:
+        done = False
+
+        def __init__(self, offset):
+            self._offset = offset
+
+        def offset(self):
+            return self._offset
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    # The default-size two-row layout is clamped at the lower canvas edge.
+    # Its halos overlap by 18 px, but its grown glyph boxes retain 4 px.
+    panel._views = {0: View(0), 1: View(0)}
+    panel._targets = {0: 66.0, 1: 176.0}
+    panel._glides = {0: Glide(110.0), 1: Glide(70.0)}
+
+    assert panel._advance_glides()
+    assert panel._views[0].y == 176.0
+    assert panel._views[1].y == 246.0
+
+
+@pytest.mark.parametrize("line_height", [32, 35, 41])
+def test_realistic_multiline_relay_keeps_rising_without_frame_corrections(
+        monkeypatch, line_height):
+    from lyrica import motion
+    from lyrica.app import Overlay
+
+    now = [10.0]
+    monkeypatch.setattr(motion.time, "monotonic", lambda: now[0])
+
+    class View:
+        def __init__(self):
+            self.line_height = line_height
+            self.height = line_height * 2
+            self.effect_padding = math.ceil(11 + line_height * 0.14 / 2)
+            self.glyph_padding = math.ceil(line_height * 0.14 / 2)
+            self.y = 0.0
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel._relay_hold = {0, 1}
+    panel._views = {0: View(), 1: View()}
+    top, middle, _bottom = panel._multiline_relay_slots([0, 1])
+    step = middle - top
+    panel._targets = {0: top, 1: middle}
+    base = motion.multiline_duration(step, line_height, panel.row_gap)
+    clearance = (step - panel._views[0].height
+                 - panel._views[0].glyph_padding
+                 - panel._views[1].glyph_padding - 1)
+    stagger = motion.safe_stagger(
+        step, clearance, base, motion.MULTILINE_STAGGER_MS)
+    panel._glides = {
+        0: motion.Glide(step, base + stagger),
+        1: motion.Glide(step, base),
+    }
+
+    for elapsed_ms in range(0, math.ceil(base + motion.STAGGER_MS) + 6, 5):
+        now[0] = 10.0 + elapsed_ms / 1000
+        outgoing_offset = panel._glides[0].offset() if 0 in panel._glides else 0.0
+        active_offset = panel._glides[1].offset() if 1 in panel._glides else 0.0
+        expected_outgoing = panel._targets[0] + outgoing_offset
+        expected_active = panel._targets[1] + active_offset
+
+        panel._advance_glides()
+
+        # Equality proves the separation fallback did not introduce a jump.
+        assert panel._views[0].y == pytest.approx(expected_outgoing)
+        assert panel._views[1].y == pytest.approx(expected_active)
+        assert (panel._views[0].glyph_vertical_span()[1]
+                <= panel._views[1].glyph_vertical_span()[0] + 1e-6)
+        visibility = panel._relay_outgoing_visibility(
+            0, panel._views[0])
+        if (panel._views[0].y - panel._views[0].effect_padding
+                <= panel._content_top):
+            assert visibility == 0.0
+        else:
+            assert 0.0 < visibility <= 1.0
+
+    assert panel._views[0].y == pytest.approx(top)
+    assert panel._views[1].y == pytest.approx(middle)
+    assert not panel._relay_hold
+
+
+def test_wrapped_outgoing_row_fades_before_entering_the_card_lane():
+    from lyrica.app import Overlay
+
+    class Palette:
+        def faded(self, distance, visibility):
+            return distance, visibility
+
+    class View:
+        def __init__(self):
+            self.visible = None
+            self.style = None
+            self.y = 125.0
+            self.effect_padding = 14
+
+        def set_active(self, active):
+            self.active = active
+
+        def set_visible(self, visible):
+            self.visible = visible
+
+        def show_inactive(self, style):
+            self.style = style
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel._views = {0: View(), 1: View()}
+    panel._targets = {0: 14.0, 1: 125.0}
+
+    class Glide:
+        distance = 111.0
+
+    panel._glides = {0: Glide(), 1: Glide()}
+    panel._relay_hold = {0, 1}
+    panel.palette = Palette()
+    panel._content_top = 88
+    panel._order_text_layers = lambda: None
+
+    panel._restyle()
+    assert panel._views[0].visible is True
+    assert panel._views[0].style == (1, 1.0)
+
+    panel._views[0].y = 113.5
+    panel._restyle()
+    assert panel._views[0].visible is True
+    assert panel._views[0].style == pytest.approx((1, 0.5))
+
+    # Its complete visual box now touches the lyric/card boundary. It is
+    # already invisible before the remaining glide can carry it under the card.
+    panel._views[0].y = panel._content_top + panel._views[0].effect_padding
+    panel._restyle()
+    assert panel._views[0].visible is False
+
+
+def test_wrapped_incoming_row_stays_visible_for_its_complete_rise():
+    from lyrica.app import Overlay
+
+    class View:
+        def __init__(self):
+            self.visible = None
+
+        def set_active(self, active):
+            self.active = active
+
+        def set_visible(self, visible):
+            self.visible = visible
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel._views = {1: View()}
+    panel._glides = {1: object()}
+    panel._relay_hold = {1}
+    panel._order_text_layers = lambda: None
+
+    panel._restyle()
+    assert panel._views[1].active is True
+    assert panel._views[1].visible is True
+
+
+def test_adjacent_multiline_rows_keep_a_bounded_fluid_stagger():
     from lyrica import motion
     from lyrica.app import Overlay
 
     class View:
         line_height = 30
         height = 60
+        effect_padding = 10
+        glyph_padding = 3
 
     panel = Overlay.__new__(Overlay)
     panel.line_index = 1
+    panel.height = 320
+    panel.row_gap = 50
     panel._views = {0: View(), 1: View(), 2: View()}
 
-    expected = motion.MULTILINE_DURATION_MS, motion.MULTILINE_CURVE
-    assert panel._row_glide_motion(0, panel._views[0]) == expected
-    assert panel._row_glide_motion(1, panel._views[1]) == expected
-    assert panel._row_glide_motion(2, panel._views[2]) == expected
+    top, middle, _bottom = panel._multiline_relay_slots([0, 1, 2])
+    step = middle - top
+    base = motion.multiline_duration(step, 30, panel.row_gap)
+    active = base, motion.MULTILINE_CURVE
+    clearance = step - 60 - 3 - 3 - 1
+    stagger = motion.safe_stagger(
+        110, clearance, base,
+        motion.MULTILINE_STAGGER_MS, motion.MULTILINE_CURVE)
+    neighbour = (base + stagger, motion.MULTILINE_CURVE)
+    assert panel._row_glide_motion(0, panel._views[0], 110) == neighbour
+    assert panel._row_glide_motion(1, panel._views[1], 110) == active
+    assert panel._row_glide_motion(2, panel._views[2], 110) == neighbour
 
 
 def test_single_row_neighbours_keep_the_original_stagger():
@@ -317,7 +526,7 @@ def test_single_row_neighbours_keep_the_original_stagger():
     panel.line_index = 1
     panel._views = {0: Single(), 1: Double()}
 
-    assert panel._row_glide_motion(0, panel._views[0]) == (
+    assert panel._row_glide_motion(0, panel._views[0], 80) == (
         motion.row_duration(0, 1), motion.SCROLL_CURVE)
 
 
@@ -329,6 +538,7 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
             self.y = float(y)
             self.height = 60
             self.effect_padding = 10
+            self.glyph_padding = 3
 
         def move_to(self, y):
             self.y = float(y)
@@ -336,6 +546,10 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
         def visual_vertical_span(self):
             return (self.y - self.effect_padding,
                     self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
 
     class Glide:
         done = False
@@ -354,8 +568,8 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
 
     assert panel._advance_glides()
 
-    active_bottom = panel._views[0].visual_vertical_span()[1]
-    outgoing_top = panel._views[1].visual_vertical_span()[0]
+    active_bottom = panel._views[0].glyph_vertical_span()[1]
+    outgoing_top = panel._views[1].glyph_vertical_span()[0]
     assert active_bottom <= outgoing_top
 
 
