@@ -13,6 +13,7 @@ Global:   Ctrl+Alt+K = hide/show | Ctrl+Alt+Q = quit
 """
 import logging
 import logging.handlers
+import math
 import os
 import queue
 import threading
@@ -51,7 +52,7 @@ from lyrica.lyrics import (
     Lyrics,
     progress_in,
 )
-from lyrica.overlay_text import OUTLINE_COLOUR
+from lyrica.overlay_text import OUTLINE_COLOUR, measure, split_for_wrapping
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
 
@@ -419,6 +420,31 @@ def _font_that_fits_width(font: tuple, measured: float, available: float) -> tup
     reduced = min(abs(size) - 1, int(abs(size) * available / measured))
     reduced = max(1, reduced)
     return (font[0], -reduced if size < 0 else reduced, *font[2:])
+
+
+def _single_row_width(text: str, font: tuple) -> int:
+    """Measure the exact unwrapped row shape LineView will later construct."""
+    font_obj = tkfont.Font(font=font)
+    key = tuple(sorted(font_obj.actual().items()))
+    space = measure(font_obj, key, " ")
+    width = 0
+    for index, (piece, glued) in enumerate(split_for_wrapping(text)):
+        if index and not glued:
+            width += space
+        width += measure(font_obj, key, piece)
+    return width
+
+
+def _font_for_single_row(text: str, font: tuple, available: float) -> tuple:
+    """Choose an unwrapped font before any canvas items are constructed."""
+    fitted = font
+    for _attempt in range(8):
+        measured = _single_row_width(text, fitted)
+        smaller = _font_that_fits_width(fitted, measured, available)
+        if smaller == fitted:
+            return fitted
+        fitted = smaller
+    return fitted
 
 
 class Overlay:
@@ -1729,24 +1755,16 @@ class Overlay:
         echo_side = -active_side if active_side else 1
         margin = self.chrome.px(ECHO_SAFE_MARGIN)
         available = max(1.0, self.width - 2 * margin)
-        echo_font = self.f_echo
+        echo_font = _font_for_single_row(text, self.f_echo, available)
         # Backing vocals are a single responding voice, never a second lyric
         # block. Keep the designed echo size consistently; only a genuinely
-        # long response is reduced enough to remain inside the safe width.
-        for _attempt in range(8):
-            self._echo = LineView(
-                self.canvas, self.width // 2, active.y + active.height, text, words,
-                font=echo_font, wrap=10**9,
-                palette=self.palette.dimmed(ECHO_KEEP),
-                scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
-            echo_left = min(a for a, _b in self._echo._row_spans)
-            echo_right = max(b for _a, b in self._echo._row_spans)
-            width_ratio = (echo_right - echo_left) / available
-            fitted_font = _font_that_fits_width(echo_font, width_ratio, 1.0)
-            if fitted_font == echo_font:
-                break
-            self._echo.destroy()
-            echo_font = fitted_font
+        # long response is reduced enough to remain inside the safe width. Its
+        # final size is known now, so canvas glyphs and effects are built once.
+        self._echo = LineView(
+            self.canvas, self.width // 2, active.y + active.height, text, words,
+            font=echo_font, wrap=10**9,
+            palette=self.palette.dimmed(ECHO_KEEP),
+            scale=self.chrome.scale, bloom=self._bloom, growth=self._growth)
         self._echo_line, self._echo_words = self.line_index, words
         self._echo_fade_s, self._echo_opens, self._echo_ends = fade_s, opens, visible_end
         self._echo_side = echo_side
@@ -1934,10 +1952,34 @@ class Overlay:
                 # Displacement decaying, not a position being driven: a change
                 # landing mid-glide adds to the journey instead of restarting it.
                 remaining = self._glides[index].offset() if index in self._glides else 0.0
+                duration, curve = self._row_glide_motion(index, view)
                 self._glides[index] = motion.Glide(
-                    previous - target + remaining,
-                    motion.row_duration(index, self.line_index))
+                    previous - target + remaining, duration, curve)
             y += view.height + self.row_gap
+
+    def _row_glide_motion(self, index: int, view: LineView) -> tuple[float, tuple]:
+        """Clock and curve for one row, coupling multi-row neighbours.
+
+        Ordinarily the stagger is the motion's character. Two wrapped rows
+        amplify its relative displacement enough for the new active line to
+        catch the outgoing one, though. Move that pair as one slower, gently
+        eased block: both the outgoing and incoming lines rise gradually, and
+        the outgoing line can settle as context without a fade pulse.
+        """
+        active = self._views.get(self.line_index)
+        both_multiline = (
+            active is not None
+            and view.height > view.line_height
+            and active.height > active.line_height)
+        adjacent_pair = abs(index - self.line_index) == 1 and both_multiline
+        active_has_pair = (
+            index == self.line_index and both_multiline
+            and any(abs(other - index) == 1
+                    and other_view.height > other_view.line_height
+                    for other, other_view in self._views.items()))
+        if adjacent_pair or active_has_pair:
+            return motion.MULTILINE_DURATION_MS, motion.MULTILINE_CURVE
+        return motion.row_duration(index, self.line_index), motion.SCROLL_CURVE
 
     def _advance_glides(self) -> bool:
         moving = False
@@ -1953,7 +1995,39 @@ class Overlay:
                 del self._glides[index]
             else:
                 moving = True
+        self._keep_gliding_rows_apart()
         return moving
+
+    def _keep_gliding_rows_apart(self) -> None:
+        """Keep staggered row trajectories from crossing the active row.
+
+        Adjacent multi-row views normally share a duration, so this is chiefly
+        the fallback for a new line change interrupting an older stagger. In
+        that case anchor the active view and push rows above and below away
+        only for the overlapping part of that frame; their individual glides
+        still determine every other pixel of the journey.
+        """
+        ordered = sorted(self._views)
+        if self.line_index not in self._views:
+            return
+        active_at = ordered.index(self.line_index)
+        active = self._views[self.line_index]
+
+        lower_top = active.visual_vertical_span()[0]
+        for index in reversed(ordered[:active_at]):
+            view = self._views[index]
+            _top, bottom = view.visual_vertical_span()
+            if bottom > lower_top:
+                view.move_to(view.y - math.ceil(bottom - lower_top))
+            lower_top = view.visual_vertical_span()[0]
+
+        upper_bottom = active.visual_vertical_span()[1]
+        for index in ordered[active_at + 1:]:
+            view = self._views[index]
+            top, _bottom = view.visual_vertical_span()
+            if top < upper_bottom:
+                view.move_to(view.y + math.ceil(upper_bottom - top))
+            upper_bottom = view.visual_vertical_span()[1]
 
     def _fade_text_scene(self, progress: float) -> None:
         """Present every lyric glyph between the wash and its true colour."""

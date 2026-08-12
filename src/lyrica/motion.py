@@ -20,6 +20,13 @@ SCROLL_CURVE = (0.86, 0.0, 0.2, 1.0)
 # ordinary ease-in-out: no sudden middle, and both ends still settle.
 RESIZE_CURVE = (0.42, 0.0, 0.58, 1.0)
 
+# Two wrapped lyric rows travel much farther than a one-line hand-off. The
+# ordinary scroll curve puts most of that distance into its middle frames,
+# which reads as a sudden lift even when both rows remain perfectly separated.
+# Give that specific relay an ordinary ease-in-out and a little more time.
+MULTILINE_CURVE = (0.42, 0.0, 0.58, 1.0)
+MULTILINE_DURATION_MS = 600
+
 # The rise of a struck word, and its settling back. Two curves because the two
 # halves are not the same gesture: a word is hit, which is sudden, and then
 # relaxes, which is not. One linear ramp for both was what made the motion read
@@ -73,9 +80,11 @@ class Glide:
     going instead of snapping to a new start.
     """
 
-    def __init__(self, distance: float, duration_ms: float):
+    def __init__(self, distance: float, duration_ms: float,
+                 curve: tuple = SCROLL_CURVE):
         self.distance = distance
         self.duration = max(1.0, duration_ms) / 1000.0
+        self.curve = curve
         self.started = time.monotonic()
 
     @property
@@ -87,7 +96,7 @@ class Glide:
         elapsed = (time.monotonic() - self.started) / self.duration
         if elapsed >= 1.0:
             return 0.0
-        return self.distance * (1.0 - cubic_bezier(elapsed))
+        return self.distance * (1.0 - cubic_bezier(elapsed, self.curve))
 
 
 def row_duration(row_index: int, active_row: int) -> float:

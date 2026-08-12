@@ -84,3 +84,23 @@ def test_the_curve_used_is_the_scroll_curve():
     # Pinned deliberately: this is the value taken from a tuned implementation
     # rather than chosen, and a silent change would alter the feel of every move.
     assert motion.SCROLL_CURVE == (0.86, 0.0, 0.2, 1.0)
+
+
+def test_a_glide_can_use_the_gentler_multiline_curve(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr(motion.time, "monotonic", lambda: now[0])
+    glide = Glide(100, 1000, motion.MULTILINE_CURVE)
+    now[0] = 10.5
+
+    expected = 100 * (1 - cubic_bezier(0.5, motion.MULTILINE_CURVE))
+    assert glide.offset() == pytest.approx(expected)
+
+
+def test_multiline_relay_is_longer_and_less_middle_heavy():
+    scroll_middle = (cubic_bezier(0.66, motion.SCROLL_CURVE)
+                     - cubic_bezier(0.33, motion.SCROLL_CURVE))
+    multiline_middle = (cubic_bezier(0.66, motion.MULTILINE_CURVE)
+                        - cubic_bezier(0.33, motion.MULTILINE_CURVE))
+
+    assert motion.MULTILINE_DURATION_MS > motion.DURATION_MS
+    assert multiline_middle < scroll_middle

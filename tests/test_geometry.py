@@ -243,6 +243,122 @@ def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
               for item in view.item_ids())
 
 
+def test_staggered_multiline_exit_never_crosses_the_new_active_line():
+    from lyrica.app import Overlay
+
+    class View:
+        def __init__(self, y):
+            self.y = float(y)
+            self.height = 60       # two lyric rows
+            self.effect_padding = 10
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+    class Glide:
+        done = False
+
+        def __init__(self, offset):
+            self._offset = offset
+
+        def offset(self):
+            return self._offset
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel._views = {0: View(0), 1: View(0)}
+    panel._targets = {0: 20.0, 1: 130.0}
+    # The active row has advanced much further through its shorter glide. Raw,
+    # the outgoing row would end at 170 while the active row starts at 140.
+    panel._glides = {0: Glide(80.0), 1: Glide(20.0)}
+
+    assert panel._advance_glides()
+
+    outgoing_bottom = panel._views[0].visual_vertical_span()[1]
+    active_top = panel._views[1].visual_vertical_span()[0]
+    assert outgoing_bottom <= active_top
+
+
+def test_adjacent_multiline_rows_share_a_fluid_glide_duration():
+    from lyrica import motion
+    from lyrica.app import Overlay
+
+    class View:
+        line_height = 30
+        height = 60
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel._views = {0: View(), 1: View(), 2: View()}
+
+    expected = motion.MULTILINE_DURATION_MS, motion.MULTILINE_CURVE
+    assert panel._row_glide_motion(0, panel._views[0]) == expected
+    assert panel._row_glide_motion(1, panel._views[1]) == expected
+    assert panel._row_glide_motion(2, panel._views[2]) == expected
+
+
+def test_single_row_neighbours_keep_the_original_stagger():
+    from lyrica import motion
+    from lyrica.app import Overlay
+
+    class Single:
+        line_height = 30
+        height = 30
+
+    class Double:
+        line_height = 30
+        height = 60
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 1
+    panel._views = {0: Single(), 1: Double()}
+
+    assert panel._row_glide_motion(0, panel._views[0]) == (
+        motion.row_duration(0, 1), motion.SCROLL_CURVE)
+
+
+def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
+    from lyrica.app import Overlay
+
+    class View:
+        def __init__(self, y):
+            self.y = float(y)
+            self.height = 60
+            self.effect_padding = 10
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+    class Glide:
+        done = False
+
+        def __init__(self, offset):
+            self._offset = offset
+
+        def offset(self):
+            return self._offset
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 0
+    panel._views = {0: View(0), 1: View(0)}
+    panel._targets = {0: 100.0, 1: 210.0}
+    panel._glides = {0: Glide(-20.0), 1: Glide(-80.0)}
+
+    assert panel._advance_glides()
+
+    active_bottom = panel._views[0].visual_vertical_span()[1]
+    outgoing_top = panel._views[1].visual_vertical_span()[0]
+    assert active_bottom <= outgoing_top
+
+
 
 def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch):
     # One built while the panel is compact leaves bare panel showing for the

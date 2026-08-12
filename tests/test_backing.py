@@ -194,6 +194,33 @@ def test_a_long_adlib_stays_on_one_row_inside_the_panel(panel):
     assert sum(left._row_spans[0]) / 2 <= panel.width / 2
 
 
+def test_a_long_adlib_constructs_only_its_final_view(panel, monkeypatch):
+    from lyrica import app as A
+
+    tokens = ["(this"] + ["long" for _ in range(42)] + ["echo)"]
+    text = " ".join(tokens)
+    words = [(1.0 + i * 0.04, 1.04 + i * 0.04, token)
+             for i, token in enumerate(tokens)]
+    panel.lyrics = Lyrics(
+        lines=[(0.0, "Lead"), (4.0, "Next")],
+        words=[[(0.0, 0.8, "Lead")], [(4.0, 4.5, "Next")]],
+        synced=True, backing=[text, ""], backing_words=[words, []])
+    panel._go_to_line(0, panel.lyrics)
+
+    original = A.LineView
+    constructions = []
+
+    def counted(*args, **kwargs):
+        constructions.append(kwargs["font"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(A, "LineView", counted)
+    panel._show_backing(panel.lyrics, 1.4)
+
+    assert panel._echo is not None
+    assert len(constructions) == 1
+
+
 def test_it_arrives_out_of_the_wash_and_leaves_into_it(panel):
     from lyrica.app import ECHO_FADE_S
     from lyrica.glass import rgb_of
