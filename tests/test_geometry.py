@@ -353,6 +353,7 @@ def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
 
 
 def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
+    from lyrica import app as A
     from lyrica.lyrics import Lyrics
 
     wrapped = ("upcoming wrapped context remains visible below the current "
@@ -368,8 +369,7 @@ def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
     incoming = overlay._views[1]
     assert incoming.height > incoming.line_height
     assert overlay._visibility(incoming) > 0.0
-    assert overlay._context_visibility(1, incoming) == pytest.approx(
-        overlay._single_row_context_visibility(incoming))
+    assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
     assert incoming._visible is True
 
 
@@ -483,23 +483,26 @@ def test_one_to_wrapped_layout_shows_the_incoming_row_below(line_height):
 @pytest.mark.parametrize("active_rows,incoming_rows", [
     (1, 1), (1, 2), (2, 1), (2, 2),
 ])
+@pytest.mark.parametrize("scale", [0.6, 1.0, 1.4])
 def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
-        active_rows, incoming_rows):
-    from lyrica.app import Overlay
+        active_rows, incoming_rows, scale):
+    from lyrica.app import INCOMING_VISIBILITY_FLOOR, Overlay
 
     class Chrome:
-        @staticmethod
-        def px(value):
-            return value
+        def px(self, value):
+            return round(value * scale)
 
     class View:
-        line_height = 35
-        effect_padding = 14
-        glyph_padding = 3
+        line_height = round(35 * scale)
+        effect_padding = round(14 * scale)
+        glyph_padding = max(1, round(3 * scale))
 
         def __init__(self, rows):
             self.height = self.line_height * rows
             self.y = 0.0
+            self.active = False
+            self.visible = False
+            self.inactive_visibility = None
 
         def visual_vertical_span(self):
             return (self.y - self.effect_padding,
@@ -509,23 +512,42 @@ def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
             return (self.y - self.glyph_padding,
                     self.y + self.height + self.glyph_padding)
 
+        def set_active(self, active):
+            self.active = active
+
+        def set_visible(self, visible):
+            self.visible = visible
+
+        def show_inactive(self, visibility):
+            self.inactive_visibility = visibility
+
+    class Palette:
+        @staticmethod
+        def faded(_distance, visibility):
+            return visibility
+
     panel = Overlay.__new__(Overlay)
     panel.chrome = Chrome()
-    panel.height = 320
-    panel.anchor_y = 176
-    panel.row_gap = 50
-    panel._content_top = 88
+    panel.height = round(320 * scale)
+    panel.anchor_y = panel.height * 0.55
+    panel.row_gap = round(50 * scale)
+    panel._content_top = round(88 * scale)
     panel.line_index = 0
     panel._views = {0: View(active_rows), 1: View(incoming_rows)}
     panel._glides = {}
+    panel._relay_hold = set()
+    panel.palette = Palette()
+    panel._order_text_layers = lambda: None
 
     targets = panel._row_targets([0, 1])
     incoming = panel._views[1]
     incoming.y = targets[1]
-    reference = panel._single_row_context_visibility(incoming)
+    visibility = panel._context_visibility(1, incoming)
 
-    assert reference > 0.0
-    assert panel._context_visibility(1, incoming) == pytest.approx(reference)
+    assert visibility >= INCOMING_VISIBILITY_FLOOR
+    panel._restyle([0, 1])
+    assert incoming.visible is True
+    assert incoming.inactive_visibility == pytest.approx(visibility)
 
 
 def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():

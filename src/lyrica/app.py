@@ -72,6 +72,11 @@ ROW_GAP = 50
 # line sits either side: deep enough to read as a fade rather than a cut,
 # shallow enough that the neighbours are still properly legible.
 FADE_ZONE = 42
+# The next lyric is a readable preview, not edge decoration. This is the
+# medium presence the established 1 -> 1 layout has at its normal lower slot.
+# Keep it as an explicit floor so wrapping and font metrics cannot turn 1 -> 2
+# or 2 -> 2 into an effectively invisible incoming row.
+INCOMING_VISIBILITY_FLOOR = 0.50
 
 # Where the line being sung sits, as a fraction of the window height. Derived
 # rather than chosen: low enough that the line above clears the card and its
@@ -2517,7 +2522,8 @@ class Overlay:
         entering_from_below = glide is None or glide.distance >= 0
         if index > self.line_index and entering_from_below:
             visibility = max(
-                visibility, self._single_row_context_visibility(view))
+                visibility, self._single_row_context_visibility(view),
+                INCOMING_VISIBILITY_FLOOR)
         return visibility
 
     def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
