@@ -1745,7 +1745,10 @@ class Overlay:
         echo_bottom = self._echo.visual_vertical_span()[1]
         following_top = following.visual_vertical_span()[0]
         if echo_bottom > following_top:
-            self._echo.move_to(self._echo.y - (echo_bottom - following_top))
+            # `LineView.move_to` deliberately lands on device pixels. The
+            # extra pixel prevents a fractional overlap surviving that round.
+            self._echo.move_to(
+                self._echo.y - (echo_bottom - following_top) - 1.0)
 
     def _advance_backing(self, pos: float, *, effects: bool = True) -> bool:
         """Carry the backing through its own window. False once it is spent.
