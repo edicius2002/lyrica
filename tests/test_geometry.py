@@ -5,6 +5,7 @@ the panel has two sizes, and code written for one of them assumed the other.
 """
 import itertools
 import math
+import sys
 
 import pytest
 
@@ -50,6 +51,10 @@ class FakeDesktop:
     def desktop_bounds():
         return (-1920, 0, 3840, 1080)
 
+    @staticmethod
+    def monitor_bounds(x, y):
+        return (-1920, 0, 1920, 1080) if x < 0 else (0, 0, 1920, 1080)
+
 
 def test_the_platform_beats_what_tk_can_see(monkeypatch):
     # Tk only knows the primary screen, and clamping to it dragged the panel
@@ -67,6 +72,59 @@ def test_the_desktop_falls_back_to_the_screen_without_the_platform(monkeypatch):
 
     monkeypatch.setattr(chrome_mod.sys, "platform", "linux")
     assert chrome_mod.desktop_bounds(FakeScreen()) == (0, 0, 1920, 1080)
+
+
+def test_monitor_bounds_follow_the_point_on_a_secondary_screen(monkeypatch):
+    import lyrica.chrome.windows  # noqa: F401
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod.sys, "platform", "win32")
+    monkeypatch.setattr(chrome_mod, "windows", FakeDesktop, raising=False)
+    assert chrome_mod.monitor_bounds(FakeScreen(), -800, 400) \
+        == (-1920, 0, 1920, 1080)
+
+
+def test_monitor_bounds_fall_back_to_primary_screen(monkeypatch):
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod.sys, "platform", "linux")
+    assert chrome_mod.monitor_bounds(FakeScreen(), 2500, 400) \
+        == (0, 0, 1920, 1080)
+
+
+def test_resize_keeps_its_centre_on_the_left_monitor(monkeypatch):
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (-1920, 0, 1920, 1080))
+    assert chrome_mod.position_in_monitor(
+        FakeScreen(), (-800, 400), (1125, 400)) == (-1362, 200)
+
+
+def test_resize_is_clamped_to_the_same_monitor_not_the_primary(monkeypatch):
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (1920, -200, 2560, 1440))
+    assert chrome_mod.position_in_monitor(
+        FakeScreen(), (2100, -100), (1125, 400)) == (1920, -200)
+
+
+def test_tk_geometry_uses_valid_signs_for_negative_monitor_coordinates():
+    from lyrica import chrome as chrome_mod
+
+    assert chrome_mod.geometry(900, 320, -1362, 200) == "900x320-1362+200"
+    assert chrome_mod.geometry(900, 320, 2200, -120) == "900x320+2200-120"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows monitor API")
+def test_windows_can_resolve_a_real_monitor_from_a_desktop_point():
+    from lyrica.chrome import windows
+
+    left, top, width, height = windows.monitor_bounds(0, 0)
+    assert width > 0 and height > 0
+    assert left <= 0 <= left + width
+    assert top <= 0 <= top + height
 
 
 def test_the_remembered_place_is_the_middle_across_and_the_top_down(tmp_path,

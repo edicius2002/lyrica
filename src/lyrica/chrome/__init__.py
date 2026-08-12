@@ -185,6 +185,35 @@ def desktop_bounds(root: tk.Tk) -> tuple:
     return (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
 
 
+def monitor_bounds(root: tk.Tk, x: int, y: int) -> tuple:
+    """(left, top, width, height) of the screen containing a desktop point."""
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+        bounds = win.monitor_bounds(x, y)
+        if bounds is not None:
+            return bounds
+    # Tk exposes only the primary monitor. On platforms without a native
+    # monitor query this is still a safer clamp than inventing coordinates.
+    return (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
+
+
+def position_in_monitor(root: tk.Tk, centre: tuple[int, int],
+                        size: tuple[int, int]) -> tuple[int, int]:
+    """Top-left preserving a centre inside the monitor that already owns it."""
+    centre_x, centre_y = centre
+    width, height = size
+    left, top, monitor_w, monitor_h = monitor_bounds(root, centre_x, centre_y)
+    right, bottom = left + monitor_w, top + monitor_h
+    x = max(left, min(centre_x - width // 2, right - width))
+    y = max(top, min(centre_y - height // 2, bottom - height))
+    return x, y
+
+
+def geometry(width: int, height: int, x: int, y: int) -> str:
+    """Tk geometry with valid explicit signs in every desktop quadrant."""
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
 def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
     """Drop the expensive part of the window effect while it is being moved.
 
