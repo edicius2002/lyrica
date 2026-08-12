@@ -93,7 +93,7 @@ FONT_ECHO = ("Segoe UI", -20, "italic")
 # unsung half.
 # Slightly below the previous two-thirds drop. This leaves a deliberate small
 # breathing gap below the lead while still fitting before the next lyric row.
-ECHO_DROP = 0.82
+ECHO_DROP = 0.77
 ECHO_KEEP = 0.72
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
