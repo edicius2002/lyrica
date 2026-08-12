@@ -209,6 +209,19 @@ def position_in_monitor(root: tk.Tk, centre: tuple[int, int],
     return x, y
 
 
+def place_in_monitor(root: tk.Tk, place: tuple[int, int],
+                     size: tuple[int, int],
+                     monitor_point: tuple[int, int]) -> tuple[int, int]:
+    """Top-left preserving a saved horizontal-centre/top-edge position."""
+    centre_x, wanted_top = place
+    width, height = size
+    left, top, monitor_w, monitor_h = monitor_bounds(root, *monitor_point)
+    right, bottom = left + monitor_w, top + monitor_h
+    x = max(left, min(centre_x - width // 2, right - width))
+    y = max(top, min(wanted_top, bottom - height))
+    return x, y
+
+
 def geometry(width: int, height: int, x: int, y: int) -> str:
     """Tk geometry with valid explicit signs in every desktop quadrant."""
     return f"{width}x{height}{x:+d}{y:+d}"

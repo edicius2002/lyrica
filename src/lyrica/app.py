@@ -585,6 +585,11 @@ class Overlay:
         if wanted is not None:
             self._start_x = max(dleft, min(wanted[0], dleft + dwidth - self.width))
             self._start_y = max(dtop, min(wanted[1], dtop + dheight - self.height))
+        # The user's stable position is a horizontal centre and a top edge.
+        # Size changes derive geometry from this anchor; they do not overwrite
+        # it with the centre of whichever size happened to be visible last.
+        self._place_anchor = (
+            self._start_x + self.width // 2, self._start_y)
         self.root.geometry(chrome_mod.geometry(
             self.width, self.height, self._start_x, self._start_y))
 
@@ -757,6 +762,7 @@ class Overlay:
     # --- interaction ---
     def _drag_start(self, e):
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
+        self._drag_at = (self.root.winfo_x(), self.root.winfo_y())
         self._press_at = (e.x_root, e.y_root)
         self._press_y = e.y
         self._moved = False
@@ -792,8 +798,11 @@ class Overlay:
         compact belonged to a 114 px window and reopening at 375 put it 130 px
         too high.
         """
-        config.save_place(self.root.winfo_x() + self.width // 2,
-                          self.root.winfo_y())
+        x, top = self._drag_at
+        if x is None or top is None:
+            x, top = self.root.winfo_x(), self.root.winfo_y()
+        self._place_anchor = (x + self.width // 2, top)
+        config.save_place(*self._place_anchor)
 
     def _drag_end(self, _e):
         was_dragging = self._moved
@@ -1082,8 +1091,11 @@ class Overlay:
         scale = self._dpi_scale * self._size
         self.chrome = replace(self.chrome, scale=scale)
 
-        was = (self.root.winfo_x() + self.width // 2,
-               self.root.winfo_y() + self.height // 2)
+        old_centre = (self.root.winfo_x() + self.width // 2,
+                      self.root.winfo_y() + self.height // 2)
+        place = getattr(
+            self, "_place_anchor",
+            (self.root.winfo_x() + self.width // 2, self.root.winfo_y()))
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
         self.f_title = _scaled_font(FONT_TITLE, scale)
@@ -1103,13 +1115,12 @@ class Overlay:
         self.width, self.height = self._target_size()
         self.anchor_y = self.height * ANCHOR
 
-        # Grown or shrunk about its own middle, so the window stays where the
-        # eye left it instead of walking up-left as it grows. Clamp against the
-        # monitor that contained that middle *before* the size changed. Tk's
-        # screen metrics name only the primary display on Windows; using them
-        # here teleported a panel on any other monitor back to the primary one.
-        x, y = chrome_mod.position_in_monitor(
-            self.root, was, (self.width, self.height))
+        # Grow or shrink from the last place the user chose: horizontal centre
+        # and top edge. The old on-screen centre selects the current monitor;
+        # the saved place remains the anchor even when a larger size has to be
+        # temporarily clamped at an edge.
+        x, y = chrome_mod.place_in_monitor(
+            self.root, place, (self.width, self.height), old_centre)
         self.root.geometry(chrome_mod.geometry(self.width, self.height, x, y))
         self.canvas.configure(width=self.width, height=self.height)
         # After the geometry, never before: the clip region is in device pixels

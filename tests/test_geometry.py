@@ -110,6 +110,32 @@ def test_resize_is_clamped_to_the_same_monitor_not_the_primary(monkeypatch):
         FakeScreen(), (2100, -100), (1125, 400)) == (1920, -200)
 
 
+def test_keyboard_resize_grows_from_the_last_horizontal_centre_and_top(monkeypatch):
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (-1920, 0, 1920, 1080))
+    place = (-800, 150)
+    assert chrome_mod.place_in_monitor(
+        FakeScreen(), place, (1125, 400), (-800, 310)) == (-1362, 150)
+    assert chrome_mod.place_in_monitor(
+        FakeScreen(), place, (900, 320), (-800, 350)) == (-1250, 150)
+
+
+def test_last_place_survives_a_temporary_edge_clamp(monkeypatch):
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (1920, 0, 1920, 1080))
+    place = (2020, 900)
+    assert chrome_mod.place_in_monitor(
+        FakeScreen(), place, (1125, 400), (2100, 950)) == (1920, 680)
+    # Shrinking derives from the original chosen place again, rather than from
+    # the centre of the clamped large window.
+    assert chrome_mod.place_in_monitor(
+        FakeScreen(), place, (450, 160), (2100, 880)) == (1920, 900)
+
+
 def test_tk_geometry_uses_valid_signs_for_negative_monitor_coordinates():
     from lyrica import chrome as chrome_mod
 
@@ -153,6 +179,30 @@ def test_an_older_saved_centre_is_still_honoured(tmp_path, monkeypatch):
     config.save_setting("centre", [800, 500])
     assert config.saved_place() is None
     assert config.saved_centre() == (800, 500)
+
+
+def test_drag_remembers_the_last_requested_position_not_stale_tk_geometry(
+        tmp_path, monkeypatch):
+    from lyrica import config
+    from lyrica.app import Overlay
+
+    monkeypatch.setenv("LYRICA_CACHE_DIR", str(tmp_path))
+
+    class StaleRoot:
+        def winfo_x(self): return 100
+        def winfo_y(self): return 80
+
+    panel = Overlay.__new__(Overlay)
+    panel.root = StaleRoot()
+    panel.width = 900
+    # Native movement is asynchronous; this is the exact last position asked
+    # for even if Tk still reports the preceding frame.
+    panel._drag_at = (-1400, 220)
+
+    panel._remember_where()
+
+    assert panel._place_anchor == (-950, 220)
+    assert config.saved_place() == (-950, 220)
 
 
 class ArtStub:
