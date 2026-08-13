@@ -1041,6 +1041,11 @@ class Overlay:
         # `_content_top` and painted invisible, until the next lyric arrived.
         if self._views and self.line_index in self._views:
             self._retarget(sorted(self._views), animate=False)
+            # Position and presentation are one geometry-dependent state.
+            # An upcoming row may have been hidden while the panel was compact;
+            # moving it into the expanded canvas without restyling leaves its
+            # Tk items hidden until that row becomes active.
+            self._restyle()
 
     # --- showing and hiding ---
     def _toggle_visible(self) -> None:

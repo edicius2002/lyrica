@@ -352,26 +352,64 @@ def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
               for item in view.item_ids())
 
 
-def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
+@pytest.mark.parametrize("current_wrapped,incoming_wrapped", [
+    (False, False), (False, True), (True, False), (True, True),
+])
+def test_a_real_next_line_is_drawn_before_every_row_count_transition(
+        overlay, current_wrapped, incoming_wrapped):
     from lyrica import app as A
     from lyrica.lyrics import Lyrics
 
-    wrapped = ("upcoming wrapped context remains visible below the current "
-               "line throughout the preview before its natural rise")
+    short = "short lyric row"
+    wrapped = ("wrapped upcoming context remains clearly visible below the "
+               "current lyric before its natural rise into the active slot")
     lyrics = Lyrics(
-        lines=[(0.0, "short current row"), (3.0, wrapped),
+        lines=[(0.0, wrapped if current_wrapped else short),
+               (3.0, wrapped if incoming_wrapped else short),
                (6.0, "following row")],
         words=[[], [], []], synced=True)
 
     overlay.lyrics = lyrics
     overlay._go_to_line(0, lyrics, animate=False)
+    overlay.root.update_idletasks()
 
+    current = overlay._views[0]
     incoming = overlay._views[1]
-    assert incoming.height > incoming.line_height
+    assert (current.height > current.line_height) is current_wrapped
+    assert (incoming.height > incoming.line_height) is incoming_wrapped
     assert overlay._visibility(incoming) > 0.0
     assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
     assert incoming._visible is True
     assert {entry[3] for entry in incoming._items} == {overlay.palette.unsung}
+    assert {overlay.canvas.itemcget(entry[2], "state")
+            for entry in incoming._items} == {"normal"}
+    assert {overlay.canvas.itemcget(entry[2], "fill")
+            for entry in incoming._items} == {overlay.palette.unsung}
+    boxes = [overlay.canvas.bbox(entry[2]) for entry in incoming._items]
+    assert all(box is not None for box in boxes)
+    assert min(box[1] for box in boxes) >= 0
+    assert max(box[3] for box in boxes) <= overlay.height
+
+
+def test_expansion_reapplies_visibility_to_an_upcoming_row(overlay):
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "current lyric"),
+               (3.0, "the upcoming lyric must already be visible below"),
+               (6.0, "following lyric")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    incoming = overlay._views[1]
+
+    incoming.set_visible(False)
+    assert incoming._visible is False
+    overlay._resize_window(overlay.width, overlay.height - 1)
+
+    assert incoming._visible is True
+    assert {overlay.canvas.itemcget(entry[2], "state")
+            for entry in incoming._items} == {"normal"}
 
 
 def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
