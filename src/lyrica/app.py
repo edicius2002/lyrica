@@ -2535,8 +2535,10 @@ class Overlay:
                 active.move_to(self._safe_view_y(
                     active, active.y - math.ceil(active_bottom - incoming_top)))
         key = (self.line_index, id(incoming), self.palette.unsung)
-        if getattr(self, "_incoming_preview_key", None) == key:
-            return
+        # This is deliberately reasserted at every stable frame.  Tk's actual
+        # item state and fill can be changed by a presentation effect without
+        # changing LineView's target caches; the tag-based implementation is a
+        # constant two Tcl calls regardless of how long the wrapped line is.
         incoming.present_inactive(self.palette.unsung)
         self._incoming_preview_key = key
 
