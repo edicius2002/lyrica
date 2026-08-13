@@ -133,6 +133,12 @@ class LineView:
         self.lean = float(lean)
         self._shift = 0.0
         self._tag = f"lyrica-line-{id(self)}"
+        # Separate tags let the frame-boundary visibility contract repair the
+        # real Tk presentation in two Tcl calls, independent of the renderer's
+        # cached target state.  Doing this per glyph on every frame would make
+        # a long wrapped preview needlessly expensive.
+        self._text_tag = f"{self._tag}-text"
+        self._outline_tag = f"{self._tag}-outline"
         self._items: list = []      # [centre_x, row, item, colour]
         self._char_widths: list[float] = []
         self._char_piece: list[int] = []   # character -> the word it belongs to
@@ -208,11 +214,13 @@ class LineView:
                     outline = [canvas.create_text(x + dx, row_y + dy, text=ch,
                                                   anchor="nw", font=font,
                                                   fill=OUTLINE_COLOUR,
-                                                  tags=(self._tag, piece_tag))
+                                                  tags=(self._tag, piece_tag,
+                                                        self._outline_tag))
                                for dx, dy in ring_offsets(palette.outline)]
                     item = canvas.create_text(x, row_y, text=ch, anchor="nw",
                                               font=font, fill=palette.side,
-                                              tags=(self._tag, piece_tag))
+                                              tags=(self._tag, piece_tag,
+                                                    self._text_tag))
                     self._items.append([x + adv / 2, r, item, palette.side])
                     self._char_widths.append(adv)
                     self._char_piece.append(_token_index)
@@ -544,6 +552,24 @@ class LineView:
             if entry[3] != colour:
                 self.canvas.itemconfigure(entry[2], fill=colour)
                 entry[3] = colour
+
+    def present_inactive(self, colour: str) -> None:
+        """Reassert a readable inactive row on the actual Tk canvas.
+
+        Scene fades write presentation colours directly without changing the
+        cached target colour, and Tk item state can likewise outlive a geometry
+        change.  A normal ``show_inactive`` then legitimately sees its target
+        already cached and does no work.  This is the frame-boundary repair for
+        the one row whose presence is a hard UI contract: the upcoming lyric.
+        """
+        self.set_active(False)
+        self._visible = True
+        self.canvas.itemconfigure(self._outline_tag, state="normal")
+        self.canvas.itemconfigure(
+            self._text_tag, state="normal", fill=colour)
+        self._state = colour
+        for entry in self._items:
+            entry[3] = colour
 
     def show_lit(self) -> None:
         """The whole line at full strength.

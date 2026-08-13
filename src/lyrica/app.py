@@ -72,6 +72,15 @@ ROW_GAP = 50
 # line sits either side: deep enough to read as a fade rather than a cut,
 # shallow enough that the neighbours are still properly legible.
 FADE_ZONE = 42
+# The next lyric is a readable preview, not edge decoration. This is the
+# medium presence the established 1 -> 1 layout has at its normal lower slot.
+# Keep it as an explicit floor so wrapping and font metrics cannot turn 1 -> 2
+# or 2 -> 2 into an effectively invisible incoming row.
+INCOMING_VISIBILITY_FLOOR = 0.80
+# A newly exposed preview dissolves in only once the rising active row has
+# cleared it.  This keeps the two glyph boxes from ever being painted on top of
+# each other without sacrificing the active row's complete natural glide.
+INCOMING_FADE_S = 0.22
 
 # Where the line being sung sits, as a fraction of the window height. Derived
 # rather than chosen: low enough that the line above clears the card and its
@@ -467,6 +476,7 @@ class Overlay:
         self._glides: dict[int, motion.Glide] = {}
         self._targets: dict[int, float] = {}
         self._relay_hold: set[int] = set()
+        self._incoming_fades: dict[int, tuple[int, float | None]] = {}
         self._header_text = None
         self._dragging = False
         self._drag_at = (None, None)
@@ -846,6 +856,10 @@ class Overlay:
         previous_index = self.line_index
         step = abs(index - previous_index) if previous_index >= 0 else None
         self.line_index = index
+        # If this row first appeared as a preview, it is the same LineView now
+        # becoming active. Its entrance fade must stop owning the colour while
+        # its existing canvas items continue their rise into the active slot.
+        self._incoming_fades.pop(index, None)
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
         move = should_animate(step, self._dragging) if animate is None else animate
@@ -987,6 +1001,8 @@ class Overlay:
         """
         if (width, height) == (self.width, self.height):
             return
+        old_centre = (self.root.winfo_x() + self.width // 2,
+                      self.root.winfo_y() + self.height // 2)
         # A move in progress passes its own anchor: the left edge it started
         # from, held for the whole of it. Anything else is a one-off, and keeps
         # the horizontal centre — a panel that changes size once should stay
@@ -998,13 +1014,15 @@ class Overlay:
             keep, top = anchor
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
-        # The whole desktop, not the primary monitor. Clamping to
-        # `winfo_screenwidth` teleported the panel back from a second screen
-        # every time a track with no lyrics collapsed it — measured here, a
-        # 4480 px desktop against a 1920 px primary.
-        edge, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
+        # Clamp against the monitor that already owns the panel, including its
+        # lower edge.  The old code guarded only the top and horizontal virtual
+        # desktop: a compact card parked near the taskbar expanded downward off
+        # screen, leaving the current row clipped at the edge and the upcoming
+        # row wholly outside the monitor even though both were valid on-canvas.
+        edge, dtop, dwidth, dheight = chrome_mod.monitor_bounds(
+            self.root, *old_centre)
         x = max(edge, min(keep, edge + dwidth - width))
-        top = max(dtop, top)
+        top = max(dtop, min(top, dtop + dheight - height))
         self.root.geometry(chrome_mod.geometry(width, height, x, top))
         self.canvas.configure(width=width, height=height)
         # The border is rebuilt every frame, because it is geometry and not
@@ -1036,6 +1054,11 @@ class Overlay:
         # `_content_top` and painted invisible, until the next lyric arrived.
         if self._views and self.line_index in self._views:
             self._retarget(sorted(self._views), animate=False)
+            # Position and presentation are one geometry-dependent state.
+            # An upcoming row may have been hidden while the panel was compact;
+            # moving it into the expanded canvas without restyling leaves its
+            # Tk items hidden until that row becomes active.
+            self._restyle()
 
     # --- showing and hiding ---
     def _toggle_visible(self) -> None:
@@ -1157,6 +1180,7 @@ class Overlay:
         self._glides.clear()
         self._targets.clear()
         self._relay_hold.clear()
+        self._incoming_fades.clear()
         self.line_index = -1
 
         # The cover has to be re-derived: both images were built for the old
@@ -1664,6 +1688,7 @@ class Overlay:
         self._glides.clear()
         self._targets.clear()
         self._relay_hold.clear()
+        self._incoming_fades.clear()
 
     def _visible_indices(self, count: int) -> list[int]:
         if self.line_index < 0:
@@ -1684,6 +1709,7 @@ class Overlay:
                 self._views.pop(index).destroy()
                 self._glides.pop(index, None)
                 self._targets.pop(index, None)
+                self._incoming_fades.pop(index, None)
 
         sides = self._voice_sides(lyr)
         for index in indices:
@@ -1707,6 +1733,8 @@ class Overlay:
             # maximum-growth box; every later glide lies between safe endpoints.
             view.move_to(self._safe_view_y(view, start_y))
             self._views[index] = view
+            if index > self.line_index:
+                self._incoming_fades[index] = (id(view), None)
             self._fit_view(view)
         self._views_width = self.width
 
@@ -2128,6 +2156,23 @@ class Overlay:
         active_at = ordered.index(self.line_index)
         active = self._views[self.line_index]
 
+        # The active row and the next chronological row are both mandatory.
+        # A new active row begins where it used to wait, at the lower slot, and
+        # the newly created preview begins there too.  Resolve that temporary
+        # collision by advancing the active row upward, never by ejecting the
+        # preview below the canvas.  The glide catches up naturally from this
+        # bounded position on subsequent frames.
+        incoming_index = self.line_index + 1
+        incoming = self._views.get(incoming_index)
+        if incoming is not None and self._is_incoming_context(incoming_index):
+            active.move_to(self._safe_view_y(active, active.y))
+            incoming.move_to(self._safe_view_y(incoming, incoming.y))
+            active_bottom = active.glyph_vertical_span()[1]
+            incoming_top = incoming.glyph_vertical_span()[0]
+            if active_bottom > incoming_top and self.line_index not in self._glides:
+                overlap = math.ceil(active_bottom - incoming_top)
+                active.move_to(self._safe_view_y(active, active.y - overlap))
+
         lower_top = active.glyph_vertical_span()[0]
         for index in reversed(ordered[:active_at]):
             view = self._views[index]
@@ -2141,7 +2186,10 @@ class Overlay:
             view = self._views[index]
             top, _bottom = view.glyph_vertical_span()
             if top < upper_bottom:
-                view.move_to(view.y + math.ceil(upper_bottom - top))
+                wanted = view.y + math.ceil(upper_bottom - top)
+                if index == incoming_index and self._is_incoming_context(index):
+                    wanted = self._safe_view_y(view, wanted)
+                view.move_to(wanted)
             upper_bottom = view.glyph_vertical_span()[1]
 
     def _fade_text_scene(self, progress: float) -> None:
@@ -2150,6 +2198,7 @@ class Overlay:
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
         views = list(self._views.values())
+        self._incoming_preview_key = None
         if self._echo is not None:
             views.append(self._echo)
         for view in views:
@@ -2464,7 +2513,84 @@ class Overlay:
             elif self._advance_lyrics_fade():
                 interval = FAST_TICK_MS
 
+        # A stable lyric scene always contains the current row and the
+        # immediately upcoming row. This is a frame contract, not an animation:
+        # keep it outside the live-render branch so it also runs when playback
+        # is paused or the scene was mounted statically after a restart.
+        # Presentation fades and geometry changes can alter Tk's real fill/state
+        # while LineView still caches the intended colour, so reassert it after
+        # every other renderer has had its turn.
+        stable_lyrics_scene = (
+            lyr is not None and lyr.synced and bool(lyr.lines)
+            and self._lyrics_state == LYRICS_PRESENT
+            and self._outgoing_fade_at is None
+            and not self._lyrics_reveal_pending
+            and self._lyrics_fade_at is None
+            and self._cut_fade_at is None)
+        if stable_lyrics_scene and self._present_incoming_preview():
+            interval = FAST_TICK_MS
+
         self.root.after(interval, self._tick)
+
+    def _present_incoming_preview(self) -> bool:
+        """Guarantee the next lyric below; true while its fade is moving."""
+        incoming_index = self.line_index + 1
+        incoming = self._views.get(incoming_index)
+        if incoming is None or not self._is_incoming_context(incoming_index):
+            self._incoming_preview_key = None
+            return False
+        # Final-frame geometry contract.  The collision guard runs earlier in
+        # the tick, but a newly active view and a newly created preview share
+        # the lower slot and later layout work can displace the preview again.
+        # Pin the preview to its safe resting target, then cap the active row
+        # immediately above it.  Once settled both calls are no-ops.
+        target = self._targets.get(incoming_index, incoming.y)
+        incoming.move_to(self._safe_view_y(incoming, target))
+        active = self._views.get(self.line_index)
+        if active is not None:
+            active.move_to(self._safe_view_y(active, active.y))
+            active_bottom = active.glyph_vertical_span()[1]
+            incoming_top = incoming.glyph_vertical_span()[0]
+            # Repair settled geometry, but never jump a row that is already
+            # gliding. While it rises, the preview below waits dissolved until
+            # this exact overlap has cleared, then fades into the freed lane.
+            if active_bottom > incoming_top and self.line_index not in self._glides:
+                active.move_to(self._safe_view_y(
+                    active, active.y - math.ceil(active_bottom - incoming_top)))
+                active_bottom = active.glyph_vertical_span()[1]
+        target_colour = self._incoming_preview_colour(incoming_index, incoming)
+        incoming_fades = getattr(self, "_incoming_fades", {})
+        marker = incoming_fades.get(incoming_index)
+        fading = False
+        colour = target_colour
+        if (marker is not None and marker[0] == id(incoming)
+                and getattr(self.palette, "washed", False)):
+            started = marker[1]
+            separated = active is None or active_bottom <= incoming_top
+            if started is None and separated:
+                started = time.monotonic()
+                incoming_fades[incoming_index] = (id(incoming), started)
+            if started is None:
+                progress = 0.0
+                fading = True
+            else:
+                elapsed = time.monotonic() - started
+                progress = min(1.0, elapsed / INCOMING_FADE_S)
+                fading = progress < 1.0
+                if not fading:
+                    incoming_fades.pop(incoming_index, None)
+            eased = motion.cubic_bezier(progress, motion.RESIZE_CURVE)
+            colour = _between(self.palette.backdrop, target_colour, eased)
+        elif marker is not None:
+            incoming_fades.pop(incoming_index, None)
+        key = (self.line_index, id(incoming), target_colour)
+        # This is deliberately reasserted at every stable frame.  Tk's actual
+        # item state and fill can be changed by a presentation effect without
+        # changing LineView's target caches; the tag-based implementation is a
+        # constant two Tcl calls regardless of how long the wrapped line is.
+        incoming.present_inactive(colour)
+        self._incoming_preview_key = key
+        return fading
 
     def _advance_beam(self) -> bool:
         """Move the border light. True while it needs the loop kept awake."""
@@ -2482,12 +2608,55 @@ class Overlay:
         A line fades as it nears either edge and is gone before it reaches one.
         That is what stops a line ever being seen half-clipped by the frame: it
         has already faded out by the time the edge would cut it.
+
+        The upper edge reserves the card lane, so even a soft halo must be gone
+        before entering it. At the lower edge the complete halo is already kept
+        on-canvas by ``_safe_view_y``; fade against the grown glyph box there.
+        A wrapped upcoming row otherwise lands with its halo exactly at the
+        canvas edge and is assigned zero visibility despite all of its text
+        being safely present.
         """
         fade = max(1, self.chrome.px(FADE_ZONE))
-        top, bottom = view.visual_vertical_span()
+        top, _visual_bottom = view.visual_vertical_span()
+        _glyph_top, bottom = view.glyph_vertical_span()
         room = min((top - self._content_top) / fade,
                    (self.height - bottom) / fade, 1.0)
         return max(0.0, room)
+
+    def _single_row_context_visibility(self, view: LineView) -> float:
+        """Visibility the upcoming row would receive in a 1 -> 1 layout."""
+        fade = max(1, self.chrome.px(FADE_ZONE))
+        wanted = self.anchor_y + view.line_height + self.row_gap
+        low = float(view.effect_padding)
+        high = float(self.height - view.line_height - view.effect_padding)
+        reference_y = max(low, min(wanted, high))
+        top = reference_y - view.effect_padding
+        bottom = reference_y + view.line_height + view.glyph_padding
+        room = min((top - self._content_top) / fade,
+                   (self.height - bottom) / fade, 1.0)
+        return max(0.0, room)
+
+    def _context_visibility(self, index: int, view: LineView) -> float:
+        """Consistent preview strength for incoming one- or two-row lyrics."""
+        visibility = self._visibility(view)
+        if self._is_incoming_context(index):
+            visibility = max(
+                visibility, self._single_row_context_visibility(view),
+                INCOMING_VISIBILITY_FLOOR)
+        return visibility
+
+    def _incoming_preview_colour(self, index: int, view: LineView) -> str:
+        """A readable but clearly subordinate colour for the next lyric."""
+        if not getattr(self.palette, "washed", True):
+            return self.palette.far
+        return self.palette.faded(
+            abs(index - self.line_index), self._context_visibility(index, view))
+
+    def _is_incoming_context(self, index: int) -> bool:
+        """Whether a neighbouring row is waiting below or rising into place."""
+        glide = self._glides.get(index)
+        entering_from_below = glide is None or glide.distance >= 0
+        return index > self.line_index and entering_from_below
 
     def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
         """Fade a wrapped outgoing row before it enters the card's lane.
@@ -2527,10 +2696,17 @@ class Overlay:
                 view.show_inactive(self.palette.faded(
                     abs(index - self.line_index), visibility))
                 continue
-            visibility = self._visibility(view)
+            visibility = self._context_visibility(index, view)
             view.set_visible(visibility > 0.0)
-            view.show_inactive(self.palette.faded(
-                abs(index - self.line_index), visibility))
+            # The immediate upcoming lyric is reading context, not part of the
+            # active sweep. Keep it above the legibility floor while retaining
+            # a visibly quieter rung; the frame-boundary presenter applies the
+            # same target and owns only its short entrance fade.
+            colour = (self._incoming_preview_colour(index, view)
+                      if self._is_incoming_context(index)
+                      else self.palette.faded(
+                          abs(index - self.line_index), visibility))
+            view.show_inactive(colour)
         self._order_text_layers()
 
     def run(self):

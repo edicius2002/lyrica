@@ -352,6 +352,334 @@ def test_active_lyrics_and_the_card_stay_above_inactive_lines(overlay):
               for item in view.item_ids())
 
 
+@pytest.mark.parametrize("current_wrapped,incoming_wrapped", [
+    (False, False), (False, True), (True, False), (True, True),
+])
+def test_a_real_next_line_is_drawn_before_every_row_count_transition(
+        overlay, current_wrapped, incoming_wrapped):
+    from lyrica import app as A
+    from lyrica.lyrics import Lyrics
+
+    short = "short lyric row"
+    wrapped = ("wrapped upcoming context remains clearly visible below the "
+               "current lyric before its natural rise into the active slot")
+    lyrics = Lyrics(
+        lines=[(0.0, wrapped if current_wrapped else short),
+               (3.0, wrapped if incoming_wrapped else short),
+               (6.0, "following row")],
+        words=[[], [], []], synced=True)
+
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    overlay.root.update_idletasks()
+
+    current = overlay._views[0]
+    incoming = overlay._views[1]
+    assert (current.height > current.line_height) is current_wrapped
+    assert (incoming.height > incoming.line_height) is incoming_wrapped
+    assert overlay._visibility(incoming) > 0.0
+    assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
+    assert incoming._visible is True
+    preview_colour = overlay._incoming_preview_colour(1, incoming)
+    assert {entry[3] for entry in incoming._items} == {preview_colour}
+    assert all(overlay.canvas.itemcget(entry[2], "state") in ("", "normal")
+               for entry in incoming._items)
+    assert {overlay.canvas.itemcget(entry[2], "fill")
+            for entry in incoming._items} == {preview_colour}
+    boxes = [overlay.canvas.bbox(entry[2]) for entry in incoming._items]
+    assert all(box is not None for box in boxes)
+    assert min(box[1] for box in boxes) >= 0
+    assert max(box[3] for box in boxes) <= overlay.height
+
+
+def test_expansion_reapplies_visibility_to_an_upcoming_row(overlay):
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "current lyric"),
+               (3.0, "the upcoming lyric must already be visible below"),
+               (6.0, "following lyric")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    incoming = overlay._views[1]
+
+    incoming.set_visible(False)
+    assert incoming._visible is False
+    overlay._resize_window(overlay.width, overlay.height - 1)
+
+    assert incoming._visible is True
+    assert {overlay.canvas.itemcget(entry[2], "state")
+            for entry in incoming._items} == {"normal"}
+
+
+def test_frame_boundary_repairs_the_real_canvas_for_the_upcoming_row(overlay):
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "current lyric"),
+               (3.0, "upcoming lyric must remain visibly below"),
+               (6.0, "following lyric")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    incoming = overlay._views[1]
+
+    # Reproduce a presentation write that bypasses LineView's target caches.
+    for entry in incoming._items:
+        overlay.canvas.itemconfigure(entry[2], state="hidden", fill="#000000")
+    assert incoming._visible is True
+    assert incoming._state == overlay._incoming_preview_colour(1, incoming)
+
+    overlay._incoming_fades.pop(1, None)
+    overlay._present_incoming_preview()
+
+    assert all(overlay.canvas.itemcget(entry[2], "state") == "normal"
+               for entry in incoming._items)
+    assert {overlay.canvas.itemcget(entry[2], "fill")
+            for entry in incoming._items} == {
+                overlay._incoming_preview_colour(1, incoming)}
+
+
+def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 236.0
+        height = 70
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel._content_top = 88
+
+    # The halo touches y=320, but the grown letters end at y=309 and should be
+    # shown as the next-line preview rather than hidden wholesale.
+    assert View().visual_vertical_span()[1] == panel.height
+    assert panel._visibility(View()) == pytest.approx(11 / 42)
+
+
+def test_the_upper_card_boundary_still_counts_the_complete_halo():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 102.0
+        height = 70
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel._content_top = 88
+
+    assert View().visual_vertical_span()[0] == panel._content_top
+    assert panel._visibility(View()) == 0.0
+
+
+@pytest.mark.parametrize("line_height", [32, 35, 41])
+def test_one_to_wrapped_layout_shows_the_incoming_row_below(line_height):
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        def __init__(self, rows):
+            self.line_height = line_height
+            self.height = line_height * rows
+            self.effect_padding = math.ceil(11 + line_height * 0.14 / 2)
+            self.glyph_padding = math.ceil(line_height * 0.14 / 2)
+            self.y = 0.0
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel.line_index = 0
+    panel._views = {0: View(1), 1: View(2)}
+
+    targets = panel._row_targets([0, 1])
+    incoming = panel._views[1]
+    incoming.y = targets[1]
+
+    assert targets[0] == 176
+    assert incoming.visual_vertical_span()[1] <= panel.height
+    assert panel._visibility(incoming) > 0.0
+
+
+@pytest.mark.parametrize("active_rows,incoming_rows", [
+    (1, 1), (1, 2), (2, 1), (2, 2),
+])
+@pytest.mark.parametrize("scale", [0.6, 1.0, 1.4])
+def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
+        active_rows, incoming_rows, scale):
+    from lyrica.app import INCOMING_VISIBILITY_FLOOR, Overlay
+
+    class Chrome:
+        def px(self, value):
+            return round(value * scale)
+
+    class View:
+        line_height = round(35 * scale)
+        effect_padding = round(14 * scale)
+        glyph_padding = max(1, round(3 * scale))
+
+        def __init__(self, rows):
+            self.height = self.line_height * rows
+            self.y = 0.0
+            self.active = False
+            self.visible = False
+            self.inactive_visibility = None
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+        def set_active(self, active):
+            self.active = active
+
+        def set_visible(self, visible):
+            self.visible = visible
+
+        def show_inactive(self, visibility):
+            self.inactive_visibility = visibility
+
+    class Palette:
+        unsung = "pale upcoming lyric"
+
+        @staticmethod
+        def faded(_distance, visibility):
+            return f"faded to {visibility}"
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = round(320 * scale)
+    panel.anchor_y = panel.height * 0.55
+    panel.row_gap = round(50 * scale)
+    panel._content_top = round(88 * scale)
+    panel.line_index = 0
+    panel._views = {0: View(active_rows), 1: View(incoming_rows)}
+    panel._glides = {}
+    panel._relay_hold = set()
+    panel.palette = Palette()
+    panel._order_text_layers = lambda: None
+
+    targets = panel._row_targets([0, 1])
+    incoming = panel._views[1]
+    incoming.y = targets[1]
+    visibility = panel._context_visibility(1, incoming)
+
+    assert visibility >= INCOMING_VISIBILITY_FLOOR
+    panel._restyle([0, 1])
+    assert incoming.visible is True
+    assert incoming.inactive_visibility == panel.palette.faded(1, visibility)
+
+
+def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():
+    from lyrica.app import Overlay
+
+    class Chrome:
+        @staticmethod
+        def px(value):
+            return value
+
+    class View:
+        y = 236.0
+        height = 70
+        line_height = 35
+        effect_padding = 14
+        glyph_padding = 3
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    class DownwardGlide:
+        distance = -50
+
+    panel = Overlay.__new__(Overlay)
+    panel.chrome = Chrome()
+    panel.height = 320
+    panel.anchor_y = 176
+    panel.row_gap = 50
+    panel._content_top = 88
+    panel.line_index = 0
+    panel._glides = {1: DownwardGlide()}
+    view = View()
+
+    assert panel._context_visibility(1, view) == panel._visibility(view)
+
+
+def test_frame_boundary_does_not_cancel_a_reverse_exit():
+    from lyrica.app import Overlay
+
+    class Incoming:
+        def present_inactive(self, _colour):
+            raise AssertionError("reverse exit was forced back into the preview")
+
+    class DownwardGlide:
+        distance = -50
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 0
+    panel._views = {1: Incoming()}
+    panel._glides = {1: DownwardGlide()}
+    panel._incoming_preview_key = (0, 1, "old")
+
+    panel._present_incoming_preview()
+
+    assert panel._incoming_preview_key is None
+
+
 def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     from lyrica.app import Overlay
 
@@ -378,6 +706,7 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
 
         def __init__(self, offset):
             self._offset = offset
+            self.distance = offset
 
         def offset(self):
             return self._offset
@@ -395,6 +724,155 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     outgoing_bottom = panel._views[0].glyph_vertical_span()[1]
     active_top = panel._views[1].glyph_vertical_span()[0]
     assert outgoing_bottom <= active_top
+
+
+@pytest.mark.parametrize("active_height,incoming_height", [
+    (57, 57), (57, 114), (114, 57), (114, 114),
+])
+def test_collision_correction_keeps_current_and_incoming_inside_the_canvas(
+        active_height, incoming_height):
+    from lyrica.app import Overlay
+
+    class View:
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y, height):
+            self.y = float(y)
+            self.height = height
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.height = 440
+    panel.line_index = 0
+    panel._views = {
+        0: View(433, active_height),
+        1: View(368 if incoming_height == 57 else 311, incoming_height),
+    }
+    panel._glides = {}
+
+    panel._keep_gliding_rows_apart()
+
+    active = panel._views[0]
+    incoming = panel._views[1]
+    assert active.visual_vertical_span()[0] >= 0
+    assert incoming.visual_vertical_span()[1] <= panel.height
+    assert active.glyph_vertical_span()[1] <= incoming.glyph_vertical_span()[0]
+
+
+def test_a_rising_active_row_keeps_its_full_glide_instead_of_being_jumped(
+        monkeypatch):
+    from lyrica import motion
+    from lyrica.app import Overlay
+
+    now = [10.0]
+    monkeypatch.setattr(motion.time, "monotonic", lambda: now[0])
+
+    class View:
+        height = 57
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y):
+            self.y = float(y)
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.height = 440
+    panel.line_index = 1
+    panel._views = {1: View(368), 2: View(368)}
+    panel._targets = {1: 242.0, 2: 368.0}
+    panel._glides = {1: motion.Glide(126, motion.DURATION_MS)}
+
+    panel._advance_glides()
+    start = panel._views[1].y
+    now[0] += motion.DURATION_MS / 2000
+    panel._advance_glides()
+    middle = panel._views[1].y
+    now[0] += motion.DURATION_MS / 2000 + 0.001
+    panel._advance_glides()
+    end = panel._views[1].y
+
+    assert start == 368.0
+    assert start > middle > end
+    assert end == 242.0
+
+
+def test_new_preview_waits_for_clearance_then_fades_to_its_quiet_colour(
+        monkeypatch):
+    from lyrica import app as A
+
+    now = [10.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+
+    class View:
+        height = 57
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y):
+            self.y = float(y)
+            self.colour = None
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+        def present_inactive(self, colour):
+            self.colour = colour
+
+    class Palette:
+        washed = True
+        backdrop = (0, 0, 0)
+
+    class Glide:
+        distance = 126
+
+    panel = A.Overlay.__new__(A.Overlay)
+    panel.height = 440
+    panel.line_index = 1
+    active, incoming = View(368), View(368)
+    panel._views = {1: active, 2: incoming}
+    panel._targets = {1: 242.0, 2: 368.0}
+    panel._glides = {1: Glide()}
+    panel._incoming_fades = {2: (id(incoming), None)}
+    panel._incoming_preview_key = None
+    panel.palette = Palette()
+    panel._incoming_preview_colour = lambda *_args: "#777777"
+
+    assert panel._present_incoming_preview()
+    assert incoming.colour == "#000000"
+    assert panel._incoming_fades[2][1] is None
+
+    active.move_to(242)
+    panel._glides.clear()
+    assert panel._present_incoming_preview()
+    assert panel._incoming_fades[2][1] == 10.0
+    now[0] += A.INCOMING_FADE_S / 2
+    assert panel._present_incoming_preview()
+    assert incoming.colour not in ("#000000", "#777777")
+    now[0] += A.INCOMING_FADE_S / 2 + 0.001
+    assert not panel._present_incoming_preview()
+    assert incoming.colour == "#777777"
 
 
 def test_multiline_glide_does_not_jump_when_only_soft_halos_meet():
@@ -664,6 +1142,7 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
 
         def __init__(self, offset):
             self._offset = offset
+            self.distance = offset
 
         def offset(self):
             return self._offset
@@ -744,8 +1223,8 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
         def _retarget(self, *_a, **_k): pass
         def _visible_indices(self, _n): return []
 
-    monkeypatch.setattr(chrome_mod, "desktop_bounds",
-                        lambda _root: (0, 0, 3000, 2000))
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (0, 0, 3000, 2000))
     panel = Panel()
     A.Overlay._resize_window(panel, 880, 290, settling=False)
     assert done == ["beam"], (
@@ -754,6 +1233,42 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
     done.clear()
     A.Overlay._resize_window(panel, 860, 280, settling=True)
     assert done == ["beam", "shape", "flush"]
+
+
+def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    geometries = []
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 300, 100
+        anchor_y = 0.0
+        beam = None
+        _card_text = ("t", "a")
+        line_index = -1
+
+        def __init__(self):
+            self.root = self.canvas = self
+            self._views = {}
+
+        def winfo_x(self): return 3000
+        def winfo_y(self): return 950
+        def geometry(self, value): geometries.append(value)
+        def configure(self, **_k): pass
+        def update_idletasks(self): pass
+        def _lay_out_card(self, *_a): pass
+        def _place_thumb(self): pass
+        def _retarget(self, *_a, **_k): pass
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (1920, 0, 2560, 1080))
+
+    A.Overlay._resize_window(Panel(), 500, 352, settling=False)
+
+    assert geometries == ["500x352+2900+728"]
 
 
 
