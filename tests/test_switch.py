@@ -569,7 +569,7 @@ def test_a_paused_promotion_mounts_lyrics_after_settling_full_geometry(panel,
     assert {panel.canvas.itemcget(entry[2], "fill")
             for entry in preview._items} != {target}
     panel._incoming_fades[2] = (
-        id(preview), time.monotonic() - A.INCOMING_FADE_S)
+        id(preview), time.monotonic() - A.INCOMING_FADE_S - 0.01)
     assert not panel._present_incoming_preview()
     assert {panel.canvas.itemcget(entry[2], "fill")
             for entry in preview._items} == {target}
@@ -646,7 +646,7 @@ def test_late_paused_lyrics_replace_card_only_with_a_static_scene(panel,
     assert {panel.canvas.itemcget(entry[2], "fill")
             for entry in preview._items} != {target}
     panel._incoming_fades[2] = (
-        id(preview), time.monotonic() - A.INCOMING_FADE_S)
+        id(preview), time.monotonic() - A.INCOMING_FADE_S - 0.01)
     assert not panel._present_incoming_preview()
     assert {panel.canvas.itemcget(entry[2], "fill")
             for entry in preview._items} == {target}
