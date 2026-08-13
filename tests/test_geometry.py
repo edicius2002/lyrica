@@ -371,6 +371,7 @@ def test_a_real_wrapped_next_line_is_visible_below_the_current_one(overlay):
     assert overlay._visibility(incoming) > 0.0
     assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
     assert incoming._visible is True
+    assert {entry[3] for entry in incoming._items} == {overlay.palette.unsung}
 
 
 def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
@@ -522,9 +523,11 @@ def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
             self.inactive_visibility = visibility
 
     class Palette:
+        unsung = "pale upcoming lyric"
+
         @staticmethod
         def faded(_distance, visibility):
-            return visibility
+            return f"faded to {visibility}"
 
     panel = Overlay.__new__(Overlay)
     panel.chrome = Chrome()
@@ -547,7 +550,7 @@ def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
     assert visibility >= INCOMING_VISIBILITY_FLOOR
     panel._restyle([0, 1])
     assert incoming.visible is True
-    assert incoming.inactive_visibility == pytest.approx(visibility)
+    assert incoming.inactive_visibility == panel.palette.unsung
 
 
 def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():

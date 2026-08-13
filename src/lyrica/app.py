@@ -2518,13 +2518,17 @@ class Overlay:
     def _context_visibility(self, index: int, view: LineView) -> float:
         """Consistent preview strength for incoming one- or two-row lyrics."""
         visibility = self._visibility(view)
-        glide = self._glides.get(index)
-        entering_from_below = glide is None or glide.distance >= 0
-        if index > self.line_index and entering_from_below:
+        if self._is_incoming_context(index):
             visibility = max(
                 visibility, self._single_row_context_visibility(view),
                 INCOMING_VISIBILITY_FLOOR)
         return visibility
+
+    def _is_incoming_context(self, index: int) -> bool:
+        """Whether a neighbouring row is waiting below or rising into place."""
+        glide = self._glides.get(index)
+        entering_from_below = glide is None or glide.distance >= 0
+        return index > self.line_index and entering_from_below
 
     def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
         """Fade a wrapped outgoing row before it enters the card's lane.
@@ -2566,8 +2570,16 @@ class Overlay:
                 continue
             visibility = self._context_visibility(index, view)
             view.set_visible(visibility > 0.0)
-            view.show_inactive(self.palette.faded(
-                abs(index - self.line_index), visibility))
+            # The immediate upcoming lyric is reading context, not an exiting
+            # edge ornament.  Fading ``side`` halfway into the artwork wash
+            # produced #41413e in the neutral palette: technically non-zero,
+            # visually absent.  Keep the established pale unsung rung while
+            # it waits below or rises; geometric fading still belongs to rows
+            # moving out of the scene in either direction.
+            colour = (self.palette.unsung if self._is_incoming_context(index)
+                      else self.palette.faded(
+                          abs(index - self.line_index), visibility))
+            view.show_inactive(colour)
         self._order_text_layers()
 
     def run(self):
