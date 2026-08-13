@@ -76,7 +76,11 @@ FADE_ZONE = 42
 # medium presence the established 1 -> 1 layout has at its normal lower slot.
 # Keep it as an explicit floor so wrapping and font metrics cannot turn 1 -> 2
 # or 2 -> 2 into an effectively invisible incoming row.
-INCOMING_VISIBILITY_FLOOR = 0.50
+INCOMING_VISIBILITY_FLOOR = 0.80
+# A newly exposed preview dissolves in only once the rising active row has
+# cleared it.  This keeps the two glyph boxes from ever being painted on top of
+# each other without sacrificing the active row's complete natural glide.
+INCOMING_FADE_S = 0.22
 
 # Where the line being sung sits, as a fraction of the window height. Derived
 # rather than chosen: low enough that the line above clears the card and its
@@ -472,6 +476,7 @@ class Overlay:
         self._glides: dict[int, motion.Glide] = {}
         self._targets: dict[int, float] = {}
         self._relay_hold: set[int] = set()
+        self._incoming_fades: dict[int, tuple[int, float | None]] = {}
         self._header_text = None
         self._dragging = False
         self._drag_at = (None, None)
@@ -851,6 +856,10 @@ class Overlay:
         previous_index = self.line_index
         step = abs(index - previous_index) if previous_index >= 0 else None
         self.line_index = index
+        # If this row first appeared as a preview, it is the same LineView now
+        # becoming active. Its entrance fade must stop owning the colour while
+        # its existing canvas items continue their rise into the active slot.
+        self._incoming_fades.pop(index, None)
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
         move = should_animate(step, self._dragging) if animate is None else animate
@@ -1171,6 +1180,7 @@ class Overlay:
         self._glides.clear()
         self._targets.clear()
         self._relay_hold.clear()
+        self._incoming_fades.clear()
         self.line_index = -1
 
         # The cover has to be re-derived: both images were built for the old
@@ -1678,6 +1688,7 @@ class Overlay:
         self._glides.clear()
         self._targets.clear()
         self._relay_hold.clear()
+        self._incoming_fades.clear()
 
     def _visible_indices(self, count: int) -> list[int]:
         if self.line_index < 0:
@@ -1698,6 +1709,7 @@ class Overlay:
                 self._views.pop(index).destroy()
                 self._glides.pop(index, None)
                 self._targets.pop(index, None)
+                self._incoming_fades.pop(index, None)
 
         sides = self._voice_sides(lyr)
         for index in indices:
@@ -1721,6 +1733,8 @@ class Overlay:
             # maximum-growth box; every later glide lies between safe endpoints.
             view.move_to(self._safe_view_y(view, start_y))
             self._views[index] = view
+            if index > self.line_index:
+                self._incoming_fades[index] = (id(view), None)
             self._fit_view(view)
         self._views_width = self.width
 
@@ -2155,7 +2169,7 @@ class Overlay:
             incoming.move_to(self._safe_view_y(incoming, incoming.y))
             active_bottom = active.glyph_vertical_span()[1]
             incoming_top = incoming.glyph_vertical_span()[0]
-            if active_bottom > incoming_top:
+            if active_bottom > incoming_top and self.line_index not in self._glides:
                 overlap = math.ceil(active_bottom - incoming_top)
                 active.move_to(self._safe_view_y(active, active.y - overlap))
 
@@ -2499,26 +2513,32 @@ class Overlay:
             elif self._advance_lyrics_fade():
                 interval = FAST_TICK_MS
 
-            # A stable lyric scene always contains the current row and the
-            # immediately upcoming row.  Reassert the latter after every other
-            # renderer has run: presentation fades and geometry changes can
-            # alter Tk's real fill/state while LineView still correctly caches
-            # the intended colour, causing an ordinary restyle to no-op until
-            # the row becomes active.
-            if (not self._lyrics_reveal_pending
-                    and self._lyrics_fade_at is None
-                    and self._cut_fade_at is None):
-                self._present_incoming_preview()
+        # A stable lyric scene always contains the current row and the
+        # immediately upcoming row. This is a frame contract, not an animation:
+        # keep it outside the live-render branch so it also runs when playback
+        # is paused or the scene was mounted statically after a restart.
+        # Presentation fades and geometry changes can alter Tk's real fill/state
+        # while LineView still caches the intended colour, so reassert it after
+        # every other renderer has had its turn.
+        stable_lyrics_scene = (
+            lyr is not None and lyr.synced and bool(lyr.lines)
+            and self._lyrics_state == LYRICS_PRESENT
+            and self._outgoing_fade_at is None
+            and not self._lyrics_reveal_pending
+            and self._lyrics_fade_at is None
+            and self._cut_fade_at is None)
+        if stable_lyrics_scene and self._present_incoming_preview():
+            interval = FAST_TICK_MS
 
         self.root.after(interval, self._tick)
 
-    def _present_incoming_preview(self) -> None:
-        """Guarantee that the next chronological lyric is drawn below."""
+    def _present_incoming_preview(self) -> bool:
+        """Guarantee the next lyric below; true while its fade is moving."""
         incoming_index = self.line_index + 1
         incoming = self._views.get(incoming_index)
         if incoming is None or not self._is_incoming_context(incoming_index):
             self._incoming_preview_key = None
-            return
+            return False
         # Final-frame geometry contract.  The collision guard runs earlier in
         # the tick, but a newly active view and a newly created preview share
         # the lower slot and later layout work can displace the preview again.
@@ -2531,16 +2551,46 @@ class Overlay:
             active.move_to(self._safe_view_y(active, active.y))
             active_bottom = active.glyph_vertical_span()[1]
             incoming_top = incoming.glyph_vertical_span()[0]
-            if active_bottom > incoming_top:
+            # Repair settled geometry, but never jump a row that is already
+            # gliding. While it rises, the preview below waits dissolved until
+            # this exact overlap has cleared, then fades into the freed lane.
+            if active_bottom > incoming_top and self.line_index not in self._glides:
                 active.move_to(self._safe_view_y(
                     active, active.y - math.ceil(active_bottom - incoming_top)))
-        key = (self.line_index, id(incoming), self.palette.unsung)
+                active_bottom = active.glyph_vertical_span()[1]
+        target_colour = self._incoming_preview_colour(incoming_index, incoming)
+        incoming_fades = getattr(self, "_incoming_fades", {})
+        marker = incoming_fades.get(incoming_index)
+        fading = False
+        colour = target_colour
+        if (marker is not None and marker[0] == id(incoming)
+                and getattr(self.palette, "washed", False)):
+            started = marker[1]
+            separated = active is None or active_bottom <= incoming_top
+            if started is None and separated:
+                started = time.monotonic()
+                incoming_fades[incoming_index] = (id(incoming), started)
+            if started is None:
+                progress = 0.0
+                fading = True
+            else:
+                elapsed = time.monotonic() - started
+                progress = min(1.0, elapsed / INCOMING_FADE_S)
+                fading = progress < 1.0
+                if not fading:
+                    incoming_fades.pop(incoming_index, None)
+            eased = motion.cubic_bezier(progress, motion.RESIZE_CURVE)
+            colour = _between(self.palette.backdrop, target_colour, eased)
+        elif marker is not None:
+            incoming_fades.pop(incoming_index, None)
+        key = (self.line_index, id(incoming), target_colour)
         # This is deliberately reasserted at every stable frame.  Tk's actual
         # item state and fill can be changed by a presentation effect without
         # changing LineView's target caches; the tag-based implementation is a
         # constant two Tcl calls regardless of how long the wrapped line is.
-        incoming.present_inactive(self.palette.unsung)
+        incoming.present_inactive(colour)
         self._incoming_preview_key = key
+        return fading
 
     def _advance_beam(self) -> bool:
         """Move the border light. True while it needs the loop kept awake."""
@@ -2595,6 +2645,13 @@ class Overlay:
                 INCOMING_VISIBILITY_FLOOR)
         return visibility
 
+    def _incoming_preview_colour(self, index: int, view: LineView) -> str:
+        """A readable but clearly subordinate colour for the next lyric."""
+        if not getattr(self.palette, "washed", True):
+            return self.palette.far
+        return self.palette.faded(
+            abs(index - self.line_index), self._context_visibility(index, view))
+
     def _is_incoming_context(self, index: int) -> bool:
         """Whether a neighbouring row is waiting below or rising into place."""
         glide = self._glides.get(index)
@@ -2641,13 +2698,12 @@ class Overlay:
                 continue
             visibility = self._context_visibility(index, view)
             view.set_visible(visibility > 0.0)
-            # The immediate upcoming lyric is reading context, not an exiting
-            # edge ornament.  Fading ``side`` halfway into the artwork wash
-            # produced #41413e in the neutral palette: technically non-zero,
-            # visually absent.  Keep the established pale unsung rung while
-            # it waits below or rises; geometric fading still belongs to rows
-            # moving out of the scene in either direction.
-            colour = (self.palette.unsung if self._is_incoming_context(index)
+            # The immediate upcoming lyric is reading context, not part of the
+            # active sweep. Keep it above the legibility floor while retaining
+            # a visibly quieter rung; the frame-boundary presenter applies the
+            # same target and owns only its short entrance fade.
+            colour = (self._incoming_preview_colour(index, view)
+                      if self._is_incoming_context(index)
                       else self.palette.faded(
                           abs(index - self.line_index), visibility))
             view.show_inactive(colour)

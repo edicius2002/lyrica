@@ -380,11 +380,12 @@ def test_a_real_next_line_is_drawn_before_every_row_count_transition(
     assert overlay._visibility(incoming) > 0.0
     assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
     assert incoming._visible is True
-    assert {entry[3] for entry in incoming._items} == {overlay.palette.unsung}
+    preview_colour = overlay._incoming_preview_colour(1, incoming)
+    assert {entry[3] for entry in incoming._items} == {preview_colour}
     assert all(overlay.canvas.itemcget(entry[2], "state") in ("", "normal")
                for entry in incoming._items)
     assert {overlay.canvas.itemcget(entry[2], "fill")
-            for entry in incoming._items} == {overlay.palette.unsung}
+            for entry in incoming._items} == {preview_colour}
     boxes = [overlay.canvas.bbox(entry[2]) for entry in incoming._items]
     assert all(box is not None for box in boxes)
     assert min(box[1] for box in boxes) >= 0
@@ -428,14 +429,16 @@ def test_frame_boundary_repairs_the_real_canvas_for_the_upcoming_row(overlay):
     for entry in incoming._items:
         overlay.canvas.itemconfigure(entry[2], state="hidden", fill="#000000")
     assert incoming._visible is True
-    assert incoming._state == overlay.palette.unsung
+    assert incoming._state == overlay._incoming_preview_colour(1, incoming)
 
+    overlay._incoming_fades.pop(1, None)
     overlay._present_incoming_preview()
 
     assert all(overlay.canvas.itemcget(entry[2], "state") == "normal"
                for entry in incoming._items)
     assert {overlay.canvas.itemcget(entry[2], "fill")
-            for entry in incoming._items} == {overlay.palette.unsung}
+            for entry in incoming._items} == {
+                overlay._incoming_preview_colour(1, incoming)}
 
 
 def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
@@ -614,7 +617,7 @@ def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
     assert visibility >= INCOMING_VISIBILITY_FLOOR
     panel._restyle([0, 1])
     assert incoming.visible is True
-    assert incoming.inactive_visibility == panel.palette.unsung
+    assert incoming.inactive_visibility == panel.palette.faded(1, visibility)
 
 
 def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():
@@ -765,6 +768,111 @@ def test_collision_correction_keeps_current_and_incoming_inside_the_canvas(
     assert active.visual_vertical_span()[0] >= 0
     assert incoming.visual_vertical_span()[1] <= panel.height
     assert active.glyph_vertical_span()[1] <= incoming.glyph_vertical_span()[0]
+
+
+def test_a_rising_active_row_keeps_its_full_glide_instead_of_being_jumped(
+        monkeypatch):
+    from lyrica import motion
+    from lyrica.app import Overlay
+
+    now = [10.0]
+    monkeypatch.setattr(motion.time, "monotonic", lambda: now[0])
+
+    class View:
+        height = 57
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y):
+            self.y = float(y)
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.height = 440
+    panel.line_index = 1
+    panel._views = {1: View(368), 2: View(368)}
+    panel._targets = {1: 242.0, 2: 368.0}
+    panel._glides = {1: motion.Glide(126, motion.DURATION_MS)}
+
+    panel._advance_glides()
+    start = panel._views[1].y
+    now[0] += motion.DURATION_MS / 2000
+    panel._advance_glides()
+    middle = panel._views[1].y
+    now[0] += motion.DURATION_MS / 2000 + 0.001
+    panel._advance_glides()
+    end = panel._views[1].y
+
+    assert start == 368.0
+    assert start > middle > end
+    assert end == 242.0
+
+
+def test_new_preview_waits_for_clearance_then_fades_to_its_quiet_colour(
+        monkeypatch):
+    from lyrica import app as A
+
+    now = [10.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+
+    class View:
+        height = 57
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y):
+            self.y = float(y)
+            self.colour = None
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+        def present_inactive(self, colour):
+            self.colour = colour
+
+    class Palette:
+        washed = True
+        backdrop = (0, 0, 0)
+
+    class Glide:
+        distance = 126
+
+    panel = A.Overlay.__new__(A.Overlay)
+    panel.height = 440
+    panel.line_index = 1
+    active, incoming = View(368), View(368)
+    panel._views = {1: active, 2: incoming}
+    panel._targets = {1: 242.0, 2: 368.0}
+    panel._glides = {1: Glide()}
+    panel._incoming_fades = {2: (id(incoming), None)}
+    panel._incoming_preview_key = None
+    panel.palette = Palette()
+    panel._incoming_preview_colour = lambda *_args: "#777777"
+
+    assert panel._present_incoming_preview()
+    assert incoming.colour == "#000000"
+    assert panel._incoming_fades[2][1] is None
+
+    active.move_to(242)
+    panel._glides.clear()
+    assert panel._present_incoming_preview()
+    assert panel._incoming_fades[2][1] == 10.0
+    now[0] += A.INCOMING_FADE_S / 2
+    assert panel._present_incoming_preview()
+    assert incoming.colour not in ("#000000", "#777777")
+    now[0] += A.INCOMING_FADE_S / 2 + 0.001
+    assert not panel._present_incoming_preview()
+    assert incoming.colour == "#777777"
 
 
 def test_multiline_glide_does_not_jump_when_only_soft_halos_meet():

@@ -514,10 +514,11 @@ def test_a_paused_promotion_mounts_lyrics_after_settling_full_geometry(panel,
     incoming_snap.playing = False
     incoming_snap.live_position = lambda: 6.0
     lyrics = Lyrics(
-        lines=[(0.0, "first of B"), (5.0, "second of B")],
-        words=[[], [(5.0, 7.0, "second of B")]], synced=True,
-        backing=["", "(echo)"],
-        backing_words=[[], [(5.5, 6.5, "(echo)")]])
+        lines=[(0.0, "first of B"), (5.0, "second of B"),
+               (9.0, "third of B waits below")],
+        words=[[], [(5.0, 7.0, "second of B")], []], synced=True,
+        backing=["", "(echo)", ""],
+        backing_words=[[], [(5.5, 6.5, "(echo)")], []])
     incoming = A.Track(
         gen=2, snapshot=incoming_snap, lyrics=lyrics,
         lyrics_state=A.LYRICS_PRESENT, searched=True)
@@ -559,6 +560,19 @@ def test_a_paused_promotion_mounts_lyrics_after_settling_full_geometry(panel,
     assert not panel._glides
     assert not panel._lyrics_reveal_pending
     assert panel._lyrics_fade_at is None
+    preview = panel._views[2]
+    assert preview._visible
+    assert {panel.canvas.itemcget(entry[2], "state")
+            for entry in preview._items} == {"normal"}
+    target = panel._incoming_preview_colour(2, preview)
+    assert 2 in panel._incoming_fades
+    assert {panel.canvas.itemcget(entry[2], "fill")
+            for entry in preview._items} != {target}
+    panel._incoming_fades[2] = (
+        id(preview), time.monotonic() - A.INCOMING_FADE_S)
+    assert not panel._present_incoming_preview()
+    assert {panel.canvas.itemcget(entry[2], "fill")
+            for entry in preview._items} == {target}
 
 
 def test_a_paused_no_lyrics_promotion_settles_compact_geometry(panel, monkeypatch):
@@ -610,8 +624,9 @@ def test_late_paused_lyrics_replace_card_only_with_a_static_scene(panel,
     panel._promote(A.SCENE_CARD_ONLY)
     panel._worker_results.put(A.WorkerResult(
         incoming.gen, "lyrics",
-        Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
-               words=[[], []], synced=True)))
+        Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B"),
+                      (9.0, "third of B waits below")],
+               words=[[], [], []], synced=True)))
     monkeypatch.setattr(panel.root, "after", lambda *_args: None)
 
     panel._tick()
@@ -622,3 +637,16 @@ def test_late_paused_lyrics_replace_card_only_with_a_static_scene(panel,
     assert _line(panel) == "second of B"
     assert not panel._lyrics_reveal_pending
     assert panel._lyrics_fade_at is None
+    preview = panel._views[2]
+    assert preview._visible
+    assert {panel.canvas.itemcget(entry[2], "state")
+            for entry in preview._items} == {"normal"}
+    target = panel._incoming_preview_colour(2, preview)
+    assert 2 in panel._incoming_fades
+    assert {panel.canvas.itemcget(entry[2], "fill")
+            for entry in preview._items} != {target}
+    panel._incoming_fades[2] = (
+        id(preview), time.monotonic() - A.INCOMING_FADE_S)
+    assert not panel._present_incoming_preview()
+    assert {panel.canvas.itemcget(entry[2], "fill")
+            for entry in preview._items} == {target}
