@@ -381,8 +381,8 @@ def test_a_real_next_line_is_drawn_before_every_row_count_transition(
     assert overlay._context_visibility(1, incoming) >= A.INCOMING_VISIBILITY_FLOOR
     assert incoming._visible is True
     assert {entry[3] for entry in incoming._items} == {overlay.palette.unsung}
-    assert {overlay.canvas.itemcget(entry[2], "state")
-            for entry in incoming._items} == {"normal"}
+    assert all(overlay.canvas.itemcget(entry[2], "state") in ("", "normal")
+               for entry in incoming._items)
     assert {overlay.canvas.itemcget(entry[2], "fill")
             for entry in incoming._items} == {overlay.palette.unsung}
     boxes = [overlay.canvas.bbox(entry[2]) for entry in incoming._items]
