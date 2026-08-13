@@ -992,6 +992,8 @@ class Overlay:
         """
         if (width, height) == (self.width, self.height):
             return
+        old_centre = (self.root.winfo_x() + self.width // 2,
+                      self.root.winfo_y() + self.height // 2)
         # A move in progress passes its own anchor: the left edge it started
         # from, held for the whole of it. Anything else is a one-off, and keeps
         # the horizontal centre — a panel that changes size once should stay
@@ -1003,13 +1005,15 @@ class Overlay:
             keep, top = anchor
         self.width, self.height = width, height
         self.anchor_y = self.height * ANCHOR
-        # The whole desktop, not the primary monitor. Clamping to
-        # `winfo_screenwidth` teleported the panel back from a second screen
-        # every time a track with no lyrics collapsed it — measured here, a
-        # 4480 px desktop against a 1920 px primary.
-        edge, dtop, dwidth, _dheight = chrome_mod.desktop_bounds(self.root)
+        # Clamp against the monitor that already owns the panel, including its
+        # lower edge.  The old code guarded only the top and horizontal virtual
+        # desktop: a compact card parked near the taskbar expanded downward off
+        # screen, leaving the current row clipped at the edge and the upcoming
+        # row wholly outside the monitor even though both were valid on-canvas.
+        edge, dtop, dwidth, dheight = chrome_mod.monitor_bounds(
+            self.root, *old_centre)
         x = max(edge, min(keep, edge + dwidth - width))
-        top = max(dtop, top)
+        top = max(dtop, min(top, dtop + dheight - height))
         self.root.geometry(chrome_mod.geometry(width, height, x, top))
         self.canvas.configure(width=width, height=height)
         # The border is rebuilt every frame, because it is geometry and not
@@ -2138,6 +2142,23 @@ class Overlay:
         active_at = ordered.index(self.line_index)
         active = self._views[self.line_index]
 
+        # The active row and the next chronological row are both mandatory.
+        # A new active row begins where it used to wait, at the lower slot, and
+        # the newly created preview begins there too.  Resolve that temporary
+        # collision by advancing the active row upward, never by ejecting the
+        # preview below the canvas.  The glide catches up naturally from this
+        # bounded position on subsequent frames.
+        incoming_index = self.line_index + 1
+        incoming = self._views.get(incoming_index)
+        if incoming is not None and self._is_incoming_context(incoming_index):
+            active.move_to(self._safe_view_y(active, active.y))
+            incoming.move_to(self._safe_view_y(incoming, incoming.y))
+            active_bottom = active.glyph_vertical_span()[1]
+            incoming_top = incoming.glyph_vertical_span()[0]
+            if active_bottom > incoming_top:
+                overlap = math.ceil(active_bottom - incoming_top)
+                active.move_to(self._safe_view_y(active, active.y - overlap))
+
         lower_top = active.glyph_vertical_span()[0]
         for index in reversed(ordered[:active_at]):
             view = self._views[index]
@@ -2151,7 +2172,10 @@ class Overlay:
             view = self._views[index]
             top, _bottom = view.glyph_vertical_span()
             if top < upper_bottom:
-                view.move_to(view.y + math.ceil(upper_bottom - top))
+                wanted = view.y + math.ceil(upper_bottom - top)
+                if index == incoming_index and self._is_incoming_context(index):
+                    wanted = self._safe_view_y(view, wanted)
+                view.move_to(wanted)
             upper_bottom = view.glyph_vertical_span()[1]
 
     def _fade_text_scene(self, progress: float) -> None:
@@ -2160,6 +2184,7 @@ class Overlay:
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
         views = list(self._views.values())
+        self._incoming_preview_key = None
         if self._echo is not None:
             views.append(self._echo)
         for view in views:
@@ -2474,7 +2499,46 @@ class Overlay:
             elif self._advance_lyrics_fade():
                 interval = FAST_TICK_MS
 
+            # A stable lyric scene always contains the current row and the
+            # immediately upcoming row.  Reassert the latter after every other
+            # renderer has run: presentation fades and geometry changes can
+            # alter Tk's real fill/state while LineView still correctly caches
+            # the intended colour, causing an ordinary restyle to no-op until
+            # the row becomes active.
+            if (not self._lyrics_reveal_pending
+                    and self._lyrics_fade_at is None
+                    and self._cut_fade_at is None):
+                self._present_incoming_preview()
+
         self.root.after(interval, self._tick)
+
+    def _present_incoming_preview(self) -> None:
+        """Guarantee that the next chronological lyric is drawn below."""
+        incoming_index = self.line_index + 1
+        incoming = self._views.get(incoming_index)
+        if incoming is None or not self._is_incoming_context(incoming_index):
+            self._incoming_preview_key = None
+            return
+        # Final-frame geometry contract.  The collision guard runs earlier in
+        # the tick, but a newly active view and a newly created preview share
+        # the lower slot and later layout work can displace the preview again.
+        # Pin the preview to its safe resting target, then cap the active row
+        # immediately above it.  Once settled both calls are no-ops.
+        target = self._targets.get(incoming_index, incoming.y)
+        incoming.move_to(self._safe_view_y(incoming, target))
+        active = self._views.get(self.line_index)
+        if active is not None:
+            active.move_to(self._safe_view_y(active, active.y))
+            active_bottom = active.glyph_vertical_span()[1]
+            incoming_top = incoming.glyph_vertical_span()[0]
+            if active_bottom > incoming_top:
+                active.move_to(self._safe_view_y(
+                    active, active.y - math.ceil(active_bottom - incoming_top)))
+        key = (self.line_index, id(incoming), self.palette.unsung)
+        if getattr(self, "_incoming_preview_key", None) == key:
+            return
+        incoming.present_inactive(self.palette.unsung)
+        self._incoming_preview_key = key
 
     def _advance_beam(self) -> bool:
         """Move the border light. True while it needs the loop kept awake."""

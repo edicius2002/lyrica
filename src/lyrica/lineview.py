@@ -545,6 +545,21 @@ class LineView:
                 self.canvas.itemconfigure(entry[2], fill=colour)
                 entry[3] = colour
 
+    def present_inactive(self, colour: str) -> None:
+        """Reassert a readable inactive row on the actual Tk canvas.
+
+        Scene fades write presentation colours directly without changing the
+        cached target colour, and Tk item state can likewise outlive a geometry
+        change.  A normal ``show_inactive`` then legitimately sees its target
+        already cached and does no work.  This is the frame-boundary repair for
+        the one row whose presence is a hard UI contract: the upcoming lyric.
+        """
+        self.set_active(False)
+        self._visible = False
+        self.set_visible(True)
+        self._state = None
+        self.show_inactive(colour)
+
     def show_lit(self) -> None:
         """The whole line at full strength.
 

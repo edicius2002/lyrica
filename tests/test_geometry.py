@@ -412,6 +412,32 @@ def test_expansion_reapplies_visibility_to_an_upcoming_row(overlay):
             for entry in incoming._items} == {"normal"}
 
 
+def test_frame_boundary_repairs_the_real_canvas_for_the_upcoming_row(overlay):
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "current lyric"),
+               (3.0, "upcoming lyric must remain visibly below"),
+               (6.0, "following lyric")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    incoming = overlay._views[1]
+
+    # Reproduce a presentation write that bypasses LineView's target caches.
+    for entry in incoming._items:
+        overlay.canvas.itemconfigure(entry[2], state="hidden", fill="#000000")
+    assert incoming._visible is True
+    assert incoming._state == overlay.palette.unsung
+
+    overlay._present_incoming_preview()
+
+    assert all(overlay.canvas.itemcget(entry[2], "state") == "normal"
+               for entry in incoming._items)
+    assert {overlay.canvas.itemcget(entry[2], "fill")
+            for entry in incoming._items} == {overlay.palette.unsung}
+
+
 def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
     from lyrica.app import Overlay
 
@@ -630,6 +656,27 @@ def test_a_row_moving_down_is_outgoing_and_keeps_its_edge_fade():
     assert panel._context_visibility(1, view) == panel._visibility(view)
 
 
+def test_frame_boundary_does_not_cancel_a_reverse_exit():
+    from lyrica.app import Overlay
+
+    class Incoming:
+        def present_inactive(self, _colour):
+            raise AssertionError("reverse exit was forced back into the preview")
+
+    class DownwardGlide:
+        distance = -50
+
+    panel = Overlay.__new__(Overlay)
+    panel.line_index = 0
+    panel._views = {1: Incoming()}
+    panel._glides = {1: DownwardGlide()}
+    panel._incoming_preview_key = (0, 1, "old")
+
+    panel._present_incoming_preview()
+
+    assert panel._incoming_preview_key is None
+
+
 def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     from lyrica.app import Overlay
 
@@ -656,6 +703,7 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
 
         def __init__(self, offset):
             self._offset = offset
+            self.distance = offset
 
         def offset(self):
             return self._offset
@@ -673,6 +721,50 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     outgoing_bottom = panel._views[0].glyph_vertical_span()[1]
     active_top = panel._views[1].glyph_vertical_span()[0]
     assert outgoing_bottom <= active_top
+
+
+@pytest.mark.parametrize("active_height,incoming_height", [
+    (57, 57), (57, 114), (114, 57), (114, 114),
+])
+def test_collision_correction_keeps_current_and_incoming_inside_the_canvas(
+        active_height, incoming_height):
+    from lyrica.app import Overlay
+
+    class View:
+        effect_padding = 15
+        glyph_padding = 5
+
+        def __init__(self, y, height):
+            self.y = float(y)
+            self.height = height
+
+        def move_to(self, y):
+            self.y = float(y)
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+    panel = Overlay.__new__(Overlay)
+    panel.height = 440
+    panel.line_index = 0
+    panel._views = {
+        0: View(433, active_height),
+        1: View(368 if incoming_height == 57 else 311, incoming_height),
+    }
+    panel._glides = {}
+
+    panel._keep_gliding_rows_apart()
+
+    active = panel._views[0]
+    incoming = panel._views[1]
+    assert active.visual_vertical_span()[0] >= 0
+    assert incoming.visual_vertical_span()[1] <= panel.height
+    assert active.glyph_vertical_span()[1] <= incoming.glyph_vertical_span()[0]
 
 
 def test_multiline_glide_does_not_jump_when_only_soft_halos_meet():
@@ -942,6 +1034,7 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
 
         def __init__(self, offset):
             self._offset = offset
+            self.distance = offset
 
         def offset(self):
             return self._offset
@@ -1022,8 +1115,8 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
         def _retarget(self, *_a, **_k): pass
         def _visible_indices(self, _n): return []
 
-    monkeypatch.setattr(chrome_mod, "desktop_bounds",
-                        lambda _root: (0, 0, 3000, 2000))
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (0, 0, 3000, 2000))
     panel = Panel()
     A.Overlay._resize_window(panel, 880, 290, settling=False)
     assert done == ["beam"], (
@@ -1032,6 +1125,42 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
     done.clear()
     A.Overlay._resize_window(panel, 860, 280, settling=True)
     assert done == ["beam", "shape", "flush"]
+
+
+def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
+    from lyrica import app as A
+    from lyrica import chrome as chrome_mod
+
+    geometries = []
+
+    class Panel:
+        chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
+                                   A.glass.PANEL)
+        width, height = 300, 100
+        anchor_y = 0.0
+        beam = None
+        _card_text = ("t", "a")
+        line_index = -1
+
+        def __init__(self):
+            self.root = self.canvas = self
+            self._views = {}
+
+        def winfo_x(self): return 3000
+        def winfo_y(self): return 950
+        def geometry(self, value): geometries.append(value)
+        def configure(self, **_k): pass
+        def update_idletasks(self): pass
+        def _lay_out_card(self, *_a): pass
+        def _place_thumb(self): pass
+        def _retarget(self, *_a, **_k): pass
+
+    monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                        lambda _root, _x, _y: (1920, 0, 2560, 1080))
+
+    A.Overlay._resize_window(Panel(), 500, 352, settling=False)
+
+    assert geometries == ["500x352+2900+728"]
 
 
 
