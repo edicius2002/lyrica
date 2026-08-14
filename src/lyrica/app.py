@@ -2131,7 +2131,7 @@ class Overlay:
             else:
                 moving = True
         self._keep_gliding_rows_apart()
-        relay_hold = getattr(self, "_relay_hold", set())
+        relay_hold = self._relay_hold
         relay_finished = (bool(relay_hold)
                           and not any(index in self._glides
                                       for index in relay_hold))
@@ -2198,7 +2198,6 @@ class Overlay:
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
         views = list(self._views.values())
-        self._incoming_preview_key = None
         if self._echo is not None:
             views.append(self._echo)
         for view in views:
@@ -2537,7 +2536,6 @@ class Overlay:
         incoming_index = self.line_index + 1
         incoming = self._views.get(incoming_index)
         if incoming is None or not self._is_incoming_context(incoming_index):
-            self._incoming_preview_key = None
             return False
         # Final-frame geometry contract.  The collision guard runs earlier in
         # the tick, but a newly active view and a newly created preview share
@@ -2559,12 +2557,12 @@ class Overlay:
                     active, active.y - math.ceil(active_bottom - incoming_top)))
                 active_bottom = active.glyph_vertical_span()[1]
         target_colour = self._incoming_preview_colour(incoming_index, incoming)
-        incoming_fades = getattr(self, "_incoming_fades", {})
+        incoming_fades = self._incoming_fades
         marker = incoming_fades.get(incoming_index)
         fading = False
         colour = target_colour
         if (marker is not None and marker[0] == id(incoming)
-                and getattr(self.palette, "washed", False)):
+                and self.palette.washed):
             started = marker[1]
             separated = active is None or active_bottom <= incoming_top
             if started is None and separated:
@@ -2583,13 +2581,11 @@ class Overlay:
             colour = _between(self.palette.backdrop, target_colour, eased)
         elif marker is not None:
             incoming_fades.pop(incoming_index, None)
-        key = (self.line_index, id(incoming), target_colour)
         # This is deliberately reasserted at every stable frame.  Tk's actual
         # item state and fill can be changed by a presentation effect without
         # changing LineView's target caches; the tag-based implementation is a
         # constant two Tcl calls regardless of how long the wrapped line is.
         incoming.present_inactive(colour)
-        self._incoming_preview_key = key
         return fading
 
     def _advance_beam(self) -> bool:
@@ -2647,7 +2643,7 @@ class Overlay:
 
     def _incoming_preview_colour(self, index: int, view: LineView) -> str:
         """A readable but clearly subordinate colour for the next lyric."""
-        if not getattr(self.palette, "washed", True):
+        if not self.palette.washed:
             return self.palette.far
         return self.palette.faded(
             abs(index - self.line_index), self._context_visibility(index, view))
@@ -2689,8 +2685,7 @@ class Overlay:
             if active:
                 view.set_visible(True)
                 continue
-            if (index in getattr(self, "_relay_hold", set())
-                    and index in self._glides):
+            if index in self._relay_hold and index in self._glides:
                 visibility = self._relay_outgoing_visibility(index, view)
                 view.set_visible(visibility > 0.0)
                 view.show_inactive(self.palette.faded(

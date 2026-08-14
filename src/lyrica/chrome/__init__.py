@@ -197,18 +197,6 @@ def monitor_bounds(root: tk.Tk, x: int, y: int) -> tuple:
     return (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
 
 
-def position_in_monitor(root: tk.Tk, centre: tuple[int, int],
-                        size: tuple[int, int]) -> tuple[int, int]:
-    """Top-left preserving a centre inside the monitor that already owns it."""
-    centre_x, centre_y = centre
-    width, height = size
-    left, top, monitor_w, monitor_h = monitor_bounds(root, centre_x, centre_y)
-    right, bottom = left + monitor_w, top + monitor_h
-    x = max(left, min(centre_x - width // 2, right - width))
-    y = max(top, min(centre_y - height // 2, bottom - height))
-    return x, y
-
-
 def place_in_monitor(root: tk.Tk, place: tuple[int, int],
                      size: tuple[int, int],
                      monitor_point: tuple[int, int]) -> tuple[int, int]:

@@ -19,8 +19,9 @@ from PIL import ImageGrab
 from lyrica import bloom
 from lyrica.app import (
     ECHO_CORNER_INSET,
-    ECHO_DROP,
+    ECHO_KEEP,
     ECHO_SAFE_MARGIN,
+    ECHO_VERTICAL_GAP,
     ROW_GAP,
     VOICE_SAFE_MARGIN,
 )
@@ -104,11 +105,13 @@ class Renderer:
         lead = LineView(self.canvas, 290, 94, "Stay with me tonight",
                         words("Stay with me tonight"), font=FONT, wrap=520,
                         palette=DEFAULT)
-        echo_y = (lead.y + lead.height - lead.line_height
-                  + lead.line_height * ECHO_DROP)
+        # The response no longer hangs inside the lead's own box. It occupies
+        # the lane reserved between the two lyric rows, which is what `ROW_GAP`
+        # is sized for — see `Overlay._place_backing_y`.
+        echo_y = lead.y + lead.height + ECHO_VERTICAL_GAP
         echo = LineView(self.canvas, WIDTH // 2, echo_y, "(right here)",
                         words("right here"), font=SMALL, wrap=300,
-                        palette=DEFAULT.dimmed(0.72))
+                        palette=DEFAULT.dimmed(ECHO_KEEP))
         echo_width = max(b - a for a, b in echo._row_spans)
         corner = max(b for _a, b in lead._row_spans)
         echo.lean = (corner - ECHO_CORNER_INSET + echo_width / 2
@@ -123,6 +126,13 @@ class Renderer:
         echo.set_active(True)
         echo.show_sweep(0, 0.65)
         following.show_inactive(DEFAULT.side)
+        # The same order `Overlay._order_text_layers` applies, and it has to be
+        # applied here too: creation order alone would put the echo above the
+        # lead, where the renderer deliberately keeps it underneath. Its halo is
+        # allowed to reach into a neighbour's box precisely because no part of
+        # it can ever cover a main lyric glyph.
+        for view in (echo, following, lead):
+            view.raise_layer()
         self.capture("backing-vocal")
         lead.destroy()
         echo.destroy()
