@@ -2141,6 +2141,36 @@ class Overlay:
         # remain fully visible during the relay and disappear only now.
         return moving or settled or relay_finished
 
+    def _seat_preview_below_active(self, index: int, view: LineView) -> bool:
+        """Seat the upcoming row at its slot and cap the active row above it.
+
+        One implementation for the two places that need it: the collision guard
+        inside the glide step, and the frame-boundary contract at the end of the
+        tick. They carried near-identical copies that differed on a single line
+        — where the preview is pinned — so whichever ran last silently decided
+        the frame, and which one that was depended on whether the scene happened
+        to be stable. The resting target wins, because that is the answer the
+        frame-boundary contract was already imposing on every ordinary frame.
+
+        Resolve the overlap by advancing the active row upward, never by
+        ejecting the preview below the canvas. True once the two glyph boxes are
+        clear of each other. A row that is still gliding is never jumped: the
+        preview waits dissolved until the rise has cleared it, and that is the
+        separation `_present_incoming_preview` starts its entrance fade on.
+        """
+        view.move_to(self._safe_view_y(view, self._targets.get(index, view.y)))
+        active = self._views.get(self.line_index)
+        if active is None:
+            return True
+        active.move_to(self._safe_view_y(active, active.y))
+        active_bottom = active.glyph_vertical_span()[1]
+        preview_top = view.glyph_vertical_span()[0]
+        if active_bottom > preview_top and self.line_index not in self._glides:
+            active.move_to(self._safe_view_y(
+                active, active.y - math.ceil(active_bottom - preview_top)))
+            active_bottom = active.glyph_vertical_span()[1]
+        return active_bottom <= preview_top
+
     def _keep_gliding_rows_apart(self) -> None:
         """Keep staggered row trajectories from crossing the active row.
 
@@ -2156,22 +2186,13 @@ class Overlay:
         active_at = ordered.index(self.line_index)
         active = self._views[self.line_index]
 
-        # The active row and the next chronological row are both mandatory.
-        # A new active row begins where it used to wait, at the lower slot, and
-        # the newly created preview begins there too.  Resolve that temporary
-        # collision by advancing the active row upward, never by ejecting the
-        # preview below the canvas.  The glide catches up naturally from this
-        # bounded position on subsequent frames.
+        # The active row and the next chronological row are both mandatory, and
+        # a new active row begins where it used to wait — at the lower slot the
+        # newly created preview is also born into.
         incoming_index = self.line_index + 1
         incoming = self._views.get(incoming_index)
         if incoming is not None and self._is_incoming_context(incoming_index):
-            active.move_to(self._safe_view_y(active, active.y))
-            incoming.move_to(self._safe_view_y(incoming, incoming.y))
-            active_bottom = active.glyph_vertical_span()[1]
-            incoming_top = incoming.glyph_vertical_span()[0]
-            if active_bottom > incoming_top and self.line_index not in self._glides:
-                overlap = math.ceil(active_bottom - incoming_top)
-                active.move_to(self._safe_view_y(active, active.y - overlap))
+            self._seat_preview_below_active(incoming_index, incoming)
 
         lower_top = active.glyph_vertical_span()[0]
         for index in reversed(ordered[:active_at]):
@@ -2539,23 +2560,9 @@ class Overlay:
             return False
         # Final-frame geometry contract.  The collision guard runs earlier in
         # the tick, but a newly active view and a newly created preview share
-        # the lower slot and later layout work can displace the preview again.
-        # Pin the preview to its safe resting target, then cap the active row
-        # immediately above it.  Once settled both calls are no-ops.
-        target = self._targets.get(incoming_index, incoming.y)
-        incoming.move_to(self._safe_view_y(incoming, target))
-        active = self._views.get(self.line_index)
-        if active is not None:
-            active.move_to(self._safe_view_y(active, active.y))
-            active_bottom = active.glyph_vertical_span()[1]
-            incoming_top = incoming.glyph_vertical_span()[0]
-            # Repair settled geometry, but never jump a row that is already
-            # gliding. While it rises, the preview below waits dissolved until
-            # this exact overlap has cleared, then fades into the freed lane.
-            if active_bottom > incoming_top and self.line_index not in self._glides:
-                active.move_to(self._safe_view_y(
-                    active, active.y - math.ceil(active_bottom - incoming_top)))
-                active_bottom = active.glyph_vertical_span()[1]
+        # the lower slot and later layout work can displace the preview again,
+        # so the seating is asserted once more here. Once settled it is a no-op.
+        separated = self._seat_preview_below_active(incoming_index, incoming)
         target_colour = self._incoming_preview_colour(incoming_index, incoming)
         incoming_fades = self._incoming_fades
         marker = incoming_fades.get(incoming_index)
@@ -2564,7 +2571,6 @@ class Overlay:
         if (marker is not None and marker[0] == id(incoming)
                 and self.palette.washed):
             started = marker[1]
-            separated = active is None or active_bottom <= incoming_top
             if started is None and separated:
                 started = time.monotonic()
                 incoming_fades[incoming_index] = (id(incoming), started)
