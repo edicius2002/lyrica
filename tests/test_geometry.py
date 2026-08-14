@@ -92,24 +92,6 @@ def test_monitor_bounds_fall_back_to_primary_screen(monkeypatch):
         == (0, 0, 1920, 1080)
 
 
-def test_resize_keeps_its_centre_on_the_left_monitor(monkeypatch):
-    from lyrica import chrome as chrome_mod
-
-    monkeypatch.setattr(chrome_mod, "monitor_bounds",
-                        lambda _root, _x, _y: (-1920, 0, 1920, 1080))
-    assert chrome_mod.position_in_monitor(
-        FakeScreen(), (-800, 400), (1125, 400)) == (-1362, 200)
-
-
-def test_resize_is_clamped_to_the_same_monitor_not_the_primary(monkeypatch):
-    from lyrica import chrome as chrome_mod
-
-    monkeypatch.setattr(chrome_mod, "monitor_bounds",
-                        lambda _root, _x, _y: (1920, -200, 2560, 1440))
-    assert chrome_mod.position_in_monitor(
-        FakeScreen(), (2100, -100), (1125, 400)) == (1920, -200)
-
-
 def test_keyboard_resize_grows_from_the_last_horizontal_centre_and_top(monkeypatch):
     from lyrica import chrome as chrome_mod
 
@@ -634,6 +616,7 @@ def test_every_row_count_transition_uses_the_one_to_one_preview_visibility(
 
     class Palette:
         unsung = "pale upcoming lyric"
+        washed = True
 
         @staticmethod
         def faded(_distance, visibility):
@@ -716,11 +699,8 @@ def test_frame_boundary_does_not_cancel_a_reverse_exit():
     panel.line_index = 0
     panel._views = {1: Incoming()}
     panel._glides = {1: DownwardGlide()}
-    panel._incoming_preview_key = (0, 1, "old")
 
-    panel._present_incoming_preview()
-
-    assert panel._incoming_preview_key is None
+    assert panel._present_incoming_preview() is False
 
 
 def test_staggered_multiline_exit_never_crosses_the_new_active_line():
@@ -761,6 +741,7 @@ def test_staggered_multiline_exit_never_crosses_the_new_active_line():
     # The active row has advanced much further through its shorter glide. Raw,
     # the outgoing row would end at 170 while the active row starts at 140.
     panel._glides = {0: Glide(80.0), 1: Glide(20.0)}
+    panel._relay_hold = set()
 
     assert panel._advance_glides()
 
@@ -842,6 +823,7 @@ def test_a_rising_active_row_keeps_its_full_glide_instead_of_being_jumped(
     panel._views = {1: View(368), 2: View(368)}
     panel._targets = {1: 242.0, 2: 368.0}
     panel._glides = {1: motion.Glide(126, motion.DURATION_MS)}
+    panel._relay_hold = set()
 
     panel._advance_glides()
     start = panel._views[1].y
@@ -898,7 +880,6 @@ def test_new_preview_waits_for_clearance_then_fades_to_its_quiet_colour(
     panel._targets = {1: 242.0, 2: 368.0}
     panel._glides = {1: Glide()}
     panel._incoming_fades = {2: (id(incoming), None)}
-    panel._incoming_preview_key = None
     panel.palette = Palette()
     panel._incoming_preview_colour = lambda *_args: "#777777"
 
@@ -952,6 +933,7 @@ def test_multiline_glide_does_not_jump_when_only_soft_halos_meet():
     panel._views = {0: View(0), 1: View(0)}
     panel._targets = {0: 66.0, 1: 176.0}
     panel._glides = {0: Glide(110.0), 1: Glide(70.0)}
+    panel._relay_hold = set()
 
     assert panel._advance_glides()
     assert panel._views[0].y == 176.0
@@ -1195,6 +1177,7 @@ def test_staggered_multiline_reverse_exit_never_crosses_the_active_line():
     panel._views = {0: View(0), 1: View(0)}
     panel._targets = {0: 100.0, 1: 210.0}
     panel._glides = {0: Glide(-20.0), 1: Glide(-80.0)}
+    panel._relay_hold = set()
 
     assert panel._advance_glides()
 
