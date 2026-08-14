@@ -441,6 +441,49 @@ def test_frame_boundary_repairs_the_real_canvas_for_the_upcoming_row(overlay):
                 overlay._incoming_preview_colour(1, incoming)}
 
 
+def test_a_blended_preview_does_not_evict_the_renderers_cached_target(
+        overlay, monkeypatch):
+    """The entrance fade is a presentation colour, so the target must survive.
+
+    When it did not, every following `show_inactive` missed its cache and
+    repainted the whole upcoming row glyph by glyph — measured at a hundred
+    item updates a frame on a wrapped preview — purely so the two tag calls
+    below could overwrite the lot. The cost was invisible: nothing on screen
+    was wrong, so no test noticed.
+    """
+    from lyrica.lyrics import Lyrics
+
+    wrapped = ("an upcoming lyric long enough to wrap onto a second row, so "
+               "repainting it letter by letter every frame would be costly")
+    lyrics = Lyrics(
+        lines=[(0.0, "current lyric"), (3.0, wrapped), (6.0, "following")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(0, lyrics, animate=False)
+    incoming = overlay._views[1]
+    target = overlay._incoming_preview_colour(1, incoming)
+    assert len(incoming._items) > 40, "too short for the cost to be the point"
+
+    overlay._present_incoming_preview()
+    assert overlay.canvas.itemcget(incoming._items[0][2], "fill") != target
+    assert incoming._state == target
+    assert {entry[3] for entry in incoming._items} == {target}
+
+    # So the ordinary restyle has nothing left to say about this row.
+    ours = {entry[2] for entry in incoming._items}
+    touched = []
+    real = overlay.canvas.itemconfigure
+
+    def counting(item, *args, **kwargs):
+        if item in ours:
+            touched.append(item)
+        return real(item, *args, **kwargs)
+
+    monkeypatch.setattr(overlay.canvas, "itemconfigure", counting)
+    overlay._restyle()
+    assert touched == []
+
+
 def test_a_wrapped_upcoming_row_remains_visible_at_the_lower_safe_edge():
     from lyrica.app import Overlay
 

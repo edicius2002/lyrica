@@ -561,15 +561,20 @@ class LineView:
         change.  A normal ``show_inactive`` then legitimately sees its target
         already cached and does no work.  This is the frame-boundary repair for
         the one row whose presence is a hard UI contract: the upcoming lyric.
+
+        `colour` is a presentation colour, so it obeys the same rule as those
+        scene fades: the renderer's cached target survives it untouched. Writing
+        the presented colour into the cache instead made every following
+        ``show_inactive`` miss — the restyle then repainted the whole row glyph
+        by glyph, once per frame, only for the two calls below to overwrite the
+        lot. Measured on a wrapped preview: 100 item updates a frame, replaced
+        by none.
         """
         self.set_active(False)
         self._visible = True
         self.canvas.itemconfigure(self._outline_tag, state="normal")
         self.canvas.itemconfigure(
             self._text_tag, state="normal", fill=colour)
-        self._state = colour
-        for entry in self._items:
-            entry[3] = colour
 
     def show_lit(self) -> None:
         """The whole line at full strength.
