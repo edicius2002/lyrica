@@ -104,7 +104,14 @@ def test_keyboard_resize_grows_from_the_last_horizontal_centre_and_top(monkeypat
         FakeScreen(), place, (900, 320), (-800, 350)) == (-1250, 150)
 
 
-def test_last_place_survives_a_temporary_edge_clamp(monkeypatch):
+def test_a_clamped_edge_still_resolves_from_whatever_place_it_is_given(
+        monkeypatch):
+    """`place_in_monitor` is the arithmetic; which place to hand it is the caller's.
+
+    Kept as a unit because the clamp itself is worth pinning: a panel too tall
+    for the monitor is pulled up to its bottom edge, and a smaller one asked for
+    the same top is left where it was asked.
+    """
     from lyrica import chrome as chrome_mod
 
     monkeypatch.setattr(chrome_mod, "monitor_bounds",
@@ -112,17 +119,96 @@ def test_last_place_survives_a_temporary_edge_clamp(monkeypatch):
     place = (2020, 900)
     assert chrome_mod.place_in_monitor(
         FakeScreen(), place, (1125, 400), (2100, 950)) == (1920, 680)
-    # Shrinking derives from the original chosen place again, rather than from
-    # the centre of the clamped large window.
     assert chrome_mod.place_in_monitor(
         FakeScreen(), place, (450, 160), (2100, 880)) == (1920, 900)
 
 
-def test_tk_geometry_uses_valid_signs_for_negative_monitor_coordinates():
+@pytest.mark.skipif(sys.platform != "win32", reason="the overlay is Windows-first")
+def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay,
+                                                                   monkeypatch):
+    """Not from the last place it was dragged to, which is not the same thing.
+
+    The panel is repositioned by things other than a hand: a compact card
+    expanding into a lyric panel takes its own anchor, and either can be clamped
+    by the monitor edge. After any of those the remembered drag position is no
+    longer where the panel is, and growing from it moves the panel out from
+    under the eye that is looking at it.
+
+    The monitor is faked large on purpose. A real one decides how much of this
+    is even visible — the CI runner's screen is 1024 px wide and the panel very
+    nearly fills it, so every placement there is pinned against an edge and no
+    anchor rule can be told from any other. What is under test is which position
+    the rule reads, so the clamp is taken out of the way.
+    """
     from lyrica import chrome as chrome_mod
 
-    assert chrome_mod.geometry(900, 320, -1362, 200) == "900x320-1362+200"
-    assert chrome_mod.geometry(900, 320, 2200, -120) == "900x320+2200-120"
+    root = overlay.root
+    was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    # Held before anything is patched over it: the restore below runs inside the
+    # test, where the spy is still in place, and would otherwise only record the
+    # window being put back and leave it where it was for every test after this.
+    restore = chrome_mod.place
+    try:
+        overlay._resize_to(1.0)
+        root.update()
+        monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                            lambda _root, _x, _y: (-4000, -4000, 12000, 12000))
+        chrome_mod.place(root, 500, 380, overlay.width, overlay.height)
+        root.update_idletasks()
+        root.update()
+        live_centre = root.winfo_x() + overlay.width // 2
+        live_top = root.winfo_y()
+        # The drag record says somewhere else entirely, which is what a
+        # collapse or a clamp leaves behind.
+        overlay._place_anchor = (live_centre + 600, live_top + 400)
+
+        put = []
+        monkeypatch.setattr(chrome_mod, "place",
+                            lambda _r, x, y, w, h: put.append((x, y, w, h)))
+        overlay._resize(+0.1)
+
+        assert put, "the resize placed nothing"
+        x, y, width, _height = put[-1]
+        assert x + width // 2 == live_centre, (
+            "grew from the remembered drag rather than from the panel")
+        assert y == live_top
+    finally:
+        restore(root, *was)
+        root.update_idletasks()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows placement")
+def test_a_window_lands_on_a_monitor_above_or_left_of_the_primary(overlay):
+    """`wm geometry` cannot express a negative coordinate, and used to be asked to.
+
+    The string it was given for a panel at y=-20 was `1800x640+2262-20`, and Tk
+    reads a leading `-` on an offset as "this far from the *opposite* edge of the
+    primary screen" rather than as a negative coordinate. So the panel was put at
+    1200 - 20 - 640 = 540 instead: 560 px away, and off the monitor it was on.
+
+    Measured on a desktop whose second monitor starts at y=-460, which is an
+    ordinary layout — anything not bottom-aligned with the primary has negative
+    coordinates somewhere. The test asserts where the window *lands*, not what
+    string was built, because asserting the string is what let this ship.
+    """
+    from lyrica import chrome as chrome_mod
+
+    root = overlay.root
+    was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    try:
+        for x, y in ((-140, 200), (300, -260), (-140, -260)):
+            chrome_mod.place(root, x, y, overlay.width, overlay.height)
+            root.update_idletasks()
+            assert (root.winfo_x(), root.winfo_y()) == (x, y)
+            # And it stays put: Tk re-asserts its own idea of the geometry on
+            # the next pass, and a placement it does not know about would be
+            # undone there rather than here.
+            root.update()
+            root.update_idletasks()
+            assert (root.winfo_x(), root.winfo_y()) == (x, y)
+    finally:
+        chrome_mod.place(root, *was)
+        root.update_idletasks()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows monitor API")
@@ -1282,7 +1368,7 @@ def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
 
         def winfo_x(self): return 3000
         def winfo_y(self): return 950
-        def geometry(self, value): geometries.append(value)
+        def geometry(self, value): pass
         def configure(self, **_k): pass
         def update_idletasks(self): pass
         def _lay_out_card(self, *_a): pass
@@ -1291,10 +1377,17 @@ def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
 
     monkeypatch.setattr(chrome_mod, "monitor_bounds",
                         lambda _root, _x, _y: (1920, 0, 2560, 1080))
+    # The decision, not how it is spelled. Asserting the geometry string is
+    # what let a placement that Tk reads as an offset from the far edge go
+    # unnoticed, so this records where the panel was put instead.
+    monkeypatch.setattr(chrome_mod, "place",
+                        lambda _root, x, y, w, h: geometries.append((x, y, w, h)))
 
     A.Overlay._resize_window(Panel(), 500, 352, settling=False)
 
-    assert geometries == ["500x352+2900+728"]
+    # 728 is the monitor's bottom less the new height: a card parked by the
+    # taskbar expands upward rather than off the screen.
+    assert geometries == [(2900, 728, 500, 352)]
 
 
 

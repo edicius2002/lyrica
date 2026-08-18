@@ -208,8 +208,16 @@ def _hwnd_of(root) -> int:
 
     Tk wraps toplevels, so `winfo_id()` is the inner window and the composition
     attribute has to go on the outer one.
+
+    The flush is what brings the wrapper into being, and is only needed before
+    the window has been mapped: measured, `winfo_id` and `GetParent` answer with
+    the same handle either way once it has. It is asked for conditionally rather
+    than always because this sits on the path of every animated resize frame,
+    where a synchronous flush is 0.29 ms of a 16 ms budget spent on nothing —
+    and where not flushing per frame is a property the resize tests hold to.
     """
-    root.update_idletasks()
+    if not root.winfo_ismapped():
+        root.update_idletasks()
     hwnd = int(root.winfo_id())
     parent = ctypes.windll.user32.GetParent(wintypes.HWND(hwnd))
     return int(parent) if parent else hwnd

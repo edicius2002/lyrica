@@ -601,8 +601,8 @@ class Overlay:
         # it with the centre of whichever size happened to be visible last.
         self._place_anchor = (
             self._start_x + self.width // 2, self._start_y)
-        self.root.geometry(chrome_mod.geometry(
-            self.width, self.height, self._start_x, self._start_y))
+        chrome_mod.place(self.root, self._start_x, self._start_y,
+                         self.width, self.height)
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                 bg=self.chrome.background,
@@ -1024,7 +1024,7 @@ class Overlay:
             self.root, *old_centre)
         x = max(edge, min(keep, edge + dwidth - width))
         top = max(dtop, min(top, dtop + dheight - height))
-        self.root.geometry(chrome_mod.geometry(width, height, x, top))
+        chrome_mod.place(self.root, x, top, width, height)
         self.canvas.configure(width=width, height=height)
         # The border is rebuilt every frame, because it is geometry and not
         # decoration: its segments are laid out for a particular width, so one
@@ -1117,9 +1117,20 @@ class Overlay:
 
         old_centre = (self.root.winfo_x() + self.width // 2,
                       self.root.winfo_y() + self.height // 2)
-        place = getattr(
-            self, "_place_anchor",
-            (self.root.winfo_x() + self.width // 2, self.root.winfo_y()))
+        # Where the panel *is*, not where it was last dragged to. Those are the
+        # same thing only until something moves it without a hand: a compact
+        # card expanding into a lyric panel takes its own anchor, and either can
+        # be pulled off its top by a monitor edge. Growing from the remembered
+        # drag instead moved the panel out from under the eye watching it — and
+        # made a press of `+` followed by a press of `-` land somewhere the
+        # panel had never been.
+        #
+        # The trade is that a clamp is no longer temporary: grow until the
+        # bottom edge stops it, shrink again, and the panel stays where the edge
+        # left it rather than springing back down. That is the half worth
+        # keeping — the panel is visibly against the edge, so staying there is
+        # what the screen already shows.
+        place = (self.root.winfo_x() + self.width // 2, self.root.winfo_y())
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
         self.f_title = _scaled_font(FONT_TITLE, scale)
@@ -1145,7 +1156,7 @@ class Overlay:
         # temporarily clamped at an edge.
         x, y = chrome_mod.place_in_monitor(
             self.root, place, (self.width, self.height), old_centre)
-        self.root.geometry(chrome_mod.geometry(self.width, self.height, x, y))
+        chrome_mod.place(self.root, x, y, self.width, self.height)
         self.canvas.configure(width=self.width, height=self.height)
         # After the geometry, never before: the clip region is in device pixels
         # and does not track the window, so applying it early clips the window

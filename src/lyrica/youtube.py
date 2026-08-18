@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
-HEADERS = {"User-Agent": "lyrica/0.2.6 (personal overlay)"}
+HEADERS = {"User-Agent": "lyrica/0.2.7 (personal overlay)"}
 
 # How many candidates the length check gets to choose between. A search costs a
 # hundred quota units against a free allowance of ten thousand a day, so the
