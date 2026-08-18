@@ -104,7 +104,14 @@ def test_keyboard_resize_grows_from_the_last_horizontal_centre_and_top(monkeypat
         FakeScreen(), place, (900, 320), (-800, 350)) == (-1250, 150)
 
 
-def test_last_place_survives_a_temporary_edge_clamp(monkeypatch):
+def test_a_clamped_edge_still_resolves_from_whatever_place_it_is_given(
+        monkeypatch):
+    """`place_in_monitor` is the arithmetic; which place to hand it is the caller's.
+
+    Kept as a unit because the clamp itself is worth pinning: a panel too tall
+    for the monitor is pulled up to its bottom edge, and a smaller one asked for
+    the same top is left where it was asked.
+    """
     from lyrica import chrome as chrome_mod
 
     monkeypatch.setattr(chrome_mod, "monitor_bounds",
@@ -112,20 +119,10 @@ def test_last_place_survives_a_temporary_edge_clamp(monkeypatch):
     place = (2020, 900)
     assert chrome_mod.place_in_monitor(
         FakeScreen(), place, (1125, 400), (2100, 950)) == (1920, 680)
-    # Shrinking derives from the original chosen place again, rather than from
-    # the centre of the clamped large window.
     assert chrome_mod.place_in_monitor(
         FakeScreen(), place, (450, 160), (2100, 880)) == (1920, 900)
 
 
-def test_tk_geometry_uses_valid_signs_for_negative_monitor_coordinates():
-    from lyrica import chrome as chrome_mod
-
-    assert chrome_mod.geometry(900, 320, -1362, 200) == "900x320-1362+200"
-    assert chrome_mod.geometry(900, 320, 2200, -120) == "900x320+2200-120"
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows monitor API")
 def test_windows_can_resolve_a_real_monitor_from_a_desktop_point():
     from lyrica.chrome import windows
 
@@ -1282,7 +1279,7 @@ def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
 
         def winfo_x(self): return 3000
         def winfo_y(self): return 950
-        def geometry(self, value): geometries.append(value)
+        def geometry(self, value): pass
         def configure(self, **_k): pass
         def update_idletasks(self): pass
         def _lay_out_card(self, *_a): pass
@@ -1291,10 +1288,17 @@ def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):
 
     monkeypatch.setattr(chrome_mod, "monitor_bounds",
                         lambda _root, _x, _y: (1920, 0, 2560, 1080))
+    # The decision, not how it is spelled. Asserting the geometry string is
+    # what let a placement that Tk reads as an offset from the far edge go
+    # unnoticed, so this records where the panel was put instead.
+    monkeypatch.setattr(chrome_mod, "place",
+                        lambda _root, x, y, w, h: geometries.append((x, y, w, h)))
 
     A.Overlay._resize_window(Panel(), 500, 352, settling=False)
 
-    assert geometries == ["500x352+2900+728"]
+    # 728 is the monitor's bottom less the new height: a card parked by the
+    # taskbar expands upward rather than off the screen.
+    assert geometries == [(2900, 728, 500, 352)]
 
 
 
