@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Apple's public catalogue search. No key, no registration, and the size is
 # part of the image URL, so asking for a large one is a substitution.
 SEARCH_URL = "https://itunes.apple.com/search"
-HEADERS = {"User-Agent": "lyrica/0.2.5 (personal overlay)"}
+HEADERS = {"User-Agent": "lyrica/0.2.6 (personal overlay)"}
 
 # The open fallback. Also keyless, but slower and patchier — good exactly where
 # a commercial catalogue is not.

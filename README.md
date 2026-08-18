@@ -233,6 +233,19 @@ Windows files new tray icons under the notification-area chevron rather than
 showing them, so look behind the `^` and drag it out if you want it visible. The
 log says when it was added.
 
+There is only ever one icon, because there is only ever one overlay: starting
+Lyrica while it is already running leaves the running one alone and says so in
+the log. Worth knowing because the overlay only appears once something is
+playing, so a launch can look as though it did nothing.
+
+**If you see several icons**, they are leftovers rather than copies. Windows does
+not poll the icons it draws — it drops one when a message to the owning window
+goes unanswered, which is what opening the notification area makes it do. So an
+instance that ended without saying goodbye leaves an icon that looks live until
+it is looked at, and the count collapsing to one as you open the area is that
+happening. The endings that used to cause it are fixed; nothing has to be
+cleaned up by hand.
+
 Hiding puts the overlay away rather than closing it — `Esc` and right click
 destroy the window, which is the right answer for "I am done" and the wrong one
 for "not right now". While hidden it stops drawing entirely and only listens for
