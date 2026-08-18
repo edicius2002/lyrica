@@ -124,7 +124,8 @@ def test_a_clamped_edge_still_resolves_from_whatever_place_it_is_given(
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the overlay is Windows-first")
-def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay):
+def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay,
+                                                                   monkeypatch):
     """Not from the last place it was dragged to, which is not the same thing.
 
     The panel is repositioned by things other than a hand: a compact card
@@ -132,31 +133,47 @@ def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay):
     by the monitor edge. After any of those the remembered drag position is no
     longer where the panel is, and growing from it moves the panel out from
     under the eye that is looking at it.
+
+    The monitor is faked large on purpose. A real one decides how much of this
+    is even visible — the CI runner's screen is 1024 px wide and the panel very
+    nearly fills it, so every placement there is pinned against an edge and no
+    anchor rule can be told from any other. What is under test is which position
+    the rule reads, so the clamp is taken out of the way.
     """
     from lyrica import chrome as chrome_mod
 
     root = overlay.root
     was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    # Held before anything is patched over it: the restore below runs inside the
+    # test, where the spy is still in place, and would otherwise only record the
+    # window being put back and leave it where it was for every test after this.
+    restore = chrome_mod.place
     try:
         overlay._resize_to(1.0)
         root.update()
-        chrome_mod.place(root, 400, 300, overlay.width, overlay.height)
-        root.update_idletasks()
-        overlay._drag_at = (400, 300)
-        overlay._remember_where()
-        # Moved without a drag, exactly as a collapse or a clamp does.
+        monkeypatch.setattr(chrome_mod, "monitor_bounds",
+                            lambda _root, _x, _y: (-4000, -4000, 12000, 12000))
         chrome_mod.place(root, 500, 380, overlay.width, overlay.height)
         root.update_idletasks()
         root.update()
-        centre = root.winfo_x() + overlay.width // 2
-        top = root.winfo_y()
+        live_centre = root.winfo_x() + overlay.width // 2
+        live_top = root.winfo_y()
+        # The drag record says somewhere else entirely, which is what a
+        # collapse or a clamp leaves behind.
+        overlay._place_anchor = (live_centre + 600, live_top + 400)
 
+        put = []
+        monkeypatch.setattr(chrome_mod, "place",
+                            lambda _r, x, y, w, h: put.append((x, y, w, h)))
         overlay._resize(+0.1)
-        root.update()
-        assert root.winfo_x() + overlay.width // 2 == centre
-        assert root.winfo_y() == top
+
+        assert put, "the resize placed nothing"
+        x, y, width, _height = put[-1]
+        assert x + width // 2 == live_centre, (
+            "grew from the remembered drag rather than from the panel")
+        assert y == live_top
     finally:
-        chrome_mod.place(root, *was)
+        restore(root, *was)
         root.update_idletasks()
 
 
