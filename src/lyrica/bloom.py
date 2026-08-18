@@ -14,10 +14,12 @@ recolouring four items. The honest version is twenty times cheaper per frame
 than the fake one.
 
 Images are cached and held here on purpose: Tk keeps only a weak claim on an
-image, so anything dropped goes blank on screen.
+image, so anything dropped goes blank on screen. Held, though, is not held
+forever — see `_Images` for what bounds the cache and why it has to be bounded.
 """
 import logging
 import sys
+from collections import OrderedDict
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,89 @@ GROWTH = 0.14          # default for direct users; the overlay passes its settin
 # edges and the halo has corners.
 PAD = 20
 
-_cache: dict = {}
+# --- how many of them are kept ----------------------------------------------
+# Every image in here is a Windows GDI bitmap from the moment it is first drawn:
+# measured at exactly one handle and 29.6 KiB each. A process is given 10,000 GDI
+# handles. The keys carry the palette colour, and the palette follows the cover,
+# so each song asks for images of its own and none of the previous song's are
+# ever asked for again — which made an unbounded cache a leak on the one axis
+# that never stops moving. Reproduced: the quota was reached after about fifteen
+# songs, and Tk ended the process from `Tk_GetPixmap` with "Fail to allocate
+# bitmap". That is a `Tcl_Panic`, so there is nothing to catch and no chance to
+# log a word: the only defence is never to hold that many.
+#
+# One song's whole appetite is two colours — sung and unsung — times the distinct
+# characters in its lyrics times `SCALES`, which is about 800 images for a Latin
+# lyric. Halos are white whatever the song, so they are shared by every song in
+# the font. Three songs' worth is kept: 2,400 of the 10,000 handles, and about
+# 70 MB.
+LIMIT = 2400
+
+# Count alone does not bound the memory. A Korean or Japanese lyric has hundreds
+# of distinct characters and draws each of them larger, so the same number of
+# images is several times the bytes. Whichever bound is reached first evicts.
+BYTE_LIMIT = 72 * 1024 * 1024
+
+
+class _Images(OrderedDict):
+    """The kept images, bounded by count and by bytes, least recently used out.
+
+    Eviction is by last use rather than by age or by song, and that is what
+    makes it safe. Tk keeps only a weak claim on an image, so dropping one a
+    canvas item is still showing blanks that letter — but a letter on screen is
+    by definition one that was just used, and it takes `LIMIT` other images
+    being used to age it out. One line on screen is at most about forty of them
+    against a bound of 2,400, and a song builds 800 in its entirety, so the
+    least recently used entry belongs to a song that stopped playing.
+
+    Dropping the reference is what frees the handle: `ImageTk.PhotoImage`
+    deletes the Tk image in `__del__`, and this cache holds the only strong
+    reference to it. So `del` here is not bookkeeping, it is the release.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._weight: dict = {}
+        self.total_bytes = 0
+
+    def take(self, key):
+        """What is held for `key`, counted as freshly used, or None."""
+        if key not in self:
+            return None
+        self.move_to_end(key)
+        return self[key]
+
+    def keep(self, key, value, image) -> None:
+        """Hold `value`, then drop the least recently used until it fits.
+
+        `image` is the PIL original rather than the Tk one because it is what
+        knows its own size in pixels; four bytes each is what both copies of it
+        cost, and the two are within a few per cent of the 29.6 KiB measured.
+        """
+        weight = image.width * image.height * 4
+        self[key] = value
+        self._weight[key] = weight
+        self.total_bytes += weight
+        # Never the entry just kept, however small the bounds are set: a caller
+        # that is handed an image expects it to still be there next frame.
+        while len(self) > 1 and (len(self) > LIMIT
+                                 or self.total_bytes > BYTE_LIMIT):
+            del self[next(iter(self))]
+
+    # `OrderedDict.popitem` is implemented in C and does not route through
+    # `__delitem__` on a subclass, so eviction spells the deletion out above
+    # rather than trusting it to keep the total honest.
+    def __delitem__(self, key) -> None:
+        self.total_bytes -= self._weight.pop(key, 0)
+        super().__delitem__(key)
+
+    def clear(self) -> None:
+        super().clear()
+        self._weight.clear()
+        self.total_bytes = 0
+
+
+_cache = _Images()
 _fonts: dict = {}
 _missing: set = set()
 
@@ -184,7 +268,7 @@ def grown(char: str, spec: tuple, step: int, colour: tuple,
         return None
     amount = _growth_key(growth)
     key = ("grown", char, spec, min(step, SCALES), colour, amount)
-    hit = _cache.get(key)
+    hit = _cache.take(key)
     if hit is not None:
         return hit
     font = _pil_font(spec)
@@ -206,7 +290,7 @@ def grown(char: str, spec: tuple, step: int, colour: tuple,
     except Exception:
         logger.debug("could not grow %r", char, exc_info=True)
         return None
-    _cache[key] = made
+    _cache.keep(key, made, img)
     return made
 
 
@@ -249,7 +333,7 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     if level <= 0:
         return None
     key = (char, spec, min(level, LEVELS), colour)
-    hit = _cache.get(key)
+    hit = _cache.take(key)
     if hit is not None:
         return hit
     font = _pil_font(spec)
@@ -258,9 +342,10 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     try:
         from PIL import ImageTk
 
-        photo = ImageTk.PhotoImage(_rendered_halo(char, font, level, colour))
+        halo = _rendered_halo(char, font, level, colour)
+        photo = ImageTk.PhotoImage(halo)
     except Exception:
         logger.debug("could not build a bloom for %r", char, exc_info=True)
         return None
-    _cache[key] = photo
+    _cache.keep(key, photo, halo)
     return photo
