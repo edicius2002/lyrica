@@ -10,7 +10,7 @@ from lyrica.lyrics import Lyrics, parse_lrc
 from lyrica.providers.base import LyricsProvider
 
 API = "https://lrclib.net/api"
-HEADERS = {"User-Agent": "lyrica/0.2.5 (personal research overlay)"}
+HEADERS = {"User-Agent": "lyrica/0.2.6 (personal research overlay)"}
 
 
 def _from_record(d: dict, source: str, *, exact: bool) -> Lyrics | None:

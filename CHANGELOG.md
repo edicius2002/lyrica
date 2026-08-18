@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.6 — 2026-08-18
+
+- Bound the blurred-glyph cache, which was the whole of the "Fail to allocate
+  bitmap" crash. Its keys carry the palette colour and the palette follows the
+  cover, so every song added about 800 images that no later song would ever ask
+  for again. Each one is a GDI bitmap — measured at one handle and 29.6 KiB — and
+  a process is given 10,000 handles, so the quota was reached after roughly
+  fifteen songs and Tk ended the process from `Tk_GetPixmap`. Reproduced at song
+  twelve; 2,400 images are now kept by last use, and forty songs hold flat at
+  2,436 handles.
+- Refuse to start a second overlay. Each one drew its own always-on-top panel
+  over the same lyrics and added its own notification-area icon.
+- Remove the notification-area icon whichever way the overlay ends. The teardown
+  sat past `mainloop` rather than in a `finally`, and `stop` posted its quit to a
+  daemon thread without waiting — so an ending that was not a clean quit left an
+  icon Windows keeps drawing until something makes it ask the owning window
+  whether it is still there, which is why the leftovers vanished as soon as the
+  notification area was opened.
+
 ## 0.2.5 — 2026-08-10
 
 - Give every letter of an expanding word the same size in the same frame. The
