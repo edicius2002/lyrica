@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.7 — 2026-08-18
+
+- Place the window through the platform rather than through `wm geometry`, which
+  cannot express a negative coordinate. Its offsets are signed, but a leading `-`
+  means "this far from the *opposite* edge of the primary screen" — so a panel
+  whose top belonged at -20 was given `1800x640+2262-20` and put at
+  1200 - 20 - 640 = 540 instead. Any monitor above or left of the primary has
+  negative coordinates across part of it, and measured on a desktop whose second
+  screen starts at y=-460, one press of `Ctrl`+`Alt`+`+` threw the panel 760 px
+  down and off every screen. Startup restored a saved place from up there to the
+  wrong row for the same reason.
+- Grow and shrink from where the panel actually is, not from where it was last
+  dragged to. Those differ whenever something moves it without a hand — a compact
+  card expanding into a lyric panel takes its own anchor, and either can be
+  pulled off its top by a monitor edge — and growing from the stale one moved the
+  panel out from under the eye watching it. The trade is that a clamp is no
+  longer temporary: grow until an edge stops it, shrink again, and the panel
+  stays where the edge left it rather than springing back.
+- Only flush Tk's idle work when finding a window handle actually needs it, which
+  is before the window has been mapped. Placing through the platform would
+  otherwise have put a synchronous flush on every animated resize frame.
+
 ## 0.2.6 — 2026-08-18
 
 - Bound the blurred-glyph cache, which was the whole of the "Fail to allocate
