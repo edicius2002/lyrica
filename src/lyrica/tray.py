@@ -202,10 +202,25 @@ class WindowsTray:
         self._autostart = enabled
 
     def stop(self) -> None:
+        """Ask the icon to go, and wait long enough for it to have gone.
+
+        Posting the quit and returning was a race the icon lost often enough to
+        matter. The thread that owns it is a daemon, so the interpreter is free
+        to exit the moment this returns, and what is left undone is the
+        `NIM_DELETE` — leaving an icon Windows still draws until something makes
+        it ask the owning window whether it is there. Which is why the leftovers
+        vanish as soon as the notification area is opened, and why several of
+        them look like several copies of the app.
+        """
         if self._thread_id is None:
             return
         ctypes.windll.user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
         self._thread_id = None
+        if self._thread is not None:
+            # Bounded, because a tray thread that will not come back is not
+            # worth holding a quit open for. A removal measures well under a
+            # millisecond; this is only for the case where it never happens.
+            self._thread.join(timeout=1.0)
 
     # --- the thread that owns the icon ---
     def _run(self) -> None:
@@ -226,10 +241,15 @@ class WindowsTray:
         self._ready.set()
 
         message = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(message))
-            user32.DispatchMessageW(ctypes.byref(message))
-        self._remove(user32)
+        try:
+            while user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(message))
+                user32.DispatchMessageW(ctypes.byref(message))
+        finally:
+            # In a `finally` because the icon outliving the process is the whole
+            # failure: an ending that skips this leaves one in the notification
+            # area that looks live until it is looked at.
+            self._remove(user32)
 
     def _create(self, user32) -> None:
         instance = ctypes.windll.kernel32.GetModuleHandleW(None)

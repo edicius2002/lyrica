@@ -30,6 +30,7 @@ from lyrica import (
     config,
     glass,
     hotkeys,
+    instance,
     motion,
     songcolour,
     sponsorblock,
@@ -2705,17 +2706,27 @@ class Overlay:
         self._order_text_layers()
 
     def run(self):
+        """Draw until asked to stop, and put everything away whichever way it ends.
+
+        The teardown is in a `finally` because it used to sit on the far side of
+        `mainloop`, so any ending other than a quit skipped all of it — and one
+        of the things skipped is the `NIM_DELETE` for the notification-area icon,
+        which Windows then keeps drawing until something makes it ask the owning
+        window whether it is still there.
+        """
         self.reader.start()
         self.hotkeys.start()
         self.tray.start()
         chrome_mod.hold_timer_resolution(True)
-        self._tick()
-        self.root.mainloop()
-        chrome_mod.hold_timer_resolution(False)
-        self.tray.stop()
-        self.hotkeys.stop()
-        self.reader.stop()
-        self.meter.close()
+        try:
+            self._tick()
+            self.root.mainloop()
+        finally:
+            chrome_mod.hold_timer_resolution(False)
+            self.tray.stop()
+            self.hotkeys.stop()
+            self.reader.stop()
+            self.meter.close()
 
 
 def setup_logging() -> Path:
@@ -2743,10 +2754,18 @@ def setup_logging() -> Path:
 
 def main():
     setup_logging()
-    # Before anything reads a token: the .env is the fallback for values that
-    # must not be committed, and an exported variable still wins over it.
-    config.load()
-    Overlay().run()
+    # Before the window, because a second overlay is a second always-on-top
+    # panel over the same lyrics and a second icon in the notification area.
+    if not instance.claim():
+        logger.info("Lyrica is already running; leaving the overlay to it")
+        return
+    try:
+        # Before anything reads a token: the .env is the fallback for values that
+        # must not be committed, and an exported variable still wins over it.
+        config.load()
+        Overlay().run()
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":
