@@ -123,6 +123,78 @@ def test_a_clamped_edge_still_resolves_from_whatever_place_it_is_given(
         FakeScreen(), place, (450, 160), (2100, 880)) == (1920, 900)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the overlay is Windows-first")
+def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay):
+    """Not from the last place it was dragged to, which is not the same thing.
+
+    The panel is repositioned by things other than a hand: a compact card
+    expanding into a lyric panel takes its own anchor, and either can be clamped
+    by the monitor edge. After any of those the remembered drag position is no
+    longer where the panel is, and growing from it moves the panel out from
+    under the eye that is looking at it.
+    """
+    from lyrica import chrome as chrome_mod
+
+    root = overlay.root
+    was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    try:
+        overlay._resize_to(1.0)
+        root.update()
+        chrome_mod.place(root, 400, 300, overlay.width, overlay.height)
+        root.update_idletasks()
+        overlay._drag_at = (400, 300)
+        overlay._remember_where()
+        # Moved without a drag, exactly as a collapse or a clamp does.
+        chrome_mod.place(root, 500, 380, overlay.width, overlay.height)
+        root.update_idletasks()
+        root.update()
+        centre = root.winfo_x() + overlay.width // 2
+        top = root.winfo_y()
+
+        overlay._resize(+0.1)
+        root.update()
+        assert root.winfo_x() + overlay.width // 2 == centre
+        assert root.winfo_y() == top
+    finally:
+        chrome_mod.place(root, *was)
+        root.update_idletasks()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows placement")
+def test_a_window_lands_on_a_monitor_above_or_left_of_the_primary(overlay):
+    """`wm geometry` cannot express a negative coordinate, and used to be asked to.
+
+    The string it was given for a panel at y=-20 was `1800x640+2262-20`, and Tk
+    reads a leading `-` on an offset as "this far from the *opposite* edge of the
+    primary screen" rather than as a negative coordinate. So the panel was put at
+    1200 - 20 - 640 = 540 instead: 560 px away, and off the monitor it was on.
+
+    Measured on a desktop whose second monitor starts at y=-460, which is an
+    ordinary layout — anything not bottom-aligned with the primary has negative
+    coordinates somewhere. The test asserts where the window *lands*, not what
+    string was built, because asserting the string is what let this ship.
+    """
+    from lyrica import chrome as chrome_mod
+
+    root = overlay.root
+    was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    try:
+        for x, y in ((-140, 200), (300, -260), (-140, -260)):
+            chrome_mod.place(root, x, y, overlay.width, overlay.height)
+            root.update_idletasks()
+            assert (root.winfo_x(), root.winfo_y()) == (x, y)
+            # And it stays put: Tk re-asserts its own idea of the geometry on
+            # the next pass, and a placement it does not know about would be
+            # undone there rather than here.
+            root.update()
+            root.update_idletasks()
+            assert (root.winfo_x(), root.winfo_y()) == (x, y)
+    finally:
+        chrome_mod.place(root, *was)
+        root.update_idletasks()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows monitor API")
 def test_windows_can_resolve_a_real_monitor_from_a_desktop_point():
     from lyrica.chrome import windows
 

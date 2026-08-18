@@ -1117,9 +1117,20 @@ class Overlay:
 
         old_centre = (self.root.winfo_x() + self.width // 2,
                       self.root.winfo_y() + self.height // 2)
-        place = getattr(
-            self, "_place_anchor",
-            (self.root.winfo_x() + self.width // 2, self.root.winfo_y()))
+        # Where the panel *is*, not where it was last dragged to. Those are the
+        # same thing only until something moves it without a hand: a compact
+        # card expanding into a lyric panel takes its own anchor, and either can
+        # be pulled off its top by a monitor edge. Growing from the remembered
+        # drag instead moved the panel out from under the eye watching it — and
+        # made a press of `+` followed by a press of `-` land somewhere the
+        # panel had never been.
+        #
+        # The trade is that a clamp is no longer temporary: grow until the
+        # bottom edge stops it, shrink again, and the panel stays where the edge
+        # left it rather than springing back down. That is the half worth
+        # keeping — the panel is visibly against the edge, so staying there is
+        # what the screen already shows.
+        place = (self.root.winfo_x() + self.width // 2, self.root.winfo_y())
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
         self.f_title = _scaled_font(FONT_TITLE, scale)
