@@ -250,7 +250,7 @@ def _built(points: list[tuple], width: int, height: int, shape: Shape,
     inside = inside.filter(ImageFilter.GaussianBlur(max(0.6, shape.edge / k)))
     profile = _normalised(
         ImageChops.multiply(ImageChops.screen(ridge, field), inside))
-    profile = profile.resize(full, Image.BILINEAR)
+    profile = profile.resize(full, Image.BICUBIC)
 
     where = Image.new("L", small, OFF_RING)
     pen = ImageDraw.Draw(where)
