@@ -42,6 +42,26 @@ def test_different_fonts_do_not_share_measurements():
     assert measure(large, ("large",), "ab") == 40
 
 
+def test_the_measure_cache_is_bounded():
+    # The key carries the font descriptor and the descriptor carries the size,
+    # so every Ctrl+Alt +/- step opens a key space of its own and the one
+    # before it was retained for the rest of the session.
+    overlay_text._measure_cache.clear()
+    font = FakeFont()
+    per_scale = overlay_text._MEASURE_CACHE_MAX // 4
+    for size in range(8):
+        for n in range(per_scale):
+            measure(font, (f"font-{size}",), f"w{n}")
+    assert len(overlay_text._measure_cache) <= overlay_text._MEASURE_CACHE_MAX
+
+    # And what survives a trim is what was measured most recently, so the text
+    # currently on screen is not the half thrown away.
+    before = font.calls
+    for n in range(per_scale):
+        measure(font, ("font-7",), f"w{n}")
+    assert font.calls == before, "the newest scale stays resident"
+
+
 # --- wrapping ---------------------------------------------------------------
 
 def test_a_short_line_stays_on_one_row():

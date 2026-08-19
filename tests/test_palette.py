@@ -468,3 +468,28 @@ def test_a_dimmed_palette_lands_between_the_rungs_it_came_from():
     assert lum(loud.sung) > lum(quiet.sung) > lum(loud.unsung), "between two rungs"
     assert lum(quiet.sung) > lum(quiet.unsung) > lum(quiet.side), "still a ladder"
     assert quiet.ramp[0] == quiet.unsung and quiet.ramp[-1] == quiet.sung
+
+
+def test_dimming_the_same_palette_twice_gives_the_same_object():
+    # For the reason `for_song` returns one: `LineView.set_palette` and the beam
+    # both decide whether to repaint by comparing palettes with `is`. The echo
+    # is rebuilt for every ad-lib, and a fresh copy each time also arrives with
+    # cold fade and bloom memos — the two things asked per line per frame.
+    loud = pal_mod.for_song(PANEL_CHROME, NEUTRAL)
+    assert loud.dimmed(0.8) is loud.dimmed(0.8)
+    assert loud.dimmed(0.8) is not loud.dimmed(0.5)
+
+
+def test_a_dimmed_palette_carries_no_memo_that_was_not_its_own():
+    # `dimmed` pulls toward `backdrop`, so a cached answer belongs to the
+    # backdrop it was solved against and to the palette it came from. Inheriting
+    # the parent's dict through `replace` would hand a palette *itself* back as
+    # its own dimmed copy.
+    loud = pal_mod.for_song(PANEL_CHROME, NEUTRAL)
+    quiet = loud.dimmed(0.8)
+    assert quiet.dimmed(0.8) is not quiet
+    assert lum(quiet.dimmed(0.8).sung) < lum(quiet.sung)
+
+    moved = pal_mod.rebacked(loud, (40, 40, 40))
+    assert moved.dimmed(0.8) is not quiet
+    assert moved.dimmed(0.8).sung != quiet.sung, "a different wash to fall into"

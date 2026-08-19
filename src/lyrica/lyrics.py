@@ -1,5 +1,6 @@
 """Lyrics data model and LRC parsing."""
 import re
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from enum import IntEnum
 
@@ -179,6 +180,31 @@ class Lyrics:
     # and never introduced, and that is a different thing from being a person.
     singers: dict = field(default_factory=dict)
 
+    # (the `lines` list it was built from, its length then, the timestamps).
+    # Deliberately *not* a dataclass field: it is a cache of `lines`, and a
+    # field would put it into `__eq__`, into `repr`, and into anything that
+    # walks the dataclass. Class-level, so an instance only grows one once
+    # something has asked for a line index.
+    _starts = None
+
+    def _line_starts(self) -> list:
+        """The line timestamps alone, so `line_index_at` can bisect them.
+
+        Rebuilt whenever `lines` is not the list it was built from. `Lyrics` is
+        a mutable dataclass and the disk cache decoder rebinds `lines` on an
+        already-constructed object (`providers._cache_read`), so identity — not
+        a flag set at construction — is what actually tracks staleness. The
+        length is checked alongside it because `copy` gives a merged result the
+        *same* list object as its source, which identity alone would not notice
+        growing.
+        """
+        lines = self.lines
+        cached = self._starts
+        if cached is None or cached[0] is not lines or cached[1] != len(lines):
+            cached = (lines, len(lines), [ts for ts, _text in lines])
+            self._starts = cached
+        return cached[2]
+
     def voice_at(self, line_index: int) -> str:
         """Who sings a line, or "" when nothing said."""
         if 0 <= line_index < len(self.voices):
@@ -294,14 +320,16 @@ class Lyrics:
         return (self.instrumental and self.exact) or self.precision >= Precision.LINE
 
     def line_index_at(self, t: float) -> int:
-        """Index of the active line at time t (-1 before the first line)."""
-        idx = -1
-        for i, (ts, _) in enumerate(self.lines):
-            if ts <= t:
-                idx = i
-            else:
-                break
-        return idx
+        """Index of the active line at time t (-1 before the first line).
+
+        Bisected rather than scanned. `lines` is sorted by time, which is what
+        makes the two the same answer, and this was the only pass over the
+        whole song inside the 60 Hz render loop — so its cost grew with the
+        length of the song for no reason anyone could have wanted. `bisect_right
+        - 1` is exactly the old contract: a timestamp counts from the instant it
+        is reached, past the end holds the last line, and -1 before the first.
+        """
+        return bisect_right(self._line_starts(), t) - 1
 
 
 def progress_in(words: list, t: float) -> tuple[int, float]:

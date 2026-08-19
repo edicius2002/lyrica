@@ -408,6 +408,11 @@ class Palette:
     compression: float = 1.0
     _fades: dict = field(default_factory=dict, repr=False, compare=False)
     _blooms: dict = field(default_factory=dict, repr=False, compare=False)
+    # Dimmed copies of this palette, by `keep`. Kept on the palette rather than
+    # in a module memo like `for_song`'s because the answer is a pure function
+    # of fields that cannot change — the dataclass is frozen — so it can never
+    # go stale, and it dies with the palette instead of needing a lifetime rule.
+    _dimmed: dict = field(default_factory=dict, repr=False, compare=False)
 
     def at(self, fraction: float) -> str:
         """The sweep colour at 0..1 through a character."""
@@ -433,16 +438,36 @@ class Palette:
 
         Pulled toward the backdrop instead, which lands between the ladder's
         rungs rather than on one.
+
+        Returns *the same object* for a repeat, for the reason `for_song` does:
+        `LineView.set_palette` and the beam both compare palettes by identity,
+        so an equal but fresh instance is a repaint nobody can see. It matters
+        more here than the call count suggests — the echo is rebuilt for every
+        ad-lib, and a fresh dimmed palette each time arrives with cold `_fades`
+        and `_blooms`, so the two memos that exist because they are asked *per
+        line per frame* were being refilled from nothing once per backing line.
         """
+        hit = self._dimmed.get(keep)
+        if hit is not None:
+            return hit
+
         def pull(colour: str) -> str:
             return hex_of(tuple(
                 back + (front - back) * keep
                 for front, back in zip(rgb_of(colour), self.backdrop, strict=True)))
 
         sung, unsung = pull(self.sung), pull(self.unsung)
-        return replace(self, sung=sung, unsung=unsung, side=pull(self.side),
-                       far=pull(self.far), ramp=_blend_ramp(unsung, sung),
-                       _fades={}, _blooms={})
+        hit = replace(self, sung=sung, unsung=unsung, side=pull(self.side),
+                      far=pull(self.far), ramp=_blend_ramp(unsung, sung),
+                      _fades={}, _blooms={}, _dimmed={})
+        # One `keep` is in use and it is a module constant, so this holds one
+        # entry in practice. Bounded anyway because each entry is a 64-string
+        # ramp plus two growing memos, and a caller sweeping `keep` would
+        # otherwise turn a cache into a leak.
+        if len(self._dimmed) >= MEMO_SIZE:
+            self._dimmed.clear()
+        self._dimmed[keep] = hit
+        return hit
 
     def bloom(self, level: float) -> str:
         """The halo behind a struck character, at 0..1 of its strength.
@@ -639,9 +664,10 @@ def for_song(chrome: Chrome, song: SongColour | None,
     pal = _assemble(colours, backdrop=backdrop, law=law)
     # Sharing one instance is safe because nothing mutates a palette: it is
     # frozen, and `dimmed` and `rebacked` both build a new one with empty memos.
-    # The two dicts a shared palette does share are pure caches of its own
-    # fields, bounded at 64 blooms and 66 fades, and sharing them is the point —
-    # a resize now keeps them warm instead of refilling both.
+    # The three dicts a shared palette does share are pure caches of its own
+    # fields, bounded at 64 blooms, 66 fades and `MEMO_SIZE` dimmed copies, and
+    # sharing them is the point — a resize now keeps them warm instead of
+    # refilling them.
     _MEMO.insert(0, (key, backdrop, pal))
     del _MEMO[MEMO_SIZE:]
     return pal
@@ -652,4 +678,6 @@ def rebacked(pal: Palette, backdrop: tuple) -> Palette:
     backdrop = tuple(backdrop)
     if backdrop == pal.backdrop:
         return pal
-    return replace(pal, backdrop=backdrop, _fades={}, _blooms={})
+    # `_dimmed` is reset alongside the other two: `dimmed` pulls toward the
+    # backdrop, so every cached answer was computed against the old one.
+    return replace(pal, backdrop=backdrop, _fades={}, _blooms={}, _dimmed={})

@@ -12,6 +12,7 @@ fill where nothing can see them. They are only used in keyed mode, which is the
 one mode with nothing drawn behind the text; everywhere else the cover wash is
 capped dark enough to be the contrast by itself.
 """
+from itertools import islice
 from tkinter import font as tkfont
 
 OUTLINE_COLOUR = "#000000"
@@ -22,6 +23,21 @@ OUTLINE_COLOUR = "#000000"
 EDGE_MARGIN = 8
 
 _measure_cache: dict[tuple, int] = {}
+
+# The cache key is (font descriptor, text) and the descriptor carries the size,
+# so every Ctrl+Alt +/- step opens a fresh key space and the one before it was
+# never released. A session that walked the scale range kept one full set of
+# measurements per scale, of every character and token seen since it started,
+# and songs added to it too. Tens of KB each: a leak, not a fire, so the answer
+# is a cap rather than a policy.
+#
+# What has to stay resident is the current font's working set — the alphabet
+# plus the tokens of the song on screen, some hundreds of entries — and half of
+# this is several times that, so trimming never costs the live line a
+# remeasure. Insertion order is dict order, so the half dropped is the half
+# longest untouched by a *new* measurement, which after a size change is the
+# outgoing scale.
+_MEASURE_CACHE_MAX = 4096
 
 
 def ring_offsets(width: int) -> list[tuple[int, int]]:
@@ -43,6 +59,9 @@ def measure(font_obj: tkfont.Font, key: tuple, text: str) -> int:
     width = _measure_cache.get(cache_key)
     if width is None:
         width = font_obj.measure(text)
+        if len(_measure_cache) >= _MEASURE_CACHE_MAX:
+            for stale in list(islice(_measure_cache, _MEASURE_CACHE_MAX // 2)):
+                del _measure_cache[stale]
         _measure_cache[cache_key] = width
     return width
 
