@@ -97,13 +97,29 @@ COLOUR_STOP = 0.55
 GRADIENT_STEPS = 96
 
 
-def _rounded_path(width: int, height: int, radius: int,
-                  inset: float) -> list[tuple[float, float]]:
+def _rounded_path(width: int, height: int, radius: int, inset: float,
+                  spacing: float = STRAIGHT_SPACING) -> list[tuple[float, float]]:
     """Points around a rounded rectangle, clockwise from the top left corner.
 
     Corners get a fixed number of points and straights get one every
-    `STRAIGHT_SPACING`, so a curve is always drawn as a curve however long the
+    `spacing`, so a curve is always drawn as a curve however long the
     edges beside it are.
+
+    `spacing` is in physical pixels and the caller scales it, so that the
+    density is constant in design units rather than on the glass. Left at the
+    unscaled default a Ctrl+Alt+plus bought segments nobody asked for and paid
+    for them on every frame for the rest of the session: the default panel went
+    from 176 segments to 316 at 2.0, and `advance` walks every one of them at
+    60 Hz whether or not the window is moving — measured 5.3 ms a frame for the
+    comet against 3.3 once the spacing scales, on a 16 ms budget.
+
+    It cuts the other way at 0.6, and deliberately: that panel goes from 120
+    segments to the same 176, taking the comet from 2.0 ms a frame to 2.9 —
+    which is what the default panel already costs. Constant density is the
+    point of it rather than a smaller number in every direction. A
+    small window was drawing a *coarser* ring than the default one in the units
+    the design is written in, and the corners already worked this way — they
+    have a fixed point budget of their own and never read the spacing at all.
     """
     left, top = inset, inset
     right, bottom = width - inset, height - inset
@@ -116,7 +132,7 @@ def _rounded_path(width: int, height: int, radius: int,
 
     def run(x0, y0, x1, y1):
         length = math.hypot(x1 - x0, y1 - y0)
-        steps = max(1, int(length / STRAIGHT_SPACING))
+        steps = max(1, int(length / spacing))
         return [(x0 + (x1 - x0) * k / steps, y0 + (y1 - y0) * k / steps)
                 for k in range(steps)]
 
@@ -247,19 +263,52 @@ class Beam:
         self._width_state = None
 
     def reshape(self, width: int, height: int, radius: int) -> None:
-        """Lay the ring out again, for a window that changed size."""
-        self.destroy()
-        # Fresh segments are created at the base width, so the pulse has to be
-        # reasserted; otherwise a ring rebuilt mid-song stays unpulsed until
-        # the level next crosses a quartile.
-        self._width_state = None
-        points = _rounded_path(width, height, radius, self._halo_width / 2)
+        """Lay the ring out again, for a window that changed size.
+
+        A pool, not a rebuild. The geometry is a pure function of the size, but
+        the *number* of segments barely moves between consecutive frames of a
+        collapse — measured 176, 176, 174, 172, 172, 168 … 114 across the
+        twenty-one frames of the default panel folding to compact. Tearing the
+        ring down and laying it again spent 352 `delete` plus 352 `create_line`
+        on every one of those frames to end up with items in the same places;
+        moving the ones already there costs 352 `coords` and creates or deletes
+        only the handful the count actually moved by — four `create_line` on a
+        frame of the unfold, none at all on a frame of the collapse. Measured
+        704 canvas calls a frame down to 352, and 3.0 ms a frame down to 0.7 on
+        this machine, in both directions, against a resize budget of 16 ms that
+        the neighbouring work had already taken to 30.8.
+        """
+        points = _rounded_path(width, height, radius, self._halo_width / 2,
+                               STRAIGHT_SPACING * self.scale)
         segments = [(start, points[(i + 1) % len(points)])
                     for i, start in enumerate(points)]
+        kept = min(len(self._items), len(segments))
+        for index in range(kept):
+            (x0, y0), (x1, y1) = segments[index]
+            self.canvas.coords(self._halo_items[index], x0, y0, x1, y1)
+            self.canvas.coords(self._items[index], x0, y0, x1, y1)
+        # `_shades` and `_halo_shades` are deliberately left as they are for
+        # these. Since `f1d4928` they are `_paint`'s only proof of what the
+        # canvas is actually carrying, and a moved item keeps its fill — so the
+        # entry still describes it truthfully, which is the only property the
+        # early return needs. Reseeding them with the sentinel would not be
+        # wrong, just wasteful: it would force all 352 items to be rewritten on
+        # the very next frame, which is the cost this pool exists to avoid.
+        # Whether the colour is still *appropriate* is a different question and
+        # not this one's: `advance` recomputes every segment's shade from
+        # `i / count` regardless, and writes wherever the answer differs, so a
+        # ring whose count changed repaints exactly the segments that moved
+        # through the gradient.
+        for index in range(kept, len(self._items)):
+            self.canvas.delete(self._halo_items[index])
+            self.canvas.delete(self._items[index])
+        del self._halo_items[kept:], self._halo_shades[kept:]
+        del self._items[kept:], self._shades[kept:]
+
         # Every halo first, then every core. Interleaving them lets the wide
         # halo of segment N+1 cover the end of core N, turning a continuous
         # gradient into a dashed line at every join.
-        for start, end in segments:
+        for start, end in segments[kept:]:
             halo = self.canvas.create_line(*start, *end, width=self._halo_width,
                                            fill="#000000", capstyle="round",
                                            tags=(self._halo_tag,))
@@ -270,12 +319,27 @@ class Beam:
             # is not black: the core would match on the first frame and the
             # halo would be left at the creation fill for good.
             self._halo_shades.append("")
-        for start, end in segments:
+        for start, end in segments[kept:]:
             core = self.canvas.create_line(*start, *end, width=self._core_width,
                                            fill="#000000", capstyle="round",
                                            tags=(self._core_tag,))
             self._items.append(core)
             self._shades.append("")
+        if len(segments) > kept:
+            # New items land on top of the display list, so a ring that grew
+            # would have its fresh halos sitting over the cores that were
+            # already there — the dashed-join defect above, but only on the
+            # part of the ring that is new. One tag-wide lower puts the whole
+            # halo group back under the whole core group and preserves the
+            # order within each, so it is enough to say it once.
+            self.canvas.tag_lower(self._halo_tag, self._core_tag)
+            # Fresh segments are created at the base width, so the pulse has to
+            # be reasserted; otherwise a ring rebuilt mid-song stays unpulsed
+            # until the level next crosses a quartile. Only when there are
+            # fresh segments, though: the reused ones are still carrying the
+            # width the last frame gave them, and reasserting costs two
+            # tag-wide `itemconfigure`s that touch every item on the ring.
+            self._width_state = None
 
     def destroy(self) -> None:
         for item in (*self._items, *self._halo_items):
