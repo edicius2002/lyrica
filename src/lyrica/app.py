@@ -913,6 +913,38 @@ class Overlay:
         # Written when the hand stops, not while it moves: a drag issues
         # hundreds of positions and only the last one is a decision.
         self._remember_where()
+        self._follow_monitor_dpi()
+
+    def _follow_monitor_dpi(self) -> None:
+        """Take the scale of the monitor the panel was dropped on.
+
+        The display scale is read once, before Tk exists, and it is the
+        primary screen's. Declaring per-monitor awareness is what stops Windows
+        stretching the window for us, so on a desk whose screens disagree the
+        panel keeps the pixel count of the screen it left: physically half
+        again too small crossing 120 dpi to 144, and answered by reaching for
+        the size keys — a resize to undo a resize nobody asked for.
+
+        Asked when the hand lets go rather than watched for. Intercepting
+        `WM_DPICHANGED` means subclassing Tk's window procedure, which is a
+        great deal of machinery for a question that only has a new answer when
+        the window has just been carried somewhere, and this is already the
+        point where a drag becomes a decision.
+
+        `None` is Windows declining to say, and is not the same as 96 dpi. The
+        scale already in hand is right until something proves otherwise, so an
+        unanswered question changes nothing — flattening the refusal to 1.0
+        would turn a correct 1.25 into a visibly small panel.
+        """
+        scale = chrome_mod.dpi_for_window(self.root)
+        if scale is None or abs(scale - self._dpi_scale) < 1e-6:
+            return
+        logger.info("display scale %.2f -> %.2f", self._dpi_scale, scale)
+        self._dpi_scale = scale
+        # Through the same path the size keys take, so the panel travels to its
+        # corrected size instead of appearing at it under the cursor that just
+        # dropped it.
+        self._apply_scale(glide=True)
 
     def _seek_to_line_at(self, y: int) -> None:
         """Jump to whichever line was clicked, if the player will allow it."""

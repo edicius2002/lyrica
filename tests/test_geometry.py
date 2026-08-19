@@ -92,6 +92,168 @@ def test_monitor_bounds_fall_back_to_primary_screen(monkeypatch):
         == (0, 0, 1920, 1080)
 
 
+class FakeDensity:
+    """A monitor scaled differently from the one the app started on."""
+
+    scale = 1.5
+
+    @classmethod
+    def dpi_for_window(cls, _root):
+        return cls.scale
+
+
+def test_the_window_scale_comes_from_the_screen_the_window_is_on(monkeypatch):
+    # The startup query answers for the primary desktop and answers once. Under
+    # per-monitor awareness Windows stops resizing the window across a screen
+    # boundary, so a panel that started at 1.25 and was dragged to a 1.5 screen
+    # is 20 % undersized until this is asked again.
+    import lyrica.chrome.windows  # noqa: F401  (so the stub replaces it)
+    from lyrica import chrome as chrome_mod
+
+    monkeypatch.setattr(chrome_mod.sys, "platform", "win32")
+    monkeypatch.setattr(chrome_mod, "windows", FakeDensity, raising=False)
+    assert chrome_mod.dpi_for_window(FakeScreen()) == 1.5
+
+
+def test_a_refusal_is_reported_as_a_refusal_and_not_as_no_scaling(monkeypatch):
+    """None rather than 1.0, and the difference is a visible defect.
+
+    1.0 is a scale a real monitor has, so flattening a failure onto it leaves
+    the caller unable to tell "this screen is 96 dpi" from "nobody knows". Told
+    the first, it rescales a correct 1.25 window down to unscaled on one failed
+    call; taught to ignore 1.0, it never follows a move onto a screen that
+    really is unscaled. None costs it neither: it keeps the scale it has.
+    """
+    import lyrica.chrome.windows  # noqa: F401
+    from lyrica import chrome as chrome_mod
+
+    class Refuses:
+        @staticmethod
+        def dpi_for_window(_root):
+            return None
+
+    monkeypatch.setattr(chrome_mod.sys, "platform", "win32")
+    monkeypatch.setattr(chrome_mod, "windows", Refuses, raising=False)
+    assert chrome_mod.dpi_for_window(FakeScreen()) is None
+
+
+def test_the_scale_is_one_where_the_platform_cannot_be_asked(monkeypatch):
+    """1.0 here, where a refusal reports None — and the split is deliberate.
+
+    Off Windows there is no per-monitor scaling for the window to have drifted
+    away from, so 1.0 is an answer rather than a shrug. None is reserved for
+    Windows having been asked and not said.
+
+    And the Windows module is not reached for at all. `chrome/__init__` is
+    imported on macOS too, which is the whole point of the second CI leg. A stub
+    that raises is how this says "unreached" rather than the weaker "unused".
+    """
+    from lyrica import chrome as chrome_mod
+
+    class Exploding:
+        @staticmethod
+        def dpi_for_window(_root):
+            raise AssertionError("asked Windows for the DPI off Windows")
+
+    monkeypatch.setattr(chrome_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(chrome_mod, "windows", Exploding, raising=False)
+    assert chrome_mod.dpi_for_window(FakeScreen()) == 1.0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPI API")
+def test_a_real_window_reports_the_density_of_its_own_monitor(overlay):
+    """Walked to both ends of the virtual desktop, and cross-checked at each.
+
+    Three things this is careful about, and the first two were each caught
+    making the test pass for the wrong reason.
+
+    It runs on the overlay's own root rather than the shared `tk_root`, because
+    what the DPI calls answer depends on process state: to a process that has
+    not declared awareness Windows reports 96 for *every* monitor, so on the
+    shared root — created before anything declares anything — both ends of the
+    desk read 1.0 and the comparison below holds no matter what the code does.
+    `Overlay.__init__` declares awareness before it makes its window, which is
+    the arrangement the app really runs in.
+
+    It compares against `GetDpiForMonitor` on the monitor the window is over
+    rather than against a constant, because a one-monitor runner has one density
+    across the whole desk and a test written against the primary screen's number
+    would pass just as well while reading the primary screen — which is the bug.
+
+    And it moves the window, because on one screen even the cross-check agrees
+    trivially. On a desk with two differently scaled monitors the walk is what
+    makes the two ends different numbers: measured here, 1.25 at one end and 1.5
+    at the other.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    from lyrica import chrome as chrome_mod
+    from lyrica.chrome import windows
+
+    root = overlay.root
+    user32, shcore = ctypes.windll.user32, ctypes.windll.shcore
+    monitor_from_window = user32.MonitorFromWindow
+    monitor_from_window.argtypes = [wintypes.HWND, wintypes.DWORD]
+    monitor_from_window.restype = wintypes.HMONITOR
+    get_dpi_for_monitor = shcore.GetDpiForMonitor
+    get_dpi_for_monitor.argtypes = [wintypes.HMONITOR, ctypes.c_int,
+                                    ctypes.POINTER(wintypes.UINT),
+                                    ctypes.POINTER(wintypes.UINT)]
+    get_dpi_for_monitor.restype = ctypes.c_long
+
+    def monitor_scale():
+        monitor = monitor_from_window(wintypes.HWND(windows._hwnd_of(root)),
+                                      windows.MONITOR_DEFAULTTONEAREST)
+        across, down = wintypes.UINT(), wintypes.UINT()
+        assert get_dpi_for_monitor(monitor, 0, ctypes.byref(across),
+                                   ctypes.byref(down)) == 0
+        return across.value / 96.0
+
+    was = (root.winfo_x(), root.winfo_y(), overlay.width, overlay.height)
+    left, top, width, _height = windows.desktop_bounds()
+    try:
+        for x in (left + 10, left + width - overlay.width - 10):
+            chrome_mod.place(root, x, top + 10, overlay.width, overlay.height)
+            root.update_idletasks()
+            scale = windows.dpi_for_window(root)
+            assert scale is not None and scale > 0
+            assert scale == monitor_scale(), (
+                "read a density that is not this window's monitor's")
+            assert chrome_mod.dpi_for_window(root) == scale
+    finally:
+        chrome_mod.place(root, *was)
+        root.update_idletasks()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPI API")
+def test_a_handle_windows_cannot_resolve_is_not_a_scale_of_zero(monkeypatch):
+    """`GetDpiForWindow` reports a handle it does not recognise by answering 0.
+
+    Measured: 0 both for a null handle and for an invented one. Divided through
+    rather than caught, that is a scale of 0.0 — every measurement in the layout
+    collapses and the window has no size, which is a far worse failure than the
+    unscaled one this degrades to.
+    """
+    from lyrica import chrome as chrome_mod
+    from lyrica.chrome import windows
+
+    monkeypatch.setattr(windows, "_hwnd_of", lambda _root: 0)
+    assert windows.dpi_for_window(FakeScreen()) is None
+    assert chrome_mod.dpi_for_window(FakeScreen()) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows DPI API")
+def test_a_window_the_handle_cannot_be_taken_of_reports_no_scale(monkeypatch):
+    from lyrica.chrome import windows
+
+    def refuse(_root):
+        raise OSError("no handle")
+
+    monkeypatch.setattr(windows, "_hwnd_of", refuse)
+    assert windows.dpi_for_window(FakeScreen()) is None
+
+
 def test_keyboard_resize_grows_from_the_last_horizontal_centre_and_top(monkeypatch):
     from lyrica import chrome as chrome_mod
 

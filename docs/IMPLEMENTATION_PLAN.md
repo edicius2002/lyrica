@@ -3,7 +3,7 @@
 > **Status:** Word-by-word lyrics, four ranked sources behind one cascade. The overlay resolves
 > tracks from Spotify, YouTube, YouTube Music and SoundCloud, and every pull request is linted and
 > tested.
-> **Last updated:** 2026-08-06
+> **Last updated:** 2026-08-19
 > **Review status:** Phase 7 merged across [#19](https://github.com/edicius2002/lyrica/pull/19),
 > [#21](https://github.com/edicius2002/lyrica/pull/21), [#23](https://github.com/edicius2002/lyrica/pull/23),
 > [#25](https://github.com/edicius2002/lyrica/pull/25) and [#27](https://github.com/edicius2002/lyrica/pull/27).
@@ -520,6 +520,17 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 | 8.8 | Canvas items are built per line and afterwards only recoloured.                    | A sweep changes continuously, so rebuilding each frame is exactly what makes it look stepped. The fast tick also applies only while a word is lit: the overlay sits on screen all day, and 33 ms on a still line is pure cost.                                  |
 | 8.9 | Word-level degrades silently to line level, per line.                              | Coverage is not all-or-nothing even within a track — verses can be word-timed and a shouted chorus not. Representing that per line means the seam never shows.                                                                                                 |
 
+### 9. Look and reaction
+
+The frame budget these are weighed against is 16 ms: the reactive border keeps the loop at 60 Hz for as long as anything is playing, so work done per frame is paid tens of thousands of times an hour.
+
+| ID  | Decision                                                                        | Rationale                                                                                                                                                                                                                                                     |
+| --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 9.1 | A cache whose answer depends on the scale carries the scale in its key, rather than being cleared from the resize path. | The card had three measurement caches and the resize path cleared two of them. The third kept a width measured at the previous font and the card was centred on it at every size. A cache that only one caller knows to clear is one that will eventually be missed, and this one already had been — under a comment claiming the fault was fixed. |
+| 9.2 | The glyph image cache is bounded by count *and* by bytes, and evicts by last use.  | It was never cleared in production: thirty songs reached 14,152 images, and fifteen font sizes over ten songs about 1.3 GB. The eviction argument is from capacity — a picture on screen was used recently, and 2400 others must arrive before it is dropped. Worth recording that this is the weaker of the two guarantees considered: a picture that stays up is never asked for again, so recency does not actually track what is being shown. Asking Tk `image inuse` does, and is the answer to reach for if that ceiling is ever lowered. |
+| 9.3 | A scale change moves the window and the border over a curve; the words wait for it to land. | Both of those are arithmetic and interpolate, and the ring is cheap to relay now that it reuses its items. Text cannot come along: Tk font sizes are integers — the same reason word growth is drawn from pre-rasterised images — and a scale change is twenty sizes rather than one. The column is left empty for the move because text sized for the window it is going to, inside the window it is still in, hangs out past the border for the whole of it. |
+| 9.4 | Size presses are folded into one rebuild per burst.                               | A poll returns everything queued since the last tick and each step was a whole rebuild — a settings write, a clip region, the ring, every view, the cover derived again. No frame is drawn between them, so N presses painted N-1 sizes nobody could see; crossing the range was half a second of a panel that did not answer. |
+
 ### Superseded decisions
 
 | ID  | Change                                                                                  | When       |
@@ -543,6 +554,7 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 | S.17 | Cover Art Archive as a cover source → dropped; patchiest of three and the only one returning non-square scans. | 2026-08-07 |
 | S.18 | Apple leading the cover sources → Discogs leads, on measurement: 5 of 5 tracks against 3 of 5, same resolution. | 2026-08-07 |
 | S.19 | Translated lyrics planned → dropped by agreement, never started.                        | 2026-08-07 |
+| S.20 | Decision 8.8's second clause — the fast tick applies only while a word is lit — no longer holds. The reactive border asks for 60 Hz unconditionally while anything is playing, so the overlay runs at the fast tick all day, which is the cost 8.8 set out to avoid. Whether the border is worth it is open. Its first clause, canvas items built per line and afterwards only recoloured, still stands. | 2026-08-19 |
 
 ---
 
