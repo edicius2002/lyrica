@@ -117,6 +117,21 @@ BAND_SLACK = 4
 # four frames is 67 ms against a gradient that takes eleven seconds to go round.
 PER_CALL = 1
 
+# How many still frames before the fields are built again at full resolution,
+# and how much of that build is done per frame.
+#
+# A third of the resolution is right while the panel is moving: it is rebuilt on
+# every frame of a collapse, and nothing is legible during one anyway. It is
+# wrong for the panel you are looking at, which is still — and a third-scale
+# field resampled up is what a soft glow looks like when it is described as
+# lacking definition. The cheap one is built first so the move never waits, and
+# the fine one replaces it once the panel stops.
+#
+# Split across frames rather than paid at once, because the whole build is 18 ms
+# against a 16 ms budget and the lyric sweep is still running underneath. Three
+# stages of roughly six, which is a frame nobody sees drop.
+FINE_AFTER = 12
+
 # Fields are cached because a collapse animation asks for the same twenty-one
 # sizes on the way back out that it asked for on the way in — measured 4.19 ms
 # a frame on the way in and 1.11 on the way back. Bounded by bytes rather than
@@ -209,7 +224,7 @@ def _normalised(image, keep: float = 1.0):
 
 
 def _built(points: list[tuple], width: int, height: int, shape: Shape,
-           band: int) -> list[tuple]:
+           band: int, detail: int = DETAIL) -> list[tuple]:
     """The static fields for one geometry, cropped to the strips that use them.
 
     Both are drawn at `DETAIL`-reduced resolution and resampled up, and the two
@@ -223,7 +238,7 @@ def _built(points: list[tuple], width: int, height: int, shape: Shape,
     """
     from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-    k = DETAIL
+    k = detail
     small = (max(1, -(-width // k)), max(1, -(-height // k)))
     # Resampled to a whole number of low-resolution cells and cropped back, so
     # every strip is a crop of one image rather than a resize of its own. Two
@@ -326,6 +341,8 @@ class Ring:
                                                   state="hidden"))
                        for _ in range(4)]
         self._next = 0
+        self._coarse = None     # what to build again finely, once it settles
+        self._still = 0
 
     def reshape(self, points: list[tuple], width: int, height: int,
                 shape: Shape) -> None:
@@ -340,10 +357,17 @@ class Ring:
         band = max(1, round(shape.inset + shape.reach + shape.core + BAND_SLACK))
         key = (width, height, tuple(round(v, 2) for v in shape), band,
                len(points), tuple(points[0]))
-        built = _cache.take(key)
+        fine = _cache.take((*key, 1))
+        built = fine or _cache.take(key)
         if built is None:
             built = _built(points, width, height, shape, band)
             _cache.keep(key, built)
+        # Only a coarse build has anywhere to go. A size that has been settled
+        # on before comes back out of the cache already fine, and asking for it
+        # again would be work for a picture nobody can tell from the one on
+        # screen.
+        self._coarse = None if fine else (points, width, height, shape, band, key)
+        self._still = 0
         for strip, made in zip(self.strips, built, strict=False):
             box, profile, where, keys = made
             resized = strip.box is None or strip.size != profile.size
@@ -386,6 +410,9 @@ class Ring:
         are told most frames that nothing happened to them. Returns how many
         were repainted, which is the unit a frame's cost is measured in.
         """
+        self._still += 1
+        if self._coarse is not None and self._still >= FINE_AFTER:
+            self._refine()
         painted = 0
         for _ in range(len(self.strips)):
             if painted >= PER_CALL:
@@ -401,6 +428,31 @@ class Ring:
             strip.shown = want
             painted += 1
         return painted
+
+    def _refine(self) -> None:
+        """Build the fields again at full resolution, now that nothing moves.
+
+        The cheap build exists for the frames of a collapse, where the panel is
+        a different size every sixteen milliseconds and nothing on it is
+        legible. The panel you actually look at is still, and a third-scale
+        field resampled up to meet it is what "soft but undefined" describes.
+
+        Done once, when the size has held for `FINE_AFTER` frames, and kept
+        under its own cache key — so the twenty-one sizes of a collapse are
+        never refined on the way past, and a size that is settled on twice is
+        refined once. The boxes do not depend on the resolution, so a strip
+        keeps the photo it already has and only its field is replaced.
+        """
+        points, width, height, shape, band, key = self._coarse
+        self._coarse = None
+        built = _built(points, width, height, shape, band, 1)
+        _cache.keep((*key, 1), built)
+        for strip, made in zip(self.strips, built, strict=False):
+            _box, profile, where, keys = made
+            strip.profile, strip.where, strip.keys = profile, where, keys
+            # What it is showing was drawn from the field that has just been
+            # replaced, so it no longer describes it.
+            strip.shown = None
 
     def image(self, strip: _Strip, channels: tuple):
         """What one strip looks like under `channels`, as a PIL image."""
