@@ -167,14 +167,23 @@ def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
     return out
 
 
-def _mix(a: tuple, b: tuple, amount: float) -> str:
+def _lerp(a: tuple, b: tuple, amount: float) -> tuple:
     amount = max(0.0, min(1.0, amount))
-    return hex_of(tuple(x + (y - x) * amount
-                        for x, y in zip(a, b, strict=True)))
+    return tuple(x + (y - x) * amount for x, y in zip(a, b, strict=True))
 
 
-def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[str]:
-    """Neighbouring hues from the song colour, closed into a seamless ring."""
+def _mix(a: tuple, b: tuple, amount: float) -> str:
+    return hex_of(_lerp(a, b, amount))
+
+
+def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[tuple]:
+    """Neighbouring hues from the song colour, closed into a seamless ring.
+
+    Kept as RGB tuples rather than hex. These are never drawn as they stand —
+    every frame mixes them against the backdrop — so formatting them here only
+    bought a `rgb_of` per segment per frame to parse them straight back, which
+    is 210 round trips a frame on the default panel for no gain.
+    """
     base = tuple(channel / 255 for channel in rgb_of(palette.beam))
     hue, saturation, value = colorsys.rgb_to_hsv(*base)
     saturation = max(0.28, saturation)
@@ -187,7 +196,8 @@ def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[str]:
         turn = index / steps * len(anchors)
         left = int(turn) % len(anchors)
         amount = turn - int(turn)
-        out.append(_mix(anchors[left], anchors[(left + 1) % len(anchors)], amount))
+        out.append(_lerp(anchors[left], anchors[(left + 1) % len(anchors)],
+                         amount))
     return out
 
 
@@ -205,19 +215,44 @@ class Beam:
         self._halo_items: list[int] = []
         self._shades: list[str] = []
         self._halo_shades: list[str] = []
-        self._core_width = max(1.0, CORE_WIDTH * scale * self.intensity)
-        self._halo_width = max(self._core_width, HALO_WIDTH * scale * self.intensity)
         self._core_tag = f"beam-core-{id(self)}"
         self._halo_tag = f"beam-halo-{id(self)}"
-        self._width_state = None
         self._gradient: list[str] = []
-        self._aurora: list[str] = []
+        self._aurora: list[tuple] = []
+        self._halos: dict[str, str] = {}
         self._palette = None
+        self.set_scale(scale)
         self.reshape(width, height, radius)
+
+    def set_scale(self, scale: float) -> None:
+        """Re-derive the line widths for a window whose scale changed.
+
+        Deliberately not folded into `reshape`, and not called from it: only
+        the caller knows whether the scale moved. `reshape` runs once a frame
+        through the collapse animation, where the geometry changes every frame
+        and the scale never does.
+
+        Until this existed the widths were fixed at construction, so after a
+        Ctrl+Alt+plus the ring carried the new geometry at the old thickness —
+        half as thick as it should be at 2.0, nearly twice at 0.6 — and since
+        `reshape` insets the path by `_halo_width / 2`, the ring also sat wrong
+        against a corner radius that had scaled properly.
+        """
+        self.scale = scale
+        self._core_width = max(1.0, CORE_WIDTH * scale * self.intensity)
+        self._halo_width = max(self._core_width, HALO_WIDTH * scale * self.intensity)
+        # The pulsed width only reaches the canvas when the level crosses a
+        # quartile, so without this the new base widths would wait for the
+        # music to happen to change band before showing up.
+        self._width_state = None
 
     def reshape(self, width: int, height: int, radius: int) -> None:
         """Lay the ring out again, for a window that changed size."""
         self.destroy()
+        # Fresh segments are created at the base width, so the pulse has to be
+        # reasserted; otherwise a ring rebuilt mid-song stays unpulsed until
+        # the level next crosses a quartile.
+        self._width_state = None
         points = _rounded_path(width, height, radius, self._halo_width / 2)
         segments = [(start, points[(i + 1) % len(points)])
                     for i, start in enumerate(points)]
@@ -229,13 +264,18 @@ class Beam:
                                            fill="#000000", capstyle="round",
                                            tags=(self._halo_tag,))
             self._halo_items.append(halo)
-            self._halo_shades.append("#000000")
+            # The empty string, not the fill just given, because `_paint` now
+            # takes an unchanged core shade as proof the halo is unchanged too.
+            # Seeding both with "#000000" made that a lie for any backdrop that
+            # is not black: the core would match on the first frame and the
+            # halo would be left at the creation fill for good.
+            self._halo_shades.append("")
         for start, end in segments:
             core = self.canvas.create_line(*start, *end, width=self._core_width,
                                            fill="#000000", capstyle="round",
                                            tags=(self._core_tag,))
             self._items.append(core)
-            self._shades.append("#000000")
+            self._shades.append("")
 
     def destroy(self) -> None:
         for item in (*self._items, *self._halo_items):
@@ -258,6 +298,10 @@ class Beam:
             self._palette = palette
             self._gradient = _gradient(palette)
             self._aurora = _aurora_colours(palette)
+            # The halo memo is keyed on the core shade alone, so it is only
+            # valid for one backdrop. It dies with the gradient it was built
+            # against.
+            self._halos = {}
             self._shades = [""] * len(self._items)   # force a full repaint
             self._halo_shades = [""] * len(self._items)
 
@@ -282,8 +326,8 @@ class Beam:
             strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
             for i, item in enumerate(self._items):
                 turn = (i / count + self._phase) % 1.0
-                colour = rgb_of(self._aurora[int(turn * len(self._aurora))
-                                             % len(self._aurora)])
+                colour = self._aurora[int(turn * len(self._aurora))
+                                      % len(self._aurora)]
                 wave = 0.72 + 0.28 * math.cos(2 * math.pi * (turn - self._phase))
                 shade = _mix(tuple(palette.backdrop), colour, strength * wave)
                 self._paint(i, item, shade, palette)
@@ -318,10 +362,33 @@ class Beam:
 
     def _paint(self, index: int, item: int, shade: str, palette) -> None:
         """Paint the crisp ring and its quieter field only when either changed."""
-        if shade != self._shades[index]:
-            self.canvas.itemconfigure(item, fill=shade)
-            self._shades[index] = shade
-        halo = _mix(tuple(palette.backdrop), rgb_of(shade), HALO_KEEP)
+        if shade == self._shades[index]:
+            # The halo is a pure function of the core shade and the backdrop,
+            # and a backdrop only changes with the palette, which forces a full
+            # repaint above — so an unchanged shade cannot want a changed halo.
+            # The Tcl writes were already guarded; the *arithmetic* was not, and
+            # a comet leaves 86% of the ring alone (TAIL = 0.14). Those segments
+            # each paid rgb_of + a three-channel mix + a str.format every frame
+            # to arrive back at the string already on the canvas: about 10,500
+            # discarded formats a second at 60 Hz on the default panel, and it
+            # grows with the perimeter.
+            return
+        self.canvas.itemconfigure(item, fill=shade)
+        self._shades[index] = shade
+        halo = self._halos.get(shade)
+        if halo is None:
+            # Bounded by construction for the comet and the shine, which only
+            # ever hand over one of the gradient's 96 entries — measured 95 and
+            # 69 distinct shades across five minutes at 60 Hz. The aurora mixes
+            # its own shade per segment and per level and has no such ceiling:
+            # 13,307 over the same five minutes. So the memo is dropped whole
+            # rather than left to creep. A clear every couple of minutes costs
+            # the aurora a few hundred rebuilt entries and nothing else; the
+            # other two styles never reach it.
+            if len(self._halos) > 4096:
+                self._halos.clear()
+            halo = self._halos[shade] = _mix(tuple(palette.backdrop),
+                                             rgb_of(shade), HALO_KEEP)
         if halo != self._halo_shades[index]:
             self.canvas.itemconfigure(self._halo_items[index], fill=halo)
             self._halo_shades[index] = halo
