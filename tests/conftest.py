@@ -87,6 +87,7 @@ def overlay(_overlay_once):
     o.lyrics = None
     o.offset = 0.0
     o._awaiting_seek = None
+    o._static_mount_pending = False
     o._card_text = o._card_raw = o._card_measured = None
     o._shown = o._loading = A.Track(searched=True)
     o._worker_results = queue.SimpleQueue()

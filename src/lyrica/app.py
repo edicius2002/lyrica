@@ -249,6 +249,16 @@ CONTEXT = 1
 # not crossed by accident.
 SIZE_STEP = 0.1
 
+# How long the size has to stand still before it is written down. `save_size` is
+# a read-modify-write of the whole settings file — `read_text`, `json.loads`,
+# `json.dumps`, `write_text` — done synchronously inside the render tick, and
+# `cache_root` deliberately allows that file to live in a synced folder, where a
+# sync client or an antivirus turns a sub-millisecond write into tens of them.
+# Folding a burst already spared the presses inside one tick; this spares the
+# bursts, so holding the key down writes once, when the hand stops. Longer than
+# a comfortable key repeat and short enough that nobody quits inside it.
+SIZE_SETTLE_MS = 700
+
 # The border runs at the same rate as the lyric sweep. It was 30 Hz while the
 # loop could not keep an even 30 — measured at 22, with frames landing 2 ms
 # apart from where they belonged. Now that the scheduler holds a millisecond,
@@ -497,6 +507,12 @@ class Overlay:
         self._card_width = 0
         self._card_raw = None
         self._awaiting_seek = None
+        self._static_mount_pending = False
+        self._scale_gliding = False
+        # A size chosen but not yet written down, and the timer that will write
+        # it. See `_remember_size_later`.
+        self._size_unsaved: float | None = None
+        self._size_save_after: str | None = None
         self._hidden = False
         self._closing = False
         self._lyrics_state = LYRICS_UNKNOWN
@@ -534,6 +550,9 @@ class Overlay:
         self._outgoing_fade_at: float | None = None
         self._lyrics_fade_at: float | None = None
         self._lyrics_reveal_pending = False
+        # The scene state the last wash was painted over. See
+        # `_hold_text_scene_washed`.
+        self._presented_scene: tuple | None = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -636,20 +655,43 @@ class Overlay:
         # Several spellings per direction because which one arrives depends on
         # the keyboard — `plus` needs Shift on most layouts, so `equal` is the
         # key under the finger, and the numeric pad sends its own names again.
-        for sequence in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+        #
+        # `<Control-plus>` and `<Control-minus>` are deliberately not among
+        # them. They are the whole-second nudge bound above, and `bind` replaces
+        # rather than adds, so listing them here quietly took that nudge away:
+        # the combination the README documents as a whole second of sync resized
+        # the panel instead, and a whole second was unreachable. Splitting them
+        # by name is the rule that keeps holding — `plus` and `minus` are the
+        # offset, with Control and without it, and every other spelling is the
+        # size — and it costs the size keys nothing that Control is not already
+        # a modifier for: `Ctrl` `=` is still the key under the finger going up,
+        # and the pad still covers both directions on any layout.
+        for sequence in ("<Control-equal>", "<Control-KP_Add>"):
             self.root.bind(sequence, lambda e: self._resize(+SIZE_STEP))
-        for sequence in ("<Control-minus>", "<Control-underscore>",
-                         "<Control-KP_Subtract>"):
+        for sequence in ("<Control-underscore>", "<Control-KP_Subtract>"):
             self.root.bind(sequence, lambda e: self._resize(-SIZE_STEP))
         self.root.bind("<Control-0>", lambda e: self._resize_to(1.0))
+
+    # What a size request means, as (absolute size, step). A base of `None` is
+    # "from wherever the panel is now"; `reset` is the one that names a size
+    # outright, which is why it cancels whatever was asked for before it in the
+    # same burst. Kept apart from `ACTIONS` because these are folded rather than
+    # dispatched — see `_drain_actions`.
+    SIZE_ACTIONS: ClassVar[dict] = {
+        "bigger": (None, +SIZE_STEP),
+        "smaller": (None, -SIZE_STEP),
+        "reset": (1.0, 0.0),
+    }
 
     ACTIONS: ClassVar[dict] = {
         "toggle": lambda self: self._toggle_visible(),
         "quit": lambda self: self._close(),
-        "bigger": lambda self: self._resize(+SIZE_STEP),
-        "smaller": lambda self: self._resize(-SIZE_STEP),
-        "reset": lambda self: self._resize_to(1.0),
         "autostart": lambda self: self._toggle_autostart(),
+        # Named with nothing to call. This table is also the list of actions the
+        # shortcut table and the tray menu are checked against, so the size ones
+        # have to appear in it; giving them a handler as well would be a second
+        # definition of a size step that nothing ever reaches.
+        **dict.fromkeys(SIZE_ACTIONS),
     }
 
     def _close(self) -> None:
@@ -662,6 +704,13 @@ class Overlay:
         request is recorded here and acted on at the top of the loop, where
         nothing follows it.
         """
+        # Before the loop stops, because the deferred write is scheduled on that
+        # loop: a size chosen and then quit within `SIZE_SETTLE_MS` would have
+        # its timer destroyed along with the root and be forgotten. Losing the
+        # last size on exit is the one regression deferring it could cause, so
+        # every way out flushes — here for the ordinary quit, and again after
+        # `mainloop` returns for the ways that never reach this method.
+        self._flush_size()
         self._closing = True
 
     def _drain_actions(self) -> None:
@@ -671,12 +720,43 @@ class Overlay:
         can do. Drained on the tick rather than delivered from the threads that
         produced them: everything these touch is a Tk widget, and Tk is only
         safe on the thread that made it.
+
+        The size requests in a burst are folded into one. A poll hands back
+        everything that has queued since the last tick, and each step used to be
+        a whole `_apply_scale` — a settings write, a new clip region, the ring
+        rebuilt, every view destroyed and the cover derived again, 35-45 ms —
+        with no frame drawn between them, so N presses painted N-1 sizes that
+        nobody could see. Crossing 0.6 to 2.0 is fourteen of them: half a second
+        of a panel that does not answer, for one visible result.
+
+        Everything else keeps the order it was pressed in, and a pending size
+        goes in before it rather than being carried past it, so a burst still
+        happens in the sequence it was asked for.
         """
+        base: float | None = None       # named by `reset`, which cancels the rest
+        step = 0.0
+
+        def apply_size() -> None:
+            nonlocal base, step
+            if base is None and step == 0.0:
+                return
+            self._resize_to((self._size if base is None else base) + step)
+            base, step = None, 0.0
+
         for source in (self.hotkeys, self.tray):
             for action in source.poll():
+                size = self.SIZE_ACTIONS.get(action)
+                if size is not None:
+                    if size[0] is None:
+                        step += size[1]
+                    else:
+                        base, step = size
+                    continue
                 handler = self.ACTIONS.get(action)
                 if handler:
+                    apply_size()
                     handler(self)
+        apply_size()
 
     def _toggle_autostart(self) -> None:
         state = autostart.set_enabled(not autostart.enabled())
@@ -726,10 +806,17 @@ class Overlay:
         """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
-        # Measured once per pair of strings. `measure` is a round trip into Tk
-        # for an answer that cannot change while the words do not, and this runs
-        # on every frame of a resize.
-        key = (title, artists)
+        # Measured once per pair of strings at a given scale. `measure` is a
+        # round trip into Tk for an answer that cannot change while the words
+        # and the font do not, and this runs on every frame of a resize — where
+        # the scale is fixed, so the short-circuit still holds through one.
+        #
+        # The scale is in the key rather than invalidated from `_apply_scale`,
+        # because a cache only the resize path knows to clear is a cache that
+        # will one day be missed, and this one was: `_apply_scale` dropped the
+        # other two card caches and never this one, so every resize centred the
+        # card on a width measured at the previous font.
+        key = (title, artists, self.chrome.scale)
         if key != self._card_measured:
             self._card_measured = key
             self._card_width = max(title_font.measure(title),
@@ -966,7 +1053,8 @@ class Overlay:
         # Nothing cancels now: the window stays where it is and unfolds to the
         # right, and the only thing moving is the card finding its place.
         self._collapse = (self.width, self.height, *target, time.monotonic(),
-                          self.root.winfo_x(), self.root.winfo_y())
+                          self.root.winfo_x(), self.root.winfo_y(),
+                          self.chrome.scale)
         # One region for the whole move, big enough for either end of it. A
         # region wider than the window clips nothing, so the panel is never cut
         # short of itself; the corners are square while it travels and rounded
@@ -978,29 +1066,52 @@ class Overlay:
         """Move one frame along the collapse. True while it is still going."""
         if self._collapse is None:
             return False
-        from_w, from_h, to_w, to_h, started, left, top = self._collapse
+        from_w, from_h, to_w, to_h, started, left, top, from_scale = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
+        # The ring is the one thing that can follow a scale the whole way. Its
+        # widths and its corner are arithmetic, so they take the same curve the
+        # window does; the text cannot, because Tk font sizes are integers and
+        # the staircase that produces is the reason word growth is drawn from
+        # images in the first place. So the border travels and the words wait.
+        radius = None
+        if from_scale != self.chrome.scale:
+            live = from_scale + (self.chrome.scale - from_scale) * t
+            radius = max(1, round(chrome_mod.CORNER_RADIUS * live))
+            if self.beam is not None:
+                self.beam.set_scale(live)
         self._resize_window(round(from_w + (to_w - from_w) * t),
                             round(from_h + (to_h - from_h) * t), settling=done,
-                            anchor=(left, top))
+                            anchor=(left, top), radius=radius)
         if not done:
             return True
         self._collapse = None
+        self._scale_gliding = False
         return False
 
     def _resize_window(self, width: int, height: int,
                        settling: bool = True,
-                       anchor: tuple | None = None) -> None:
+                       anchor: tuple | None = None,
+                       radius: int | None = None) -> None:
         """Put the window at a size, keeping the card exactly where it is.
 
         The top edge and the horizontal centre are held. The card lives at the
         top, so anchoring there means the one thing still on screen does not
         move while everything below it goes away.
+
+        `radius` is the corner the ring is drawn to, for a move that is also
+        changing scale; the panel's own corner comes from the clip region and
+        is square for the whole of a move anyway.
         """
-        if (width, height) == (self.width, self.height):
+        if (width, height) == (self.width, self.height) and not settling \
+                and radius is None:
+            # Two frames of a curve can round to the same pixel. Skipping the
+            # work is right for a move that is only travelling, and wrong for
+            # the frame that lands — that one still owes the window its exact
+            # clip region — and wrong while a scale is moving, which changes
+            # the ring even when the window has not caught up.
             return
         old_centre = (self.root.winfo_x() + self.width // 2,
                       self.root.winfo_y() + self.height // 2)
@@ -1034,7 +1145,8 @@ class Overlay:
         # were what took a resize frame to 30.8 ms against a budget of 16.
         if self.beam is not None:
             self.beam.reshape(width, height,
-                              self.chrome.px(chrome_mod.CORNER_RADIUS))
+                              self.chrome.px(chrome_mod.CORNER_RADIUS)
+                              if radius is None else radius)
         if settling:
             # `SetWindowRgn` repaints the whole window synchronously and is most
             # of that cost on its own. It cannot simply be left stale either,
@@ -1101,17 +1213,59 @@ class Overlay:
         if abs(size - self._size) < 1e-6:
             return          # already at the limit; rebuilding would only flicker
         self._size = size
-        config.save_size(size)
-        self._apply_scale()
+        self._remember_size_later(size)
+        self._apply_scale(glide=True)
 
-    def _apply_scale(self) -> None:
+    def _remember_size_later(self, size: float) -> None:
+        """Write the chosen size down once the size stops changing.
+
+        Same rule as the window position, which `config` states in as many
+        words: settings are written when a hand stops moving rather than in a
+        loop. A drag has a button release to say when that is; the size keys
+        have nothing, so the timer is restarted by each press and only the press
+        nobody follows gets as far as the disk.
+
+        `save_size` itself is unchanged and still the only writer — what moves
+        is when it runs, off the render tick, where a settings file in a synced
+        folder was charging the frame for someone else's I/O.
+        """
+        self._size_unsaved = size
+        if self._size_save_after is not None:
+            self.root.after_cancel(self._size_save_after)
+        self._size_save_after = self.root.after(SIZE_SETTLE_MS, self._flush_size)
+
+    def _flush_size(self) -> None:
+        """Write a size that is still owed to the disk, if there is one.
+
+        Safe to call twice and safe to call with the root already gone: it
+        cancels its own timer and touches nothing but `config`.
+        """
+        if self._size_save_after is not None:
+            try:
+                self.root.after_cancel(self._size_save_after)
+            except tk.TclError:         # the interpreter is already gone
+                pass
+            self._size_save_after = None
+        if self._size_unsaved is None:
+            return
+        size, self._size_unsaved = self._size_unsaved, None
+        config.save_size(size)
+
+    def _apply_scale(self, glide: bool = False) -> None:
         """Rebuild every measurement against the new scale.
 
         Everything the layout knows is derived from `chrome.px()` and the
         scaled fonts, so this recomputes exactly the same things `__init__`
         did — which is the reason it can be this short, and the reason to keep
         the two lists next to each other if either ever grows.
+
+        `glide` hands the window and the ring to the collapse animation
+        instead of putting them at the new size outright. Only those two can
+        take the journey: they are arithmetic, and the ring is cheap to relay
+        now that it is pooled rather than rebuilt. The words cannot, so they
+        are rebuilt once when it lands.
         """
+        was = (self.width, self.height, self.chrome.scale)
         scale = self._dpi_scale * self._size
         self.chrome = replace(self.chrome, scale=scale)
 
@@ -1147,37 +1301,68 @@ class Overlay:
         # flight is abandoned: it was interpolating toward a size from the old
         # scale, and its destination no longer exists.
         self._collapse = None
-        self.width, self.height = self._target_size()
-        self.anchor_y = self.height * ANCHOR
+        target = self._target_size()
 
         # Grow or shrink from the last place the user chose: horizontal centre
         # and top edge. The old on-screen centre selects the current monitor;
         # the saved place remains the anchor even when a larger size has to be
         # temporarily clamped at an edge.
         x, y = chrome_mod.place_in_monitor(
-            self.root, place, (self.width, self.height), old_centre)
-        chrome_mod.place(self.root, x, y, self.width, self.height)
-        self.canvas.configure(width=self.width, height=self.height)
-        # After the geometry, never before: the clip region is in device pixels
-        # and does not track the window, so applying it early clips the window
-        # to whatever size it used to be.
-        self.root.update_idletasks()
-        chrome_mod.shape(self.root, self.chrome, self.width, self.height)
-        # The ring is laid out once for a size and only recoloured after that,
-        # so a scale change leaves it tracing the previous window: inset well
-        # inside the panel after growing, clipped off the edge after shrinking.
-        if self.beam is not None:
-            self.beam.reshape(self.width, self.height,
-                              self.chrome.px(chrome_mod.CORNER_RADIUS))
+            self.root, place, target, old_centre)
+        if glide and target != was[:2]:
+            # Landed on the same corner it would have jumped to, so the move
+            # arrives exactly where the jump did and nothing drifts. One region
+            # for the whole of it, big enough for either end — the same trick
+            # `_retarget_size` uses, and the reason the panel's own corners are
+            # square while it travels. The ring keeps its rounded ones, and is
+            # now the only thing drawing them.
+            chrome_mod.shape(self.root, self.chrome,
+                             max(was[0], target[0]), max(was[1], target[1]))
+            self._collapse = (*was[:2], *target, time.monotonic(), x, y, was[2])
+            # Nothing is written into the column while it travels. The lines
+            # below have already been destroyed for the new fonts, and letting
+            # the next tick lay them out again would put text sized for the
+            # window it is going to inside the window it is still in: growing,
+            # a line was wider than the panel carrying it and hung out past the
+            # border for the whole of the move.
+            self._scale_gliding = True
+        else:
+            self.width, self.height = target
+            self.anchor_y = self.height * ANCHOR
+            chrome_mod.place(self.root, x, y, self.width, self.height)
+            self.canvas.configure(width=self.width, height=self.height)
+            # After the geometry, never before: the clip region is in device
+            # pixels and does not track the window, so applying it early clips
+            # the window to whatever size it used to be.
+            self.root.update_idletasks()
+            chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+            # The ring is laid out once for a size and only recoloured after
+            # that, so a scale change leaves it tracing the previous window:
+            # inset well inside the panel after growing, clipped off the edge
+            # after shrinking.
+            #
+            # The widths come first because `reshape` insets the path by half
+            # the halo, so a ring relaid before its thickness is known traces
+            # the right outline at the wrong offset from a corner radius that
+            # already scaled.
+            if self.beam is not None:
+                self.beam.set_scale(self.chrome.scale)
+                self.beam.reshape(self.width, self.height,
+                                  self.chrome.px(chrome_mod.CORNER_RADIUS))
 
         self.canvas.itemconfigure(self._title_item, font=self.f_title)
         self.canvas.itemconfigure(self._artist_item, font=self.f_artist)
-        # Both card caches, and the second one is not optional. The card is
+        # Both text caches, and the second one is not optional. The card is
         # only laid out again when its *text* changes, so invalidating the
         # fitted text alone leaves a resize where the text happens to come out
         # identical — which is most of them — holding its old coordinates while
         # the cover is rebuilt at the new size and placed into them. Measured at
         # 1.4x: the title started 20 px inside the cover.
+        #
+        # There is a third card cache, the measured width, and it is *not*
+        # cleared here on purpose: it is keyed by the scale, so a resize misses
+        # it without anyone having to remember this line. Listing it here as
+        # well would only give the same fault two places to be forgotten in.
         self._card_raw = None
         self._card_text = None
 
@@ -1194,13 +1379,24 @@ class Overlay:
         self._relay_hold.clear()
         self._incoming_fades.clear()
         self.line_index = -1
+        # The promise the line above makes — that the next tick puts them back —
+        # is only kept while the transport is moving. Paused, `render_lyrics` is
+        # gated off and nothing else rebuilds a column that has not changed
+        # scene, so a size change left the words gone until playback resumed or
+        # the song did. The tick is the only place that knows whether it is
+        # going to render; this just tells it there is nothing left on screen.
+        self._static_mount_pending = True
 
         # The cover has to be re-derived: both images were built for the old
         # window. Inline rather than on a thread — it measures ~18 ms, and this
         # is a keypress rather than a track change, so there is a hand waiting
         # for it and nothing else in flight.
         self._reshape_art()
-        logger.info("overlay size %.2f (%dx%d)", self._size, self.width, self.height)
+        # The size it is going to, which during a glide is not the size it is:
+        # the window is still the old one until the animation has walked it
+        # there, and a log that named the old one read as the press having done
+        # nothing.
+        logger.info("overlay size %.2f (%dx%d)", self._size, *target)
 
     # --- lyrics ---
     def _track_for_result(self, gen: int) -> Track | None:
@@ -2153,6 +2349,60 @@ class Overlay:
         # remain fully visible during the relay and disappear only now.
         return moving or settled or relay_finished
 
+    def _seat_preview_below_active(self, index: int, view: LineView) -> bool:
+        """Seat the upcoming row at its slot and cap the active row above it.
+
+        One implementation for the two places that need it: the collision guard
+        inside the glide step, and the frame-boundary contract at the end of the
+        tick. They carried near-identical copies that differed on a single line
+        — where the preview is pinned — so whichever ran last silently decided
+        the frame, and which one that was depended on whether the scene happened
+        to be stable. The resting target wins, because that is the answer the
+        frame-boundary contract was already imposing on every ordinary frame.
+
+        Resolve the overlap by advancing the active row upward, never by
+        ejecting the preview below the canvas. True once the two glyph boxes are
+        clear of each other. A row that is still gliding is never jumped: the
+        preview waits dissolved until the rise has cleared it, and that is the
+        separation `_present_incoming_preview` starts its entrance fade on.
+
+        Both callers run in an ordinary frame, and neither is the redundant one
+        — checked, because a second call that is a no-op by construction looks
+        like one that can go:
+
+        * They cover different frames. The glide step is inside `render_lyrics`,
+          so it does not run at all while playback is paused or the scene was
+          mounted statically; the frame contract does, and is the only seating
+          those frames get. The contract in turn is gated on a stable scene, so
+          it does not run while any presentation fade is in flight; the glide
+          step does, and is the only seating *those* frames get.
+        * The order matters inside the glide step. Capping the active row is
+          what the two separation loops below then chain their spans off, so
+          seating after them instead of before would space every other row
+          against an active row that has not been capped yet.
+        * The scene can change between them without anything having moved.
+          `_restyle` runs in between and sets each row's growth, and
+          `glyph_padding` is derived from it, so two boxes clear of each other
+          at the glide step can be overlapping by the frame boundary.
+
+        The repeat is cheap where it is redundant, which is what makes leaving
+        it right: every step here is arithmetic on numbers already held, and
+        `move_to` returns without touching the canvas when the distance rounds
+        to zero. A settled frame therefore costs no Tcl at all.
+        """
+        view.move_to(self._safe_view_y(view, self._targets.get(index, view.y)))
+        active = self._views.get(self.line_index)
+        if active is None:
+            return True
+        active.move_to(self._safe_view_y(active, active.y))
+        active_bottom = active.glyph_vertical_span()[1]
+        preview_top = view.glyph_vertical_span()[0]
+        if active_bottom > preview_top and self.line_index not in self._glides:
+            active.move_to(self._safe_view_y(
+                active, active.y - math.ceil(active_bottom - preview_top)))
+            active_bottom = active.glyph_vertical_span()[1]
+        return active_bottom <= preview_top
+
     def _keep_gliding_rows_apart(self) -> None:
         """Keep staggered row trajectories from crossing the active row.
 
@@ -2168,22 +2418,13 @@ class Overlay:
         active_at = ordered.index(self.line_index)
         active = self._views[self.line_index]
 
-        # The active row and the next chronological row are both mandatory.
-        # A new active row begins where it used to wait, at the lower slot, and
-        # the newly created preview begins there too.  Resolve that temporary
-        # collision by advancing the active row upward, never by ejecting the
-        # preview below the canvas.  The glide catches up naturally from this
-        # bounded position on subsequent frames.
+        # The active row and the next chronological row are both mandatory, and
+        # a new active row begins where it used to wait — at the lower slot the
+        # newly created preview is also born into.
         incoming_index = self.line_index + 1
         incoming = self._views.get(incoming_index)
         if incoming is not None and self._is_incoming_context(incoming_index):
-            active.move_to(self._safe_view_y(active, active.y))
-            incoming.move_to(self._safe_view_y(incoming, incoming.y))
-            active_bottom = active.glyph_vertical_span()[1]
-            incoming_top = incoming.glyph_vertical_span()[0]
-            if active_bottom > incoming_top and self.line_index not in self._glides:
-                overlap = math.ceil(active_bottom - incoming_top)
-                active.move_to(self._safe_view_y(active, active.y - overlap))
+            self._seat_preview_below_active(incoming_index, incoming)
 
         lower_top = active.glyph_vertical_span()[0]
         for index in reversed(ordered[:active_at]):
@@ -2204,21 +2445,95 @@ class Overlay:
                 view.move_to(wanted)
             upper_bottom = view.glyph_vertical_span()[1]
 
+    def _text_scene_views(self) -> list:
+        """Every row a presentation fade owns, the backing vocal included."""
+        views = list(self._views.values())
+        if self._echo is not None:
+            views.append(self._echo)
+        return views
+
+    @staticmethod
+    def _text_scene_state(views: list) -> tuple:
+        """What decides the colour Tk is currently holding for every glyph.
+
+        A `LineView` writes a glyph's fill only when its own `_state` changes:
+        `show_inactive` and `show_sweep` both return early otherwise, and
+        `set_palette` and `set_active` clear that state rather than repainting.
+        So an unchanged `_state`, over an unchanged palette and an unchanged
+        count of items, says nothing has touched a fill since this was last
+        read — which is what lets a constant progress be applied once instead
+        of once per frame.
+
+        The views go in by object rather than by `id`, so a row rebuilt at the
+        address of the one it replaced cannot pass for it.
+        """
+        return tuple((view, view._state, view.palette.backdrop,
+                      len(view._items), len(view._outline))
+                     for view in views)
+
+    def _hold_text_scene_washed(self) -> None:
+        """Keep the scene at the backdrop while the panel expands into it.
+
+        The expansion runs for `COLLAPSE_MS`, about twenty frames, and asked
+        for progress 0.0 on every one of them — the same colour written to the
+        same ~180 glyphs and their outline rings, twenty times, sharing the
+        frame with the most expensive thing the app does. Applied once now, and
+        again only when a renderer has actually repainted something.
+        """
+        if self._presented_scene == self._text_scene_state(
+                self._text_scene_views()):
+            return
+        self._fade_text_scene(0.0)
+
     def _fade_text_scene(self, progress: float) -> None:
         """Present every lyric glyph between the wash and its true colour."""
         # `entry[3]` remains the renderer's target colour. Only the colour sent
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
-        views = list(self._views.values())
-        if self._echo is not None:
-            views.append(self._echo)
+        #
+        # Two savings, because a scene is a great many items: three rows of
+        # sixty characters is ~180 texts, and in keyed mode each character
+        # carries a ring of outline copies as well, so the same frame is well
+        # over a thousand more.
+        #
+        # `_between` parses a hex colour and formats another, and it was asked
+        # once per item for an answer that depends only on the target colour.
+        # A frame holds a handful of those — the ramp's two ends, whatever the
+        # feather is passing through, `palette.side`, the outline's black — so
+        # it is memoised for the length of the call.
+        #
+        # And when every glyph of a row lands on the same presented colour it
+        # is written by the row's own tag in one Tcl call rather than one per
+        # item. That is not the rare case: it is every inactive row, and it is
+        # every frame of a wash, where the blend collapses to the backdrop
+        # whatever each glyph was heading for. Same trick, and the same reason,
+        # as `present_inactive` and `set_visible` inside `LineView`.
+        canvas = self.canvas
+        views = self._text_scene_views()
         for view in views:
+            backdrop = view.palette.backdrop
+            shown: dict[str, str] = {}
             for entry in view._items:
-                self.canvas.itemconfigure(
-                    entry[2], fill=_between(view.palette.backdrop, entry[3], progress))
-            for item in view._outline:
-                self.canvas.itemconfigure(
-                    item, fill=_between(view.palette.backdrop, OUTLINE_COLOUR, progress))
+                target = entry[3]
+                if target not in shown:
+                    shown[target] = _between(backdrop, target, progress)
+            presented = set(shown.values())
+            if len(presented) == 1:
+                canvas.itemconfigure(view._text_tag, fill=presented.pop())
+            elif presented:
+                for entry in view._items:
+                    canvas.itemconfigure(entry[2], fill=shown[entry[3]])
+            if view._outline:
+                # Every copy in the ring is the same black at the same
+                # progress, so there is nothing here to iterate at all.
+                canvas.itemconfigure(
+                    view._outline_tag,
+                    fill=_between(backdrop, OUTLINE_COLOUR, progress))
+        # Only 0.0 is ever held for more than a frame, so that is the only one
+        # worth remembering; anything else recorded here would be compared
+        # against once and never match.
+        self._presented_scene = (
+            self._text_scene_state(views) if progress == 0.0 else None)
 
     def _advance_fade(self, started: float | None, duration: float,
                       *, appearing: bool) -> tuple[bool, float | None]:
@@ -2412,13 +2727,34 @@ class Overlay:
         paused_current = (
             snap.ok and not snap.playing and self._shown.snapshot.ok
             and snap.track_key() == self._shown.snapshot.track_key())
-        static_mounted = scene_changed and paused_current
+        # A resize asks for exactly what a promotion asks for: the whole scene
+        # built again, at the size and font it has now. Consumed whatever the
+        # answer is, because a live transport rebuilds through the render below
+        # and a mount would only be the same frame twice.
+        gliding = self._scale_gliding and self._collapse is not None
+        # Held, not spent, while the panel is still travelling: mounting now
+        # would build the scene into a window that is not the one it was sized
+        # for. Read against the collapse as well as the flag, so a glide that
+        # ended by any road other than its own last frame cannot strand it.
+        rescaled = self._static_mount_pending and not gliding
+        if not gliding:
+            self._static_mount_pending = False
+        static_mounted = (scene_changed or rescaled) and paused_current
         if static_mounted:
             self._mount_static_lyrics(snap)
         elif live_transport:
             if self._advance_beam():
                 interval = BEAM_TICK_MS
             self._retarget_size()
+            if self._advance_collapse():
+                interval = FAST_TICK_MS
+            self._refit_views()
+        if self._collapse is not None and not live_transport:
+            # A size the keyboard asked for still has to arrive when nothing is
+            # playing. Until a resize could arm one, the only thing that did was
+            # a track changing, so reaching this exclusively through the live
+            # branch cost nothing; now a panel paused halfway through a move
+            # stays halfway through it, which is worse than never having moved.
             if self._advance_collapse():
                 interval = FAST_TICK_MS
             self._refit_views()
@@ -2434,7 +2770,7 @@ class Overlay:
         lyr = self.lyrics
         lyrics_revealing = (
             self._lyrics_reveal_pending or self._lyrics_fade_at is not None)
-        render_lyrics = (not static_mounted
+        render_lyrics = (not static_mounted and not gliding
                          and (live_transport or late_reveal or lyrics_revealing))
         if render_lyrics and lyr is not None and lyr.synced and lyr.lines:
             self._settle_cuts(lyr, snap)
@@ -2517,8 +2853,9 @@ class Overlay:
             if self._lyrics_reveal_pending:
                 # The renderer updates true target colours on every frame;
                 # overwrite only their presentation colour until the resize
-                # has completely settled.
-                self._fade_text_scene(0.0)
+                # has completely settled. Only when it has actually updated
+                # one, though — see `_hold_text_scene_washed`.
+                self._hold_text_scene_washed()
                 if live_transport and self._collapse is not None:
                     interval = FAST_TICK_MS
             elif self._advance_lyrics_fade():
@@ -2551,23 +2888,9 @@ class Overlay:
             return False
         # Final-frame geometry contract.  The collision guard runs earlier in
         # the tick, but a newly active view and a newly created preview share
-        # the lower slot and later layout work can displace the preview again.
-        # Pin the preview to its safe resting target, then cap the active row
-        # immediately above it.  Once settled both calls are no-ops.
-        target = self._targets.get(incoming_index, incoming.y)
-        incoming.move_to(self._safe_view_y(incoming, target))
-        active = self._views.get(self.line_index)
-        if active is not None:
-            active.move_to(self._safe_view_y(active, active.y))
-            active_bottom = active.glyph_vertical_span()[1]
-            incoming_top = incoming.glyph_vertical_span()[0]
-            # Repair settled geometry, but never jump a row that is already
-            # gliding. While it rises, the preview below waits dissolved until
-            # this exact overlap has cleared, then fades into the freed lane.
-            if active_bottom > incoming_top and self.line_index not in self._glides:
-                active.move_to(self._safe_view_y(
-                    active, active.y - math.ceil(active_bottom - incoming_top)))
-                active_bottom = active.glyph_vertical_span()[1]
+        # the lower slot and later layout work can displace the preview again,
+        # so the seating is asserted once more here. Once settled it is a no-op.
+        separated = self._seat_preview_below_active(incoming_index, incoming)
         target_colour = self._incoming_preview_colour(incoming_index, incoming)
         incoming_fades = self._incoming_fades
         marker = incoming_fades.get(incoming_index)
@@ -2576,7 +2899,6 @@ class Overlay:
         if (marker is not None and marker[0] == id(incoming)
                 and self.palette.washed):
             started = marker[1]
-            separated = active is None or active_bottom <= incoming_top
             if started is None and separated:
                 started = time.monotonic()
                 incoming_fades[incoming_index] = (id(incoming), started)
@@ -2598,6 +2920,11 @@ class Overlay:
         # changing LineView's target caches; the tag-based implementation is a
         # constant two Tcl calls regardless of how long the wrapped line is.
         incoming.present_inactive(colour)
+        # This wrote a presentation colour over the whole row without changing
+        # anything a `LineView` records, which is exactly the case
+        # `_text_scene_state` cannot see. Say so, rather than let a later wash
+        # read an unchanged scene and leave this row lit.
+        self._presented_scene = None
         return fading
 
     def _advance_beam(self) -> bool:
@@ -2733,6 +3060,12 @@ class Overlay:
             self._tick()
             self.root.mainloop()
         finally:
+            # Every exit, not only the one that goes through `_close`: the loop
+            # can also end because the root was destroyed from under it, or
+            # because it raised, and a size still owed to the disk must not
+            # leave with it. First in the block because it is the only one that
+            # writes anything down.
+            self._flush_size()
             chrome_mod.hold_timer_resolution(False)
             self.tray.stop()
             self.hotkeys.stop()

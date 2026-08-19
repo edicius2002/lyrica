@@ -316,6 +316,125 @@ def test_the_comet_ignores_the_character(tk_root):
     assert phases[0] == phases[1]
 
 
+# --- relaying the ring ------------------------------------------------------
+
+def _ring(canvas, style, width=900, height=320, scale=1.0, radius=18):
+    from lyrica import palette as pal_mod
+    from lyrica.beam import Beam
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.songcolour import NEUTRAL
+
+    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
+    return Beam(canvas, width, height, radius, scale, style), palette
+
+
+def test_reshaping_moves_the_segments_it_already_has(canvas):
+    # `reshape` runs once per frame of the collapse animation. Rebuilding the
+    # ring there spent 352 deletes and 352 creates a frame to put items back
+    # where they already were; the segment count barely moves between
+    # consecutive frames, so the items are reused and only the difference is
+    # created or deleted.
+    from lyrica.beam import SHINE
+
+    ring, _palette = _ring(canvas, SHINE)
+    before = list(ring._items), list(ring._halo_items)
+    ring.reshape(760, 217, 18)
+    kept = len(ring._items)
+    assert kept < len(before[0]), "the smaller ring should need fewer segments"
+    assert ring._items == before[0][:kept], "the cores were rebuilt, not moved"
+    assert ring._halo_items == before[1][:kept], "the halos were rebuilt"
+    # And the ones that went are really gone from the canvas, not merely
+    # dropped from the list.
+    for item in before[0][kept:] + before[1][kept:]:
+        assert not canvas.type(item)
+    ring.destroy()
+
+
+def test_a_relaid_ring_keeps_every_halo_under_every_core(canvas):
+    # The reason `reshape` creates all the halos before any of the cores: a
+    # halo is three times the width of a core, so one sitting above its
+    # neighbour's core covers the end of it and a continuous gradient reads as
+    # a dashed line at every join. Items created to grow the ring land on top
+    # of the display list, which would put the new halos over the old cores.
+    from lyrica.beam import SHINE
+
+    ring, _palette = _ring(canvas, SHINE, 620, 114)
+    for width, height in ((900, 320), (620, 114), (1100, 380)):
+        ring.reshape(width, height, 18)
+        order = {item: index for index, item in enumerate(canvas.find_all())}
+        halos = [order[item] for item in ring._halo_items]
+        cores = [order[item] for item in ring._items]
+        assert max(halos) < min(cores), "a halo climbed above a core"
+        assert halos == sorted(halos) and cores == sorted(cores)
+    ring.destroy()
+
+
+def test_a_relaid_ring_never_lies_about_what_it_painted(canvas):
+    # `_shades` and `_halo_shades` are `_paint`'s only evidence of what the
+    # canvas is carrying: an unchanged core shade is taken as proof the halo is
+    # unchanged too, and the halo write is skipped. A reused segment keeps its
+    # fill, so its entry stays true — but a segment whose fill was reset
+    # without its entry being reset would keep that stale halo for good, which
+    # is the defect the sentinel seeding was introduced to close.
+    from lyrica.beam import HALO_KEEP, SHINE, _mix
+    from lyrica.glass import rgb_of
+    from lyrica.meter import Character
+
+    ring, palette = _ring(canvas, SHINE)
+    for step, (width, height) in enumerate(
+            ((900, 320), (760, 217), (620, 114), (900, 320), (1100, 380))):
+        ring.reshape(width, height, 18)
+        ring.advance(1 / 60, Character(level=0.2 + 0.2 * step, dynamics=0.5,
+                                       rate=0.3), palette)
+        for index, core in enumerate(ring._items):
+            assert canvas.itemcget(core, "fill") == ring._shades[index]
+            want = _mix(tuple(palette.backdrop),
+                        rgb_of(ring._shades[index]), HALO_KEEP)
+            assert canvas.itemcget(ring._halo_items[index], "fill") == want, (
+                "the halo was left behind by its core")
+    ring.destroy()
+
+
+def test_a_grown_ring_wears_the_pulse_the_rest_of_it_wears(canvas):
+    # Segments are created at the base width, so a ring that grew mid-song
+    # would carry a few unpulsed segments among pulsed ones until the level
+    # next happened to cross a quartile.
+    from lyrica.beam import SHINE
+    from lyrica.meter import Character
+
+    ring, palette = _ring(canvas, SHINE, 620, 114)
+    loud = Character(level=1.0, dynamics=1.0, rate=0.3)
+    ring.advance(1 / 60, loud, palette)
+    ring.reshape(900, 320, 18)
+    ring.advance(1 / 60, loud, palette)
+    assert len({canvas.itemcget(i, "width") for i in ring._items}) == 1
+    assert len({canvas.itemcget(i, "width") for i in ring._halo_items}) == 1
+    ring.destroy()
+
+
+def test_a_bigger_window_does_not_buy_segments_it_pays_for_every_frame(canvas):
+    # `STRAIGHT_SPACING` is in physical pixels, so before it was scaled a
+    # Ctrl+Alt+plus took the default panel from 176 segments to 316 and then
+    # charged for them on every frame of `advance` for the rest of the
+    # session — measured 2.7 ms a frame against 1.7 for the shine, and 5.3
+    # against 3.3 for the comet, at 60 Hz and a 16 ms budget. The density is
+    # constant in design units instead; the corners never depended on the
+    # spacing, since they have a fixed point budget of their own.
+    from lyrica.beam import CORNER_POINTS, SHINE
+
+    counts = {}
+    for scale in (0.6, 1.0, 2.0):
+        # The same three things the window scales together: the panel, the
+        # corner radius and the ring's own thickness.
+        ring, _palette = _ring(canvas, SHINE, round(900 * scale),
+                               round(320 * scale), scale, round(18 * scale))
+        counts[scale] = len(ring._items)
+        ring.destroy()
+    assert counts[0.6] == counts[1.0] == counts[2.0], counts
+    assert counts[1.0] > 4 * CORNER_POINTS, "the straights vanished"
+
+
 # --- reading the character off a level ---------------------------------------
 
 def test_a_flat_level_is_not_a_beat():

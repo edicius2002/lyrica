@@ -24,6 +24,7 @@ from collections import deque
 from ctypes import POINTER, byref, c_float, c_void_p
 from ctypes.wintypes import DWORD, LPCWSTR
 from dataclasses import dataclass
+from itertools import islice
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,19 @@ DYNAMICS_LOW, DYNAMICS_HIGH = 0.06, 0.45
 # claimed one would be wrong about half the time and obviously so.
 RATE_LOW, RATE_HIGH = 60.0, 220.0
 
+# How often the window statistics are actually recomputed. `level` is what makes
+# the border answer a hit, so it stays on the frame; `dynamics` and `rate` are
+# read off four seconds of audio and reach nothing but the beam's swing and its
+# period (beam.py:294-297), both of which move over seconds. Recomputing them
+# sixty times a second buys a resolution neither has: a run of six frames is
+# 100 ms, and no four-second average changes visibly in 100 ms.
+#
+# Counted in samples rather than seconds because that is the clock the rest of
+# this class already keeps — `_index` counts pushes and MIN_GAP_S is converted
+# through `sample_hz` the same way. A second clock read from the caller's `dt`
+# would disagree with that one whenever the frame rate wandered.
+STATS_HZ = 10.0
+
 
 @dataclass(frozen=True)
 class Character:
@@ -110,51 +124,91 @@ class Envelope:
         self._onsets: deque[int] = deque(maxlen=64)
         self._index = 0
         self._last_onset = -10 ** 9
+        # Fixed for the life of the envelope, and they used to be recomputed on
+        # every push.
+        self._rise_window = max(4, int(sample_hz / 6))
+        self._min_gap = MIN_GAP_S * sample_hz
+        self._stats_every = max(1, round(sample_hz / STATS_HZ))
+        # The slow half of the character, and the sample it was read at. Same
+        # sentinel as `_last_onset`: it makes the first call a recompute without
+        # a second "have I ever" flag to keep in step.
+        self._stats_at = -10 ** 9
+        self._dynamics = 0.0
+        self._rate = 0.0
 
     def push(self, level: float) -> None:
         self._values.append(level)
         self._index += 1
-        window = max(4, int(self.sample_hz / 6))
-        if len(self._values) < window + 2:
+        if len(self._values) < self._rise_window + 2:
             return
 
-        recent = list(self._values)
-        spread = max(recent) - min(recent)
+        # The two constant-time rejections go first. Both used to sit *behind*
+        # two full passes over 240 samples, and between them they turn away most
+        # frames: a level that is not rising cannot be a leading edge, and
+        # nothing inside MIN_GAP_S of the last onset can be an onset either.
+        # Reordering is free — every test in this method is a bare `return` with
+        # no side effect, so only the order the work is paid in changes, not
+        # which frames come out the far end.
+        if self._values[-1] <= self._values[-2]:
+            return          # the leading edge only, not the whole swell
+        if self._index - self._last_onset < self._min_gap:
+            return
+
+        # No `list(self._values)` here any more. `max`/`min` walk the deque
+        # directly, and the floor is the `_rise_window` samples before the newest
+        # one — reached from the near end through `reversed`, which is eleven
+        # steps rather than a 240-element copy to slice. `min` does not care
+        # that they arrive newest-first.
+        spread = max(self._values) - min(self._values)
         if spread < SILENCE_SPREAD:
             return
-        floor = min(recent[-window - 1:-1])
-        if recent[-1] - floor < max(MIN_RISE, ONSET_RISE * spread):
-            return
-        if recent[-1] <= recent[-2]:
-            return          # the leading edge only, not the whole swell
-        if self._index - self._last_onset < MIN_GAP_S * self.sample_hz:
+        floor = min(islice(reversed(self._values), 1, self._rise_window + 1))
+        if self._values[-1] - floor < max(MIN_RISE, ONSET_RISE * spread):
             return
         self._last_onset = self._index
         self._onsets.append(self._index)
 
     def character(self, level: float) -> Character:
-        if len(self._values) < self.size // 4:
-            return Character(level=level)
+        """The level as of this frame, and the slower reading around it.
 
-        values = list(self._values)
-        mean = sum(values) / len(values)
+        `level` is rebuilt every call — it carries the attack, and a frame of
+        lag in it is the one thing here that would show. The other two are
+        served from the last time `_statistics` ran, which is at STATS_HZ.
+        """
+        if self._index - self._stats_at >= self._stats_every:
+            self._stats_at = self._index
+            self._dynamics, self._rate = self._statistics()
+        return Character(level=level, dynamics=self._dynamics, rate=self._rate)
+
+    def _statistics(self) -> tuple[float, float]:
+        """How much the window has been moving, and how often it jumps.
+
+        Every full pass over the window lives in here, so that how often they
+        are paid for is one decision in one place rather than something spread
+        through `character`. Returning zeros is how "not enough to say yet" and
+        "silence" are both reported, and both have to be *stored* rather than
+        returned early: a frame that answered zero while the cache still held
+        the loud passage before it would flicker between the two.
+        """
+        if len(self._values) < self.size // 4:
+            return 0.0, 0.0
+        count = len(self._values)
+        mean = sum(self._values) / count
         if mean <= 1e-6:
-            return Character(level=level)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
+            return 0.0, 0.0
+        variance = sum((v - mean) ** 2 for v in self._values) / count
         spread = math.sqrt(variance) / mean
 
         # Only onsets still inside the window count, or a quiet passage would
-        # keep reporting the rate of the loud one before it.
+        # keep reporting the rate of the loud one before it. Counted rather than
+        # collected — the list this used to build was thrown away for its length.
         oldest = self._index - self.size
-        recent = [i for i in self._onsets if i >= oldest]
+        inside = sum(1 for i in self._onsets if i >= oldest)
         seconds = min(self.size, self._index) / self.sample_hz
-        per_minute = 60.0 * len(recent) / seconds if seconds else 0.0
+        per_minute = 60.0 * inside / seconds if seconds else 0.0
 
-        return Character(
-            level=level,
-            dynamics=_span(spread, DYNAMICS_LOW, DYNAMICS_HIGH),
-            rate=_span(per_minute, RATE_LOW, RATE_HIGH),
-        )
+        return (_span(spread, DYNAMICS_LOW, DYNAMICS_HIGH),
+                _span(per_minute, RATE_LOW, RATE_HIGH))
 
 
 def _span(value: float, low: float, high: float) -> float:

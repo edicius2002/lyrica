@@ -166,6 +166,13 @@ def test_the_keyboard_resize_grows_from_where_the_panel_actually_is(overlay,
         monkeypatch.setattr(chrome_mod, "place",
                             lambda _r, x, y, w, h: put.append((x, y, w, h)))
         overlay._resize(+0.1)
+        # The size travels now rather than arriving, so the press arms the move
+        # and the frames place the window. Which position the rule reads is
+        # what is under test and that has not changed, so the move is run to
+        # its end rather than watched: the last frame is the one that lands on
+        # the size the press asked for.
+        while overlay._advance_collapse():
+            pass
 
         assert put, "the resize placed nothing"
         x, y, width, _height = put[-1]
@@ -870,6 +877,8 @@ def test_collision_correction_keeps_current_and_incoming_inside_the_canvas(
         1: View(368 if incoming_height == 57 else 311, incoming_height),
     }
     panel._glides = {}
+    # Both rows are born at the lower slot, which is also where they rest.
+    panel._targets = {index: view.y for index, view in panel._views.items()}
 
     panel._keep_gliding_rows_apart()
 
@@ -878,6 +887,39 @@ def test_collision_correction_keeps_current_and_incoming_inside_the_canvas(
     assert active.visual_vertical_span()[0] >= 0
     assert incoming.visual_vertical_span()[1] <= panel.height
     assert active.glyph_vertical_span()[1] <= incoming.glyph_vertical_span()[0]
+
+
+def test_both_collision_repairs_seat_the_preview_in_the_same_place(overlay):
+    """One row, one resting slot, whichever pass reaches it first.
+
+    The guard inside the glide step and the frame-boundary contract at the end
+    of the tick carried near-identical copies that differed on where the preview
+    is pinned. Whichever ran last silently decided the frame, and which one that
+    was depended on whether the scene happened to be stable.
+    """
+    from lyrica.lyrics import Lyrics
+
+    lyrics = Lyrics(
+        lines=[(0.0, "first row here"), (3.0, "second row here"),
+               (6.0, "third row waits below as the preview")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(1, lyrics, animate=False)
+    overlay._glides.clear()
+    incoming = overlay._views[2]
+    target = overlay._targets[2]
+
+    # Off its slot, which is what a glide in flight or a retarget landing
+    # mid-tick leaves behind for the next pass to find.
+    incoming.move_to(target + 24)
+    overlay._keep_gliding_rows_apart()
+    seated_by_the_guard = incoming.y
+
+    incoming.move_to(target + 24)
+    overlay._present_incoming_preview()
+    seated_by_the_contract = incoming.y
+
+    assert seated_by_the_guard == seated_by_the_contract == target
 
 
 def test_a_rising_active_row_keeps_its_full_glide_instead_of_being_jumped(

@@ -324,6 +324,64 @@ def test_only_the_keyed_palette_outlines():
     assert KEYED.outline > 0
 
 
+def test_the_same_question_gets_the_same_palette_object():
+    # Identity, not equality, and the tests below say why: two consumers compare
+    # the palette with `is` — the panel to decide whether to restyle everything
+    # on screen, the beam to decide whether to rebuild its gradient — so an
+    # equal but fresh instance costs a full repaint for no visible change.
+    wash = (22, 14, 9)
+    assert (pal_mod.for_song(PANEL_CHROME, TEAL, wash)
+            is pal_mod.for_song(PANEL_CHROME, TEAL, wash))
+
+
+def test_resizing_the_window_does_not_derive_the_palette_again():
+    # The derivation never reads `chrome.scale`, but `_apply_scale` builds a new
+    # Chrome for every Ctrl+Alt +/- and rebuilds the cover with it. Each press
+    # used to run the whole solver on the render thread to arrive back at the
+    # palette already on screen.
+    from dataclasses import replace
+
+    wash = (22, 14, 9)
+    small = pal_mod.for_song(replace(PANEL_CHROME, scale=1.0), TEAL, wash)
+    large = pal_mod.for_song(replace(PANEL_CHROME, scale=1.7), TEAL, wash)
+    assert large is small
+
+
+def test_a_wash_that_only_drifted_is_the_same_wash():
+    # It does not survive a resize unchanged: the backdrop is sampled at a
+    # resolution derived from the window, so its mean moves by a unit or two per
+    # keypress — measured up to 2 over twelve covers. Demanding the exact tuple
+    # would miss on exactly the presses the memo is for.
+    #
+    # On a wash of its own, unshared with any other test here: a match is
+    # against the wash an entry was *solved* against, so a nearby wash elsewhere
+    # in this file would answer this one before it ever ran.
+    from dataclasses import replace
+
+    first = pal_mod.for_song(PANEL_CHROME, CRIMSON, (60, 40, 30))
+    drifted = pal_mod.for_song(replace(PANEL_CHROME, scale=1.4), CRIMSON,
+                               (61, 41, 29))
+    assert drifted is first
+    assert pal_mod.for_song(PANEL_CHROME, CRIMSON, (75, 40, 30)) is not first
+
+
+def test_a_new_song_still_gets_a_new_palette():
+    # A memo that answered everything with one palette would be worse than none.
+    wash = (20, 20, 24)
+    teal = pal_mod.for_song(PANEL_CHROME, TEAL, wash)
+    assert pal_mod.for_song(PANEL_CHROME, CRIMSON, wash) is not teal
+    assert pal_mod.for_song(FROSTED_CHROME, TEAL, wash) is not teal
+
+
+def test_the_palette_memo_stays_bounded():
+    # A session plays many songs, and every entry held is a ramp of 64 strings
+    # plus two memos that only ever grow.
+    for i in range(pal_mod.MEMO_SIZE * 4):
+        song = SongColour(float(i) * 7 % 360, 0.8, 0.5, 0.0, False, (0, 0, 0))
+        pal_mod.for_song(PANEL_CHROME, song, (18, 18, 18))
+    assert len(pal_mod._MEMO) <= pal_mod.MEMO_SIZE
+
+
 def test_the_keyed_palette_ignores_the_cover():
     # Its colours have to survive whatever video is behind the window, which the
     # artwork says nothing about.
