@@ -658,3 +658,73 @@ def test_a_fully_faded_line_is_hidden_instead_of_painted_black(view):
     view.set_visible(True)
     assert all(view.canvas.itemcget(entry[2], "state") == "normal"
                for entry in view._items)
+
+
+def test_the_cache_stops_growing_however_many_songs_are_played(canvas):
+    """It grew by two axes that multiply, and never let anything go.
+
+    A grown glyph is keyed by the font spec and by a colour the palette derives
+    from the cover art, so every song brought a fresh pair of tints and every
+    Ctrl+Alt +/- a fresh spec, each generation retained whole while the next was
+    built. Measured with no ceiling: thirty songs at one size came to 14,152
+    images and 212 MB, and fifteen sizes across ten songs to 73,080 and 1.3 GB.
+    """
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -20, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    bloom_mod._cache.clear()
+    try:
+        for song in range(12):
+            tint = (song * 17 % 256, song * 29 % 256, song * 43 % 256)
+            for char in "abcdefgh":
+                for step in range(1, bloom_mod.SCALES + 1):
+                    bloom_mod.grown(char, spec, step, tint, 0.14)
+        # Nothing was ever put on the canvas, so nothing is pinned and the
+        # ceiling holds exactly.
+        assert len(bloom_mod._cache) == bloom_mod.CACHE_LIMIT
+    finally:
+        bloom_mod._cache.clear()
+
+
+def test_an_image_a_canvas_is_showing_is_never_evicted(canvas):
+    """The one thing a ceiling on this cache can break.
+
+    Tk keeps only a weak claim on an image, so dropping the last Python
+    reference to one an item is still showing deletes it out from under the
+    item — and a grown letter hides its own text item while its stand-in is up,
+    so what is left is a hole in the word. The eviction asks Tk `image inuse`
+    and passes over anything a widget still has, which is why the picture on
+    the canvas here outlives ten times its own cache's worth of pressure while
+    its twin, built the same way and shown by nobody, does not.
+    """
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", -20, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    bloom_mod._cache.clear()
+    try:
+        on_screen = bloom_mod.grown("a", spec, 4, (255, 0, 0), 0.14)[0]
+        off_screen = bloom_mod.grown("b", spec, 4, (255, 0, 0), 0.14)[0]
+        shown, hidden = str(on_screen), str(off_screen)
+        item = canvas.create_image(10, 10, image=on_screen, anchor="nw")
+        canvas.update_idletasks()
+        # Every reference of our own let go: from here only the cache can keep
+        # either alive, and only Tk can keep one in the cache.
+        del on_screen, off_screen
+
+        for song in range(12):
+            tint = (song * 17 % 256, song * 29 % 256, song * 43 % 256)
+            for char in "abcdefgh":
+                for step in range(1, bloom_mod.SCALES + 1):
+                    bloom_mod.grown(char, spec, step, tint, 0.14)
+
+        names = set(canvas.tk.call("image", "names"))
+        assert shown in names, "the image on the canvas was evicted"
+        assert canvas.itemcget(item, "image") == shown
+        assert hidden not in names, "an image nobody shows was kept anyway"
+    finally:
+        canvas.delete("all")
+        bloom_mod._cache.clear()
