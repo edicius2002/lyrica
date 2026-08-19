@@ -511,6 +511,57 @@ def test_a_line_moves_to_the_new_centre_when_the_window_widens(tk_root):
     view.destroy()
 
 
+def test_a_line_knows_where_its_own_glyphs_are(tk_root):
+    """Nothing asks Tk where a letter is, so the record has to be the truth.
+
+    Halos and grown stand-ins are placed from the stored centres, the row and
+    the word's share of the row's expansion, rather than from a `coords` read
+    back out of Tcl. Three things move a letter and each keeps its own half of
+    that record: `move_to` carries `y`, `_slide` carries the centres, and
+    `_reflow_growth` carries `_piece_layout_shift`. Half a pixel between the
+    record and the ink is exactly the tremble the bloom documents removing, so
+    move a line every way it can be moved — including mid-strike — and hold the
+    arithmetic against what the canvas actually holds.
+    """
+    import tkinter as tk
+
+    from lyrica.lineview import LineView
+    from lyrica.palette import DEFAULT
+
+    text = "y no me digas que ya no me quieres"
+    words = [(0.0, 1.0, word) for word in text.split()]
+    canvas = tk.Canvas(tk_root, width=900, height=200)
+    view = LineView(canvas, 394, 40.0, text, words, font=("Segoe UI", 20),
+                    wrap=200, palette=DEFAULT, growth=0.14, lean=30.0)
+
+    def agrees(when):
+        for index, entry in enumerate(view._items):
+            assert view._corner(index) == pytest.approx(
+                tuple(canvas.coords(entry[2])), abs=1e-6), \
+                f"character {index} {when}"
+
+    try:
+        assert len(view._row_spans) > 1, "wrap harder; the row term is untested"
+        agrees("as laid out")
+        view.move_to(87.5)              # rounds, and the record rounds with it
+        agrees("after the line moved")
+        view.recentre(340)
+        agrees("after the window changed width")
+        view.fit(20.0, 880.0)
+        agrees("after the voice stepped aside")
+        view.set_active(True)
+        view.show_sweep(2, 0.7)
+        view._set_piece_growth(1, 1.0)  # one word swollen, its row stood aside
+        agrees("mid-strike")
+        view.move_to(120.0)
+        agrees("moved while mid-strike")
+        view._set_piece_growth(1, 0.0)
+        agrees("back at rest")
+    finally:
+        view.destroy()
+        canvas.destroy()
+
+
 @pytest.mark.parametrize("scale", [0.6, 1.0, 2.0])
 def test_full_growth_stays_inside_the_horizontal_box_at_every_scale(tk_root,
                                                                      scale):
@@ -1483,9 +1534,14 @@ def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch)
     from lyrica import app as A
 
     asked = []
+    # The builders take the decoded picture their caller shares between them,
+    # so the doubles have to as well — what is under test is the size the wash
+    # is asked for, and that is unchanged by where the pixels came from.
+    monkeypatch.setattr(A.artwork, "decode", lambda data: None)
     monkeypatch.setattr(A.artwork, "make_backdrop",
-                        lambda data, w, h: asked.append((w, h)))
-    monkeypatch.setattr(A.artwork, "make_thumbnail", lambda data, size: None)
+                        lambda data, w, h, decoded=None: asked.append((w, h)))
+    monkeypatch.setattr(A.artwork, "make_thumbnail",
+                        lambda data, size, decoded=None: None)
     monkeypatch.setattr(A.songcolour, "extract", lambda data: None)
 
     class Panel:
