@@ -125,6 +125,53 @@ def test_extraction_is_quick_enough_to_run_inline():
 
 def _timed(data: bytes) -> float:
     import time
+    # Emptied first, or this would time a dict lookup and pass whatever the
+    # real cost had grown to. The cache is there to spare a resize the work,
+    # not to spare this test the measurement.
+    songcolour._CACHE.clear()
     start = time.perf_counter()
     songcolour.extract(data)
     return time.perf_counter() - start
+
+
+# --- remembering an answer that cannot have changed -------------------------
+
+def test_the_same_cover_gives_the_same_answer_from_the_cache():
+    # A resize asks again about the cover already on screen. The cached answer
+    # has to be the one the work would have produced, not merely a plausible
+    # one.
+    data = patched((12, 12, 14), (30, 150, 170), 0.22)
+    songcolour._CACHE.clear()
+    fresh = songcolour._measure(data)
+    songcolour._CACHE.clear()
+    first = songcolour.extract(data)
+    assert first == fresh
+    assert songcolour.extract(data) == fresh
+
+
+def test_a_cached_answer_costs_no_decode(monkeypatch):
+    data = solid((200, 40, 40))
+    songcolour._CACHE.clear()
+    songcolour.extract(data)
+
+    calls = []
+    monkeypatch.setattr(songcolour, "_measure",
+                        lambda d: calls.append(d) or songcolour.NEUTRAL)
+    assert not songcolour.extract(data).neutral, "answered from the cache"
+    assert calls == [], "the cover was read again"
+
+
+def test_the_cache_does_not_grow_without_bound():
+    # It holds covers, which are hundreds of kilobytes each.
+    songcolour._CACHE.clear()
+    for shade in range(songcolour._CACHE_MAX + 3):
+        songcolour.extract(solid((200, 40, 40 + shade)))
+    assert len(songcolour._CACHE) <= songcolour._CACHE_MAX
+
+
+def test_a_different_cover_is_not_answered_with_the_previous_one():
+    songcolour._CACHE.clear()
+    red = songcolour.extract(solid((200, 40, 40)))
+    green = songcolour.extract(solid((40, 180, 60)))
+    assert near(red.hue, 0.0)
+    assert near(green.hue, 120.0)

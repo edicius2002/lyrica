@@ -36,6 +36,23 @@ def test_empty_lyrics_never_crash():
     assert lyr.line_index_at(10.0) == -1
 
 
+def test_line_index_follows_lines_being_replaced_after_construction():
+    # `line_index_at` bisects a table of starts rather than scanning, and the
+    # table is a cache. `Lyrics` is a mutable dataclass and the disk cache
+    # decoder builds one and *then* rebinds `lines`, so a table built once at
+    # construction would answer for the song it no longer holds.
+    lyr = Lyrics(lines=[(0.0, "a"), (10.0, "b")], synced=True)
+    assert lyr.line_index_at(10.0) == 1
+
+    # Same length, different list: only identity catches this one.
+    lyr.lines = [(30.0, "y"), (40.0, "z")]
+    assert lyr.line_index_at(10.0) == -1
+    assert lyr.line_index_at(35.0) == 0
+
+    lyr.lines = [(30.0, "y"), (40.0, "z"), (50.0, "w")]
+    assert lyr.line_index_at(55.0) == 2
+
+
 # --- backing vocals ---------------------------------------------------------
 
 def test_progress_runs_over_whichever_sequence_it_is_given():

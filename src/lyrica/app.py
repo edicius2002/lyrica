@@ -442,13 +442,18 @@ def _font_that_fits_width(font: tuple, measured: float, available: float) -> tup
     return (font[0], -reduced if size < 0 else reduced, *font[2:])
 
 
-def _single_row_width(text: str, font: tuple) -> int:
-    """Measure the exact unwrapped row shape LineView will later construct."""
+def _single_row_width(pieces: list, font: tuple) -> int:
+    """Measure the exact unwrapped row shape LineView will later construct.
+
+    Takes the pieces rather than the text, because where a row may break is a
+    property of the writing and not of the size it is set at, and this is
+    called once per size tried.
+    """
     font_obj = tkfont.Font(font=font)
     key = tuple(sorted(font_obj.actual().items()))
     space = measure(font_obj, key, " ")
     width = 0
-    for index, (piece, glued) in enumerate(split_for_wrapping(text)):
+    for index, (piece, glued) in enumerate(pieces):
         if index and not glued:
             width += space
         width += measure(font_obj, key, piece)
@@ -457,9 +462,14 @@ def _single_row_width(text: str, font: tuple) -> int:
 
 def _font_for_single_row(text: str, font: tuple, available: float) -> tuple:
     """Choose an unwrapped font before any canvas items are constructed."""
+    # Split once, outside the loop. The pieces do not depend on the font, and a
+    # long ad-lib walks up to eight sizes before it fits — which was eight
+    # passes over the same string, each one scanning it character by character
+    # in the unspaced-script branch.
+    pieces = split_for_wrapping(text)
     fitted = font
     for _attempt in range(8):
-        measured = _single_row_width(text, fitted)
+        measured = _single_row_width(pieces, fitted)
         smaller = _font_that_fits_width(fitted, measured, available)
         if smaller == fitted:
             return fitted
@@ -1655,8 +1665,22 @@ class Overlay:
         both images are built for a particular window, so growing the window
         means deriving them again from the same bytes.
         """
+        # Decoded once for the two that want the whole picture. They were
+        # opening the same JPEG separately, which is most of what a resize
+        # spends: 3.5 ms a decode, and a resize does nothing but derive these
+        # again from bytes that have not changed.
+        #
+        # `songcolour` is not among them, and that is deliberate rather than an
+        # oversight. It draws the cover at a sixteenth of its size, which is a
+        # different decode and not a smaller crop of this one — and `draft` is
+        # a silent no-op on a picture already loaded, so handing it this one
+        # would not fail, it would quietly sample the full bitmap and answer
+        # with slightly different colours. It has its own memo instead, which
+        # is worth more here anyway: its answer depends on the bytes alone, so
+        # a resize does not need it recomputed at all.
+        decoded = artwork.decode(data)
         return (
-            artwork.make_thumbnail(data, self._thumb_size),
+            artwork.make_thumbnail(data, self._thumb_size, decoded=decoded),
             # The backdrop only makes sense where the panel has a body to wash;
             # over a colour key it would be a dark rectangle.
             # Always at the panel's full size, never at whatever it is right
@@ -1664,7 +1688,7 @@ class Overlay:
             # nothing — where one built while compact leaves bare panel showing
             # for the whole of the next expansion, which is the flicker.
             artwork.make_backdrop(data, self.chrome.px(WIDTH),
-                                  self.chrome.px(HEIGHT))
+                                  self.chrome.px(HEIGHT), decoded=decoded)
             if self.chrome.washed else None,
             # Measured here rather than on the render thread: it costs a couple
             # of milliseconds, and whichever thread calls this has them.

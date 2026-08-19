@@ -111,6 +111,30 @@ BLOOM_S = 1.0
 BLOOM_FLOOR_S, BLOOM_CEILING_S = 0.14, 1.1
 
 
+class _HeldReflow:
+    """Keeps a row's layout still until every strike in a frame is in.
+
+    Nested holds are counted rather than assumed away: `advance_bloom` settles
+    a line that has gone quiet through `_settle_grown`, which holds one of its
+    own, and the row may only move once the outermost hold is done with it.
+    """
+
+    def __init__(self, view: "LineView"):
+        self._view = view
+
+    def __enter__(self) -> "LineView":
+        self._view._holding_reflow += 1
+        return self._view
+
+    def __exit__(self, *_exc) -> bool:
+        view = self._view
+        view._holding_reflow -= 1
+        if view._holding_reflow == 0 and view._reflow_due:
+            view._reflow_due = False
+            view._reflow_growth()
+        return False
+
+
 class LineView:
     """The canvas items for one lyric line, and the state to colour them."""
 
@@ -139,6 +163,12 @@ class LineView:
         # a long wrapped preview needlessly expensive.
         self._text_tag = f"{self._tag}-text"
         self._outline_tag = f"{self._tag}-outline"
+        # The same trick for the two kinds of image a line carries. Hiding a
+        # spent line walked `_glow` and `_grown` item by item — about eighty
+        # more calls on a line that had been sung, after the text and its
+        # outline had already been dealt with in two.
+        self._glow_tag = f"{self._tag}-glow"
+        self._grown_tag = f"{self._tag}-grown"
         self._items: list = []      # [centre_x, row, item, colour]
         self._char_widths: list[float] = []
         self._char_piece: list[int] = []   # character -> the word it belongs to
@@ -251,6 +281,27 @@ class LineView:
                 self._row_pieces.setdefault(self._items[chars[0]][1], []).append(piece)
         self._piece_growth: dict[int, float] = {}
         self._piece_layout_shift = {piece: 0.0 for piece in self._piece_chars}
+        self._holding_reflow = 0    # depth of `_held_reflow`
+        self._reflow_due = False    # a held frame changed a word's growth
+        # One per line rather than one per frame: it carries no state of its
+        # own, and the depth that makes it reentrant lives here.
+        self._reflow_hold = _HeldReflow(self)
+
+        # Room reserved so every word on a row can complete its strike, worked
+        # out once. Nothing that goes into it moves afterwards: the piece
+        # widths, which pieces sit on which row and the growth are all settled
+        # here, and a row span only ever slides as a whole. `fit` runs on every
+        # frame an echo's lean is animated over and rebuilt the lot — a sum over
+        # every word of the line, then two passes over the rows — before finding
+        # that the step had not changed by a whole pixel and doing nothing.
+        self._row_guards = {
+            row: sum(self._piece_widths[piece] for piece in pieces)
+            * self.growth / 2
+            for row, pieces in self._row_pieces.items()
+        }
+        self._guard_lo = 0.0
+        self._guard_hi = 0.0
+        self._measure_guards()
 
         # And how long each word is sung for. The light drains on that clock
         # rather than on a fixed number of seconds, because the sweep crossing
@@ -350,20 +401,12 @@ class LineView:
         the line creeping further each time.
         """
         want = self.lean
-        # Leave enough room for every word on a row to complete its strike.
-        # Usually only one or two overlap, but reserving the full possible
-        # width makes a fast phrase no less safe than a slow one.
-        guards = {
-            row: sum(self._piece_widths[piece] for piece in pieces)
-            * self.growth / 2
-            for row, pieces in self._row_pieces.items()
-        }
-        lo = min((a - guards.get(row, 0.0)
-                  for row, (a, _b) in enumerate(self._row_spans)),
-                 default=0.0) - self._shift
-        hi = max((b + guards.get(row, 0.0)
-                  for row, (_a, b) in enumerate(self._row_spans)),
-                 default=0.0) - self._shift
+        # The guarded edges are kept by `_measure_guards`, which is the only
+        # other thing that ever has to run: they change when the line slides
+        # and at no other time. Taking `_shift` back off is what makes this
+        # idempotent — the edges below are where the line would sit unmoved.
+        lo = self._guard_lo - self._shift
+        hi = self._guard_hi - self._shift
         if want > 0:
             want = max(0.0, min(want, right - hi))
         elif want < 0:
@@ -386,6 +429,22 @@ class LineView:
         for piece in self._piece_centres:
             self._piece_centres[piece] += delta
         self._row_spans = [(a + delta, b + delta) for a, b in self._row_spans]
+        self._measure_guards()
+
+    def _measure_guards(self) -> None:
+        """The outermost edge a strike could reach, on either side.
+
+        Recomputed from the spans rather than shifted along with them, so the
+        answer is the same arithmetic in the same order as laying the line out
+        — the clipping in `fit` rounds to a whole pixel, and a value that had
+        drifted by an ulp could round the other way at a boundary.
+        """
+        self._guard_lo = min((a - self._row_guards.get(row, 0.0)
+                              for row, (a, _b) in enumerate(self._row_spans)),
+                             default=0.0)
+        self._guard_hi = max((b + self._row_guards.get(row, 0.0)
+                              for row, (_a, b) in enumerate(self._row_spans)),
+                             default=0.0)
 
     def _set_piece_growth(self, piece: int, shape: float) -> None:
         """Give an expanding word room without changing the resting layout.
@@ -403,10 +462,60 @@ class LineView:
             self._piece_growth[piece] = shape
         else:
             self._piece_growth.pop(piece, None)
+        if self._holding_reflow:
+            # Inside a frame that is still collecting strikes, so the row is
+            # laid out once when the hold ends rather than once per word. See
+            # `_held_reflow` for why the wait cannot be seen.
+            self._reflow_due = True
+            return
         self._reflow_growth()
+
+    def _held_reflow(self):
+        """Let a whole frame's worth of strikes settle the row once.
+
+        `_reflow_growth` works out where every word on the line belongs, so a
+        frame in which three words cross a quantisation step at the same instant
+        laid the row out three times and moved it three times. The quantisation
+        keeps that from being every frame, but a fast phrase is exactly when it
+        is not.
+
+        Deferring is safe because a word is moved by its own tag: a stand-in or
+        a halo placed from `_corner` while a shift is still pending is carried
+        the rest of the way by the same `canvas.move` that settles the letters
+        it belongs to. It lands on the same pixel either way — which is only
+        true now that nothing reads a position back out of Tk mid-frame.
+        """
+        return self._reflow_hold
 
     def _piece_tag(self, piece: int) -> str:
         return f"{self._tag}-piece-{piece}"
+
+    def _corner(self, index: int) -> tuple[float, float]:
+        """Where this character's glyph sits now, worked out rather than asked.
+
+        `canvas.coords(item)` with no arguments is a *read* back out of Tcl —
+        the round trip plus parsing the answer, which costs several times what
+        writing a coordinate does. It was being paid once per character every
+        time a line went active, and again for every letter whose image changed
+        in a growing frame.
+
+        Nothing about the position is Tk's to know. Three things move a letter
+        and all three keep their record here: `move_to` shifts the row and
+        carries `y` with it, `_slide` shifts every column and carries the stored
+        centres, and `_reflow_growth` shifts a word and carries
+        `_piece_layout_shift`. The centre is the resting one, so the layout
+        shift has to be added back — the caller wants where the glyph *is*, not
+        where it sleeps.
+
+        The rounding is what makes this safe rather than merely equal on
+        average: `move_to` and `_slide` move by whole pixels and store the same
+        whole pixels, so the arithmetic here cannot land half a pixel from the
+        ink. That half pixel is exactly the tremble `bloom` documents removing.
+        """
+        centre, row, _item, _colour = self._items[index]
+        x = (centre - self._char_widths[index] / 2
+             + self._piece_layout_shift[self._char_piece[index]])
+        return x, self.y + row * self.line_height
 
     def _reflow_growth(self) -> None:
         desired = {piece: 0.0 for piece in self._piece_layout_shift}
@@ -460,11 +569,12 @@ class LineView:
         self.canvas.itemconfigure(self._outline_tag, state=state)
         self.canvas.itemconfigure(self._text_tag, state=state)
         if not visible:
-            for items in self._glow.values():
-                for item in items:
-                    self.canvas.itemconfigure(item, state="hidden")
-            for item in self._grown.values():
-                self.canvas.itemconfigure(item, state="hidden")
+            # And two more for what a sung line is carrying behind and in front
+            # of its letters. A tag that matches nothing is a no-op, so a line
+            # that never went active pays two calls rather than none — against
+            # the eighty-odd a line with its halo and stand-ins built used to.
+            self.canvas.itemconfigure(self._glow_tag, state="hidden")
+            self.canvas.itemconfigure(self._grown_tag, state="hidden")
             return
         # Coming back, the stand-in of a letter that is mid-strike has to be
         # put back on screen and the halo asked for again. Neither happened,
@@ -528,15 +638,16 @@ class LineView:
         self._blurred = bloom.available(self._font)
         for index, entry in enumerate(self._items):
             ch = self._chars[index]
-            x, y = self.canvas.coords(entry[2])
+            x, y = self._corner(index)
+            piece_tag = self._piece_tag(self._char_piece[index])
             if self._blurred and self.growth > 0 and index not in self._grown:
                 # Growth is independent of the halo. Keyed composition cannot
                 # safely draw light behind text, but it can still let the word
                 # itself move.
                 stand_in = self.canvas.create_image(x, y, anchor="nw",
                                                     state="hidden",
-                                                    tags=(self._tag, self._piece_tag(
-                                                        self._char_piece[index])))
+                                                    tags=(self._tag, piece_tag,
+                                                          self._grown_tag))
                 self._grown[index] = stand_in
             if not self.palette.glow or self.bloom <= 0:
                 continue
@@ -545,16 +656,16 @@ class LineView:
                 # so a curve does not come out doubled.
                 item = self.canvas.create_image(x - bloom.PAD, y - bloom.PAD,
                                                 anchor="nw", state="hidden",
-                                                tags=(self._tag, self._piece_tag(
-                                                    self._char_piece[index])))
+                                                tags=(self._tag, piece_tag,
+                                                      self._glow_tag))
                 self.canvas.tag_lower(item, entry[2])
                 self._glow[index] = [item]
                 continue
             items = [self.canvas.create_text(x + dx, y + dy, text=ch, anchor="nw",
                                              font=self._font,
                                              fill=self.palette.bloom(0.0),
-                                             tags=(self._tag, self._piece_tag(
-                                                 self._char_piece[index])))
+                                             tags=(self._tag, piece_tag,
+                                                   self._glow_tag))
                      for dx, dy in GLOW_OFFSETS]
             for item in items:
                 self.canvas.tag_lower(item, entry[2])
@@ -735,7 +846,12 @@ class LineView:
             image, dx, dy = made
             group_dx = self._group_dx(index, scale)
             text = self._items[index][2]
-            x, y = self.canvas.coords(text)
+            # Where the letter is, not where Tk says it is. Under a held
+            # reflow the word's new share of the row is still pending, and that
+            # is exactly as good: the stand-in wears the word's tag, so the one
+            # `canvas.move` that settles the letters carries it the rest of the
+            # way rather than leaving it behind.
+            x, y = self._corner(index)
             self.canvas.coords(self._grown[index], x + dx + group_dx, y + dy)
             if index in self._showing:
                 # Already standing in for its letter: the picture changes, the
@@ -751,7 +867,7 @@ class LineView:
             # goes. Left behind, it sat up to twelve pixels away at full growth
             # and slid back, which is the halo that appeared to drift about
             # behind the illumination.
-            self._place_halo(index, group_dx, at=(x, y))
+            self._place_halo(index, group_dx)
 
     def _retire_grown(self, index: int) -> None:
         """Put a letter back to its own size, drawn as text again."""
@@ -763,19 +879,15 @@ class LineView:
             self.canvas.itemconfigure(self._items[index][2], state="normal")
         self._place_halo(index, 0.0)
 
-    def _place_halo(self, index: int, dx: float, at=None) -> None:
-        """Carry this character's halo `dx` from where its letter rests.
-
-        `at` is the letter's own corner when the caller has just read it, which
-        saves asking the canvas for the same two numbers twice in a frame.
-        """
+    def _place_halo(self, index: int, dx: float) -> None:
+        """Carry this character's halo `dx` from where its letter rests."""
         items = self._glow.get(index)
         if not items:
             return
         if abs(self._glow_dx.get(index, 0.0) - dx) < 1e-6:
             return
         self._glow_dx[index] = dx
-        x, y = at if at is not None else self.canvas.coords(self._items[index][2])
+        x, y = self._corner(index)
         if self._blurred:
             self.canvas.coords(items[0], x - bloom.PAD + dx, y - bloom.PAD)
             return
@@ -790,11 +902,12 @@ class LineView:
         for an expansion that had already gone — six and a half pixels, held for
         as long as the line lived.
         """
-        for index in list(self._showing):
-            self._retire_grown(index)
-        self._showing.clear()
-        for piece in list(self._piece_growth):
-            self._set_piece_growth(piece, 0.0)
+        with self._held_reflow():
+            for index in list(self._showing):
+                self._retire_grown(index)
+            self._showing.clear()
+            for piece in list(self._piece_growth):
+                self._set_piece_growth(piece, 0.0)
 
     def advance_bloom(self, now: float) -> bool:
         """Fade each struck character's halo. True while any is still alight.
@@ -811,17 +924,36 @@ class LineView:
         if not self._hit:
             self._settle_grown()
             return False
-        alight = False
         self._budget = NEW_SIZES_PER_FRAME
         self._halo_budget = NEW_HALOS_PER_FRAME
+        with self._held_reflow():
+            alight = self._advance_pieces(now)
+        self._blooming = alight
+        return alight
+
+    def _advance_pieces(self, now: float) -> bool:
+        """One frame of every lit word, with the row held still throughout."""
+        alight = False
         for piece, chars in self._piece_chars.items():
-            struck = [index for index in chars if index in self._hit]
-            if not struck:
+            # A word is hit whole or not at all — `show_sweep` records the same
+            # instant against every letter of it, and the two places that give
+            # a word back its strike drop every letter of it together — so its
+            # first letter answers for the rest. This used to build a list per
+            # word to find out, and throw most of them away: sixty dictionary
+            # lookups and a dozen lists a frame, for a line where two or three
+            # words are alight.
+            #
+            # Not read from `_struck` instead, tempting as that looks. That set
+            # is which words the front has *passed*, not which are still lit —
+            # it keeps them so a drained word is not struck again — so by the
+            # end of a line it holds every word there is, and the scan it would
+            # save is the scan it would become.
+            if chars[0] not in self._hit:
                 continue
             # One clock for the word, read from it once. Every letter of a word
             # is struck in the same instant by `show_sweep`, and taking the time
             # per letter only invited them to disagree.
-            when, span = self._hit[struck[0]]
+            when, span = self._hit[chars[0]]
             elapsed = max(0.0, now - when)
             bloom_age = elapsed / span if span > 0 else 1.0
             grow_age = elapsed / GROW_SPAN_S
@@ -829,19 +961,18 @@ class LineView:
                      if self.bloom > 0 and bloom_age < 1.0 else 0.0)
             growing = self.growth > 0 and grow_age < 1.0
             if level <= 0.0 and not growing:
-                for index in struck:
+                for index in chars:
                     del self._hit[index]
             else:
                 alight = True
             # The letters themselves, not only the light behind them: a halo
             # behind text that is not reacting reads as an effect laid over the
             # words rather than as the words being sung.
-            self._grow_piece(piece, struck,
+            self._grow_piece(piece, chars,
                              _strike_shape(grow_age) if growing else 0.0)
             if not self._glow:
                 continue
-            self._fade_halo(struck, level)
-        self._blooming = alight
+            self._fade_halo(chars, level)
         return alight
 
     def _fade_halo(self, chars: list[int], level: float) -> None:
