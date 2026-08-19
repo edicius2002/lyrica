@@ -434,16 +434,24 @@ def available() -> bool:
 SQUARE_ENOUGH = 1.08
 
 
-def make_thumbnail(data: bytes, size: int):
-    """A small square cover for the header, sharp and whole.
+def decode(data: bytes):
+    """The cover decoded once, for everything built from it to share.
 
-    Nearly-square art is cropped, which keeps its proportions and fills the
-    box. Anything further off is fitted inside instead, on a background taken
-    from its own edge — cropping a 500x453 scan to a square loses the sides of
-    the sleeve, and losing part of the artwork is worse than a little padding
-    nobody will notice behind a rounded corner.
+    A resize rebuilds the thumbnail and the backdrop from the same bytes, and
+    each used to open the JPEG for itself. Measured on a busy 600x600 cover
+    (265 KB): 3.54 ms per decode, against 19.7 ms for the whole of what a
+    resize derives — so the repeated decoding was most of a fifth of the work,
+    and it runs on the UI thread with a hand still on the keys.
+
+    What comes back is a plain in-memory RGB image, not an open file. The
+    `with` happens here and `convert` loads the pixels before it closes, so a
+    borrower holds no handle and — the part that matters — has nothing it needs
+    to close. Ownership stays with whoever called this.
+
+    None when there is nothing decodable, which is the same answer the callers
+    below gave before and for the same reasons: a missing cover is cosmetic.
     """
-    if not data or size <= 0:
+    if not data:
         return None
     try:
         from PIL import Image
@@ -451,7 +459,61 @@ def make_thumbnail(data: bytes, size: int):
         return None
     try:
         with Image.open(io.BytesIO(data)) as source:
-            image = source.convert("RGB")
+            return source.convert("RGB")
+    except Exception:
+        logger.debug("could not decode artwork", exc_info=True)
+        return None
+
+
+def _rgb(decoded, data: bytes):
+    """The image to work from: the one lent to us, or one decoded here.
+
+    A lent image is borrowed, never owned. It is not closed — the `with` that
+    used to live in each caller has moved into `decode`, so there is no handle
+    here to close and no way to close one out from under the next function.
+
+    It is not copied either, when it is already RGB, because `convert` on a
+    600x600 RGB image costs 0.41 ms and doing it twice would give back a
+    quarter of what sharing the decode saves. That is safe only because
+    everything downstream of here reads: `crop`, `resize` and `copy` return new
+    images and `getpixel` returns a number. Anything added later that changes
+    an image *in place* — `thumbnail`, `draft`, `paste`, `putpixel` — must be
+    given a copy first. `draft` especially: it re-decodes a JPEG at a lower
+    resolution destructively, so one call on a borrowed image would hand every
+    later function a degraded cover, and the damage would surface nowhere near
+    the line that caused it.
+    """
+    if decoded is None:
+        return decode(data)
+    if decoded.mode == "RGB":
+        return decoded
+    return decoded.convert("RGB")
+
+
+def make_thumbnail(data: bytes, size: int, decoded=None):
+    """A small square cover for the header, sharp and whole.
+
+    Nearly-square art is cropped, which keeps its proportions and fills the
+    box. Anything further off is fitted inside instead, on a background taken
+    from its own edge — cropping a 500x453 scan to a square loses the sides of
+    the sleeve, and losing part of the artwork is worse than a little padding
+    nobody will notice behind a rounded corner.
+
+    `decoded` is an image from `decode`, lent by a caller that is building more
+    than one thing from these bytes. Given one, the bytes are not decoded
+    again; the image is only read from, and closing it stays the caller's
+    business. Without one this decodes for itself exactly as it always did.
+    """
+    if size <= 0 or (decoded is None and not data):
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        image = _rgb(decoded, data)
+        if image is None:
+            return None
         ratio = max(image.width, image.height) / max(1, min(image.width, image.height))
         if ratio <= SQUARE_ENOUGH:
             side = min(image.width, image.height)
@@ -504,7 +566,8 @@ class Backdrop:
     peak: int           # B95 after capping, for the log
 
 
-def make_backdrop(data: bytes, width: int, height: int) -> "Backdrop | None":
+def make_backdrop(data: bytes, width: int, height: int,
+                  decoded=None) -> "Backdrop | None":
     """A blurred, darkened, window-sized wash, or None if it cannot be made.
 
     The darkening is measured per cover, not fixed. A single brightness factor
@@ -520,19 +583,20 @@ def make_backdrop(data: bytes, width: int, height: int) -> "Backdrop | None":
 
     Returns PIL rather than Tk images because converting has to happen on the
     thread owning the widget, and this is called off it.
+
+    `decoded` is an image from `decode`, lent by a caller building more than one
+    thing from these bytes — the thumbnail wants the same full-resolution decode
+    this does. It is read, never closed and never modified; see `_rgb`.
     """
-    if not data:
+    if decoded is None and not data:
         return None
     try:
         from PIL import Image, ImageEnhance, ImageFilter
     except ImportError:
         return None
 
-    try:
-        with Image.open(io.BytesIO(data)) as source:
-            image = source.convert("RGB")
-    except Exception:
-        logger.debug("could not decode artwork", exc_info=True)
+    image = _rgb(decoded, data)
+    if image is None:
         return None
 
     try:
