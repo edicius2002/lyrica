@@ -52,6 +52,39 @@ def test_the_light_drains_and_then_stops(view):
     assert not view._hit
 
 
+def test_a_word_is_struck_whole_or_not_at_all(view):
+    """`advance_bloom` asks a word's first letter and trusts the answer.
+
+    It used to collect the lit letters of every word on the line and throw most
+    of the lists away. Asking one letter is only sound while the three places
+    that touch `_hit` keep taking a word's letters together: `show_sweep` when
+    the front arrives, `show_sweep` again when a seek falls back behind the
+    word, and the drain when both the light and the movement are spent.
+    """
+    from lyrica.lineview import GROW_SPAN_S
+
+    view.set_active(True)
+
+    def whole(when):
+        for piece, chars in view._piece_chars.items():
+            lit = sum(1 for index in chars if index in view._hit)
+            assert lit in (0, len(chars)), f"word {piece} half struck {when}"
+
+    for word in range(len(LINE.split())):
+        for fraction in (0.0, 0.4, 0.9):
+            view.show_sweep(word, fraction)
+            whole("as the front crosses it")
+            if not view._hit:
+                continue
+            struck, span = next(iter(view._hit.values()))
+            view.advance_bloom(struck + span * 0.5)
+            whole("half drained")
+            view.advance_bloom(struck + max(span, GROW_SPAN_S) + 1e-3)
+            whole("fully drained")
+    view.show_sweep(0, 0.0)             # a seek back to the top re-arms them
+    whole("after a seek back to the start")
+
+
 def test_a_word_keeps_its_light_for_as_long_as_it_is_sung(view):
     # The sweep crossing a word is on the word's own clock. A constant put the
     # two in disagreement: spent before a long word was half lit, still burning
@@ -633,6 +666,62 @@ def test_a_line_dropped_mid_strike_returns_its_row_to_rest(view):
     assert now == pytest.approx(rest), "the row kept standing aside"
 
 
+def test_a_frame_of_several_strikes_lays_the_row_out_once(view):
+    """One reflow a frame, however many words crossed a step inside it.
+
+    `_reflow_growth` works out where every word on the line belongs, so calling
+    it per word that crossed a quantisation step laid the row out — and moved
+    it — two or three times in a single frame. A fast phrase is exactly when
+    that happens.
+
+    Deferring is only sound because nothing reads a position back out of Tk
+    mid-frame any more: a stand-in or a halo placed while a word's share of the
+    row is still pending is carried the rest of the way by the same
+    `canvas.move` that settles the letters it belongs to.
+    """
+    from lyrica.lineview import GROW_SPAN_S
+
+    view.set_active(True)
+    if not view._blurred:
+        pytest.skip("no resampled growth on this machine")
+
+    reflows = []
+    settled = view._reflow_growth
+
+    def counted():
+        reflows.append(1)
+        settled()
+
+    view._reflow_growth = counted
+
+    def strike():
+        """One pass of the whole line struck at once, frame by frame."""
+        view.show_sweep(0, 0.0)         # re-arm every word
+        view.show_sweep(3, 0.9)         # and strike the lot in one instant
+        when, _span = next(iter(view._hit.values()))
+        crossings = []
+        for frame in range(int(GROW_SPAN_S * 60) + 4):
+            reflows.clear()
+            before = dict(view._piece_growth)
+            view.advance_bloom(when + frame / 60.0)
+            crossings.append(sum(
+                1 for piece in set(before) | set(view._piece_growth)
+                if before.get(piece, 0.0) != view._piece_growth.get(piece, 0.0)))
+            assert len(reflows) <= 1, (
+                f"the row was laid out {len(reflows)} times in one frame")
+            assert not view._reflow_due, "a word's shift was left pending"
+        return crossings
+
+    strike()                    # cold: the size budget starts one word a frame
+    crossings = strike()        # warm, which is when several cross together
+    assert max(crossings) > 1, "no frame moved more than one word at a step"
+
+    # Settled, not merely deferred: laying the row out again moves nothing.
+    landed = dict(view._piece_layout_shift)
+    settled()
+    assert view._piece_layout_shift == landed, "a held shift never arrived"
+
+
 def test_a_line_no_longer_active_leaves_no_stand_ins(view):
     view.set_active(True)
     if not view._blurred:
@@ -658,6 +747,41 @@ def test_a_fully_faded_line_is_hidden_instead_of_painted_black(view):
     view.set_visible(True)
     assert all(view.canvas.itemcget(entry[2], "state") == "normal"
                for entry in view._items)
+
+
+def test_hiding_a_line_mid_strike_hides_its_light_and_its_stand_ins(view):
+    """Both go by a tag of their own, the way the text and its outline do.
+
+    The line above never went active, so it hides nothing but glyphs. A line
+    that has been sung is also carrying a halo and a grown stand-in per letter,
+    and those were still walked one item at a time — another eighty calls to
+    say one word to the whole row. A tag matching nothing is a no-op, so the
+    collapse has to hold for the line that carries images and for the one that
+    never built any.
+    """
+    from lyrica.lineview import GROW_ATTACK_S
+
+    view.set_active(True)
+    if not view._grown:
+        pytest.skip("no resampled growth on this machine")
+    view.show_sweep(0, 0.6)
+    when, _span = next(iter(view._hit.values()))
+    for _ in range(4):                  # warm, then read the grown frame
+        view.advance_bloom(when + GROW_ATTACK_S)
+    assert view._showing, "nothing stood in, so nothing here is being hidden"
+
+    view.set_visible(False)
+    assert all(view.canvas.itemcget(item, "state") == "hidden"
+               for item in view.item_ids()), "something was left on screen"
+
+    view.set_visible(True)
+    # A letter mid-strike goes back behind its own image rather than in front
+    # of it, which is the branch the halo tag must not have disturbed.
+    for index, entry in enumerate(view._items):
+        want = "hidden" if index in view._showing else "normal"
+        assert view.canvas.itemcget(entry[2], "state") == want
+    assert all(view.canvas.itemcget(view._grown[index], "state") == "normal"
+               for index in view._showing)
 
 
 # --- what is kept, and what is let go ---------------------------------------
