@@ -308,8 +308,14 @@ class LineView:
         """Shift the whole line, keeping the items that are already there."""
         delta = round(y - self.y)
         if delta:
-            for item in self.item_ids():
-                self.canvas.move(item, 0, delta)
+            # By the line's own tag, for the same reason `_reflow_growth` moves
+            # a word by its piece tag: one Tcl round trip whatever the line is
+            # currently carrying. Walking `item_ids()` cost one call per item,
+            # and an active row is not made of its letters alone — a sixty
+            # character row with the bloom built is sixty texts, sixty halos
+            # and sixty grown stand-ins, so a single glide frame spent a
+            # hundred and eighty calls saying one thing.
+            self.canvas.move(self._tag, 0, delta)
             self.y += delta
 
     def recentre(self, cx: float) -> None:
@@ -369,8 +375,12 @@ class LineView:
 
     def _slide(self, delta: int) -> None:
         """Move every part of the line sideways, geometry included."""
-        for item in self.item_ids():
-            self.canvas.move(item, delta, 0)
+        # One call for the pixels; the loops below are the stored geometry,
+        # which is Python and has to travel with them. Keeping that record is
+        # what lets the rest of the file place a halo or a stand-in without
+        # asking Tk where anything is, so it stays even though the move itself
+        # no longer needs to visit each item.
+        self.canvas.move(self._tag, delta, 0)
         for entry in self._items:
             entry[0] += delta
         for piece in self._piece_centres:
@@ -442,11 +452,13 @@ class LineView:
             return
         self._visible = visible
         state = "normal" if visible else "hidden"
-        for item in self._outline:
-            self.canvas.itemconfigure(item, state=state)
-        for index, entry in enumerate(self._items):
-            text_state = "hidden" if visible and index in self._showing else state
-            self.canvas.itemconfigure(entry[2], state=text_state)
+        # Two calls for the row, the same way `present_inactive` reasserts it.
+        # Per item this was one call for every outline offset and one for every
+        # letter, and keyed mode rings each letter twelve times: a forty
+        # character line spent about five hundred and twenty calls saying a
+        # single word to the whole row.
+        self.canvas.itemconfigure(self._outline_tag, state=state)
+        self.canvas.itemconfigure(self._text_tag, state=state)
         if not visible:
             for items in self._glow.values():
                 for item in items:
@@ -454,18 +466,24 @@ class LineView:
             for item in self._grown.values():
                 self.canvas.itemconfigure(item, state="hidden")
             return
-        # Coming back, the stand-in of a letter whose text is held hidden above
-        # has to be put back on screen and the halo asked for again. Neither
-        # happened, and both are only invisible while nothing else disturbs
-        # them: a line hidden mid-strike and shown again had hidden text behind
-        # a hidden image, so its grown letters were simply not drawn.
+        # Coming back, the stand-in of a letter that is mid-strike has to be
+        # put back on screen and the halo asked for again. Neither happened,
+        # and both are only invisible while nothing else disturbs them: a line
+        # hidden mid-strike and shown again had hidden text behind a hidden
+        # image, so its grown letters were simply not drawn.
+        #
+        # The write above reached every letter, these included, so a letter
+        # standing in goes back behind its image here. Only the ones actually
+        # standing in are paid for, rather than the whole row.
         for index in self._showing:
+            self.canvas.itemconfigure(self._items[index][2], state="hidden")
             self.canvas.itemconfigure(self._grown[index], state="normal")
         self._halo_shown.clear()
 
     def destroy(self) -> None:
-        for item in self.item_ids():
-            self.canvas.delete(item)
+        # The tag names exactly what `item_ids` yields, so the whole line goes
+        # in one call rather than one per letter, outline, halo and stand-in.
+        self.canvas.delete(self._tag)
         self._items.clear()
         self._outline.clear()
         self._glow.clear()
