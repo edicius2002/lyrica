@@ -252,18 +252,35 @@ def _built(points: list[tuple], width: int, height: int, shape: Shape,
         ImageChops.multiply(ImageChops.screen(ridge, field), inside))
     profile = profile.resize(full, Image.BICUBIC)
 
-    where = Image.new("L", small, OFF_RING)
+    # Drawn where it will be read rather than resampled up to it. Nothing here
+    # is filtered — a few hundred thick lines and no blur at all — so the
+    # resolution costs drawing time rather than the seconds a full-size
+    # gaussian would, and it buys the one thing no resampler could give back.
+    # This field cannot be interpolated: it holds a position round a closed
+    # ring, so it wraps from 255 to 1 somewhere and interpolating across that
+    # step invents every colour in the gradient in a band a few pixels wide.
+    # Nearest-neighbour invents nothing and left three-pixel cells of flat
+    # colour instead, which are invisible where the gradient is shallow and are
+    # not where it is steep.
+    where = Image.new("L", full, OFF_RING)
     pen = ImageDraw.Draw(where)
-    count = len(low)
+    count = len(points)
     # Wider than the light reaches, so every pixel the profile lights has a
     # position to look its colour up by. A pixel the band missed keeps byte 0,
     # which the caller's table always answers with no opacity at all.
-    thick = max(1, round(2 * (shape.reach + shape.core) / k))
-    for index, start in enumerate(low):
-        end = low[(index + 1) % count]
-        pen.line([start, end], fill=1 + round((LUT_SIZE - 2) * index / count),
-                 width=thick)
-    where = where.resize(full, Image.NEAREST)
+    thick = max(1, round(2 * (shape.reach + shape.core)))
+    for index, start in enumerate(points):
+        end = points[(index + 1) % count]
+        fill = 1 + round((LUT_SIZE - 2) * index / count)
+        pen.line([start, end], fill=fill, width=thick)
+        # A thick line is a rectangle, so two of them meeting at an angle leave
+        # a wedge uncovered on the outside of the turn. Every corner of the
+        # panel is such a turn, and a pixel the band missed reads as no light
+        # at all — a dark notch in the glow. Drawn at a third of this and
+        # resampled by nearest neighbour the wedges were a third the size and
+        # then smeared over; at the resolution they are read at they are not.
+        pen.ellipse([start[0] - thick / 2, start[1] - thick / 2,
+                     start[0] + thick / 2, start[1] + thick / 2], fill=fill)
 
     made = []
     for box in boxes(width, height, band):
