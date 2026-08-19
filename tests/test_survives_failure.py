@@ -74,3 +74,66 @@ def test_every_way_out_goes_through_the_same_door():
     assert "self._closing" in tick
     body = tick.split("self._closing")[1]
     assert "destroy" in body.split("return")[0], "the tick must tear it down"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only meter")
+def test_a_dead_endpoint_is_opened_again_rather_than_given_up_on():
+    # Dropping an endpoint that stopped answering is right — it cannot be read
+    # from again. Never looking for another one is what made unplugging a
+    # speaker cost the border for the rest of the session.
+    from lyrica.meter import DEVICE_CHECK_S, Envelope, WindowsMeter
+
+    meter = WindowsMeter.__new__(WindowsMeter)
+    meter._meter, meter._value, meter.available = None, 0.0, False
+    meter._envelope = Envelope()
+    meter._device_id, meter._since_check = "old-device", 0.0
+    meter._release = staticmethod(lambda obj: None)
+    meter._default_id = lambda: "a-live-device"
+    meter.raw = lambda: 0.0
+
+    opened = []
+
+    def open_one():
+        opened.append(True)
+        meter._meter = object()
+
+    meter._open = open_one
+
+    meter.level(DEVICE_CHECK_S / 4)
+    assert not opened, "checked on every frame rather than on a clock"
+
+    meter.level(DEVICE_CHECK_S)
+    assert opened, "a dead endpoint was never looked at again"
+    assert meter.available is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only meter")
+def test_the_meter_moves_to_the_device_the_sound_is_going_to():
+    # The fault this exists for is silent: send the sound to a headset and the
+    # endpoint opened at startup keeps answering, truthfully, that nothing is
+    # coming out of it. Nothing fails, and the border simply stops moving.
+    from lyrica.meter import DEVICE_CHECK_S, Envelope, WindowsMeter
+
+    meter = WindowsMeter.__new__(WindowsMeter)
+    meter._meter, meter._value, meter.available = object(), 0.0, True
+    meter._envelope = Envelope()
+    meter._device_id, meter._since_check = "speakers", 0.0
+    meter._release = staticmethod(lambda obj: None)
+    meter.raw = lambda: 0.0
+
+    reopened = []
+    meter._open = lambda: reopened.append(meter._device_id)
+
+    meter._default_id = lambda: "speakers"
+    meter.level(DEVICE_CHECK_S)
+    assert not reopened, "rebuilt itself while the device had not changed"
+
+    # And a device that will not name itself is not a different device: taking
+    # `None` for a change would rebuild the meter on every check.
+    meter._default_id = lambda: None
+    meter.level(DEVICE_CHECK_S)
+    assert not reopened, "an unanswered question was read as a new device"
+
+    meter._default_id = lambda: "headset"
+    meter.level(DEVICE_CHECK_S)
+    assert reopened, "the sound moved and the meter stayed"
