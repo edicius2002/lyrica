@@ -105,18 +105,28 @@ SHINE_SPEED_GAIN = 0.55
 # after that. The old halo was a flat 9-pixel stroke reaching 4.5 px each way
 # and stopping dead; this carries six times as far inward and never stops.
 #
-# `EDGE_INSET` and `EDGE_SOFT` are the other side. The window is clipped to its
-# own rounded rectangle, so light that runs past the panel's edge meets a hard
-# boundary — and a hard boundary across a glow is the defect all of this
-# replaced. The ridge therefore sits `EDGE_INSET` inside, and the outward field
-# is taken away over `EDGE_SOFT` so that what reaches the boundary is under a
-# hundredth of the peak. Measured on the default panel: 3 of 255 at the edge,
-# against a peak of 255 nine pixels in.
+# `EDGE_INSET` is where the ridge sits relative to the panel's own edge, and
+# `SPILL_REACH` is how far the light carries *past* it, onto the desktop.
+#
+# That second number used to be `EDGE_SOFT`, and it meant the opposite: how
+# sharply the outward field was taken away, so that nothing was left by the
+# time it reached the window's boundary. The window is clipped to a rounded
+# rectangle by `SetWindowRgn`, which is one bit per pixel, so light that ran
+# past the panel's edge met a cliff — and a hard edge across a glow is the
+# defect all of this replaced, arriving through the back door. The border was
+# rejected ten times for looking plastic and the answer was never in the
+# profile, the blur, the ramp or the sampling: it was that half the light was
+# being deleted to hide a boundary. `chrome/layered.py` gives that half a
+# surface of its own, and this is how far it now goes.
+#
+# Longer than `HALO_REACH` on purpose. Inward there is panel to cross and words
+# not to wash out; outward there is nothing in the way, which is what makes a
+# border look like light falling on a desk rather than a sticker on it.
 CORE_WIDTH = 3.0
 CORE_SOFT = 7.0
 HALO_REACH = 22.0
 EDGE_INSET = 7.0
-EDGE_SOFT = 3.4
+SPILL_REACH = 34.0
 
 # What the music does to the light's presence. The line ring pulsed its stroke
 # *widths*, which an image cannot do without rebuilding its fields; scaling the
@@ -337,7 +347,7 @@ class Beam:
 
     def __init__(self, canvas, width: int, height: int, radius: int,
                  scale: float = 1.0, style: str = COMET,
-                 intensity: float = 1.0):
+                 intensity: float = 1.0, glow=None):
         self.canvas = canvas
         self.style = style
         self.intensity = max(0.5, min(2.0, intensity))
@@ -348,9 +358,40 @@ class Beam:
         self._palette = None
         self._state = None
         self._tables: tuple = ()
-        self.light = halo.Ring(canvas)
+        # `glow` is a surface for the half of the light that falls outside the
+        # window, or None where the platform has none to offer. It is handed
+        # through to `halo.Ring` rather than driven from here on purpose: the
+        # four tables a frame produces describe the whole circumference, and
+        # both halves have to be looked up through the same tables on the same
+        # strip in the same call or the border is one colour inside the panel
+        # and another outside it. Driving them from two places here would make
+        # that a matter of call order. See decision 9.6.
+        self.light = halo.Ring(canvas, glow)
         self.set_scale(scale)
         self.reshape(width, height, radius)
+
+    @property
+    def pad(self) -> int:
+        """How far outside the panel the light reaches, in physical pixels."""
+        return halo.pad_of(self.shape)
+
+    def place(self, x: int, y: int) -> None:
+        """The panel's top-left corner moved or changed size. Follow it."""
+        self.light.place(x, y)
+
+    def follow(self, x: int, y: int) -> None:
+        """The same, under a hand: the cheaper half, with no bitmap handed over."""
+        self.light.follow(x, y)
+
+    def behind(self, hwnd: int | None) -> None:
+        """Keep the outward half directly under the panel in the z-order."""
+        if hwnd and self.light.spill is not None:
+            self.light.spill.behind(hwnd)
+
+    def visible(self, shown: bool) -> None:
+        """Go away with the panel, and come back with it."""
+        if self.light.spill is not None:
+            self.light.spill.visible(shown)
 
     def set_scale(self, scale: float) -> None:
         """Re-derive the light's shape for a window whose scale changed.
@@ -372,7 +413,7 @@ class Beam:
                                 core=max(1.0, CORE_WIDTH * weight),
                                 ridge=max(1.0, CORE_SOFT * weight),
                                 reach=max(2.0, HALO_REACH * weight),
-                                edge=max(0.8, EDGE_SOFT * weight))
+                                spill=max(2.0, SPILL_REACH * weight))
 
     @property
     def _points(self) -> list[tuple]:

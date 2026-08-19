@@ -366,7 +366,7 @@ class Layered:
 
     def __init__(self, size, at=(0, 0), owner=None):
         if Layered._class is None:
-            proc = WNDPROC(lambda h, m, w, l: user32.DefWindowProcW(h, m, w, l))
+            proc = WNDPROC(lambda h, m, w, p: user32.DefWindowProcW(h, m, w, p))
             _kept.append(proc)
             cls = WNDCLASS()
             cls.lpfnWndProc = ctypes.cast(proc, ctypes.c_void_p)
@@ -501,6 +501,7 @@ def run_companion(seconds=4.0, at=None, shots=None):
     carries the outward half, which is the half that has nowhere to go today.
     """
     import tkinter as tk
+
     from PIL import ImageTk
 
     try:
@@ -510,7 +511,7 @@ def run_companion(seconds=4.0, at=None, shots=None):
 
     at = at or spot()
     panel_at = (at[0] + PAD, at[1] + PAD)
-    faced = "#%02x%02x%02x" % FACE
+    faced = "#{:02x}{:02x}{:02x}".format(*FACE)
 
     root = tk.Tk()
     root.overrideredirect(True)
@@ -708,6 +709,7 @@ def run_ab(out):
     two photographs of the same thing rather than of two intentions.
     """
     import tkinter as tk
+
     from PIL import ImageTk
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -737,7 +739,7 @@ def run_ab(out):
     root.attributes("-topmost", True)
     root.attributes("-alpha", PANEL_ALPHA)
     canvas = tk.Canvas(root, width=PANEL[0], height=PANEL[1],
-                       bg="#%02x%02x%02x" % FACE, highlightthickness=0)
+                       bg="#{:02x}{:02x}{:02x}".format(*FACE), highlightthickness=0)
     canvas.pack()
     inner = inward.crop((PAD, PAD, PAD + PANEL[0], PAD + PANEL[1]))
     photo = ImageTk.PhotoImage(inner, master=canvas)
@@ -969,9 +971,9 @@ def run_bench(rounds=60):
 
     def premultiplied_tables(table):
         red, green, blue, opacity = table
-        return ([r * o // 255 for r, o in zip(red, opacity)],
-                [g * o // 255 for g, o in zip(green, opacity)],
-                [b * o // 255 for b, o in zip(blue, opacity)],
+        return ([r * o // 255 for r, o in zip(red, opacity, strict=True)],
+                [g * o // 255 for g, o in zip(green, opacity, strict=True)],
+                [b * o // 255 for b, o in zip(blue, opacity, strict=True)],
                 list(opacity))
 
     def strip_bytes(profile_cut, where_cut, ptable):
@@ -991,7 +993,6 @@ def run_bench(rounds=60):
               premultiplied_tables(channels(True, i / 100))).tobytes("raw", "RGBA"))
     ptable = premultiplied_tables(channels(True, 0.0))
     strip_raw = strip_bytes(p_cut, w_cut, ptable).tobytes("raw", "RGBA")
-    stride = CANVAS[0] * 4
 
     def whole_frame(i=0):
         raw = strip_bytes(p_cut, w_cut, premultiplied_tables(

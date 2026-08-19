@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Let the border's light leave the panel. The overlay is clipped to a one-bit
+  rounded rectangle by `SetWindowRgn`, so the glow stopped dead at the window's
+  edge — and the falloff carried a term whose only purpose was to extinguish its
+  outward half before it arrived there, because a hard cut across a glow reads
+  worse than no glow at all. Ten attempts at the profile, the blur, the colour
+  ramp and the supersampling were all working on the wrong thing: half the light
+  was being deleted to hide a boundary. A companion `WS_EX_LAYERED` window now
+  carries that half with real per-pixel alpha and no boundary to stop at, and
+  the outward field reaches 34 design pixels onto the desktop instead of being
+  taken to nothing over 3.4. It takes no click and no focus, it sits under the
+  panel in the z-order, and it is punched through wherever the panel's own
+  footprint is, so it can never cover a word.
+- Cache the two fields together and bound the cache at 48 MiB rather than 24.
+  An entry carries twice the band it used to, and at the old bound a collapse
+  kept fourteen of its twenty-one sizes — so the unfold, which asks for exactly
+  the same twenty-one, paid for a third of them again.
+
 ## 0.2.7 — 2026-08-18
 
 - Place the window through the platform rather than through `wm geometry`, which

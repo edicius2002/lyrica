@@ -36,13 +36,21 @@ on the CPU, and `numpy` makes it a dozen vectorised passes over the edge band.
 Two things the closed form has to be *told*, because a blur used to imply them:
 
     * The falloff is asymmetric. Inward there is panel to spread across, so the
-      light carries `reach`. Outward the window's own boundary is `inset` pixels
-      away — the overlay is clipped to a rounded rectangle with `SetWindowRgn`,
-      and the desktop starts on the other side of it — so the light has to be
-      *gone* before it arrives, or the clip cuts a straight line across a glow
-      and hands back the hard edge all of this exists to remove. A blur is
-      symmetric by definition and the old code corrected for that with a second
-      mask; here the two sides are simply two different functions of `d`.
+      light carries `reach`; outward there is desktop, so it carries `spill`,
+      and `spill` is the longer of the two because that is where light with
+      nothing in its way goes.
+
+      This used to say the opposite, and that was the whole fault. The overlay
+      is clipped to a rounded rectangle by `SetWindowRgn`, which is one bit per
+      pixel, so the light *stopped dead* at the window's edge; the shape
+      therefore carried an `edge` term whose only purpose was to extinguish the
+      outward half before it arrived there, because a hard cut across a glow
+      reads worse than no glow at all. Ten iterations were spent on the
+      profile, the blur, the colour ramp and the supersampling, and none of
+      them was the fault: the light was being killed to hide a boundary.
+      `chrome/layered.py` removes the boundary instead, and this module now
+      builds *both* halves — the inward one for the canvas, the outward one for
+      the companion surface that has no edge to stop at.
     * Where a pixel is *round* the ring, which is what carries the rotating
       colour. That is closed-form too: the arc length of the nearest point on
       the path. Better than the old one, in fact — the old field was drawn as
@@ -73,15 +81,16 @@ class Shape(NamedTuple):
     """How wide the light is and how it falls off, in physical pixels.
 
     Asymmetric, and that is the point of describing it here rather than as one
-    radius. Inward there is panel to spread across, so the field carries
-    `reach`. Outward there is the window's own boundary `inset` pixels away, so
-    the field has to be gone before it arrives.
+    radius. Inward there is panel to spread across and words not to drown, so
+    the field carries `reach`. Outward there is desktop, so it carries `spill`
+    — which is free to be the larger of the two now that the window's edge is
+    no longer where the light dies.
     """
     inset: float        # how far the ridge sits inside the panel's own edge
     core: float         # how wide the brightest part of the light is
     ridge: float        # how far the near falloff carries
     reach: float        # how far the wide field carries inward
-    edge: float         # how sharply the light is taken away outward
+    spill: float        # and how far it carries outward, onto the desktop
 
 # Entries in the table that turns "how far round the ring" into a colour. One
 # byte's worth, because that is what the `where` field can hold and what a
@@ -100,22 +109,22 @@ OFF_RING = 0
 # ridge keeps its opacity where the two overlap.
 OUTER_KEEP = 0.55
 
-# How many standard deviations of the wide lobe fit inside `reach`. Three, so
-# the field has faded to about a hundredth of its peak by the distance the
-# caller asked for.
+# How many standard deviations of the wide lobe fit inside `reach` and inside
+# `spill`. Three, so the field has faded to about a hundredth of its peak by the
+# distance the caller asked for.
 SIGMAS = 3.0
 
-# And how many of the outward gate's fit inside `inset`. The gate is the half of
-# the asymmetry that matters: at `inset` the window is clipped, so whatever the
-# caller asked for as `edge`, the light is given no more room than the clip
-# allows. Measured on the default panel — `inset` 7, `edge` 3.4 — this holds the
-# gate to sigma 2.5 and leaves 0.35 of 255 at the boundary, which rounds to
-# nothing and is cut by nothing.
-EDGE_SIGMAS = 2.8
-
-# Below this the light is not merely dim, it is off. It is what makes the outer
-# tail *end* rather than trail a level or two into the clip, and what keeps the
-# `where` field honest about which pixels have no ring near them.
+# Below this the light is not merely dim, it is off. It is what makes the tail
+# *end* rather than trail a level or two forever, and what keeps the `where`
+# field honest about which pixels have no ring near them.
+#
+# It is also what sizes the companion surface. A gaussian is still worth
+# something at two and three sigmas, so "as far as `spill` says" is not far
+# enough — `pad_of` asks the profile itself where it reaches nothing, which is
+# this threshold, and the bitmap is cut there rather than at a number somebody
+# chose. Cut short of it and the spill acquires a straight edge in mid-air,
+# which is the same defect as the window's own boundary wearing a different
+# hat.
 DIM = 0.4 / 255.0
 
 # How finely the cross-section is sampled before it is interpolated per pixel.
@@ -145,7 +154,16 @@ PER_CALL = 1
 # One entry is five bytes a pixel of edge band — four for the profile, which is
 # kept in floating point precisely so that the multiply by the table's opacity
 # happens before the rounding rather than after it, and one for the position.
-FIELD_BYTES = 24 * 1024 * 1024
+#
+# It was 24 MiB while an entry was the inward band alone. An entry now carries
+# the outward band as well, which is wider and runs round the outside of the
+# panel rather than the inside, and it measured 2.4 MiB against the 0.7 MiB it
+# used to be. At 24 MiB a collapse of the default panel kept fourteen of its
+# twenty-one sizes, so the unfold — which asks for exactly the same twenty-one
+# — started paying for a third of them again: measured, a warm re-fold went
+# from 4.7 ms a frame to 9.8. 48 MiB holds the whole animation with room over,
+# which is the property the cache was put here for.
+FIELD_BYTES = 48 * 1024 * 1024
 
 
 class _Fields(OrderedDict):
@@ -164,7 +182,8 @@ class _Fields(OrderedDict):
 
     def keep(self, key, value) -> None:
         weight = sum(profile.nbytes + where.nbytes
-                     for _box, profile, where, _keys in value)
+                     for half in value
+                     for _box, profile, where, _keys in half)
         self[key] = value
         self._weight[key] = weight
         self.total_bytes += weight
@@ -208,6 +227,33 @@ def boxes(width: int, height: int, band: int) -> list[tuple]:
     return [box for box in made if box[2] > box[0] and box[3] > box[1]]
 
 
+def outer_boxes(width: int, height: int, pad: int, corner: int) -> list[tuple]:
+    """Four rectangles covering everything outside the panel, in panel coordinates.
+
+    Negative coordinates, because the companion surface begins `pad` pixels
+    above and to the left of the panel's own origin and every field in this
+    module is solved about the panel's centre. Keeping one coordinate system
+    for both halves is what makes the dither line up across the boundary: it is
+    indexed by the pixel's place on the panel, so a strip on either side of the
+    edge agrees with its neighbour instead of crawling against it.
+
+    Same tiling as `boxes` and the same reason — they must not overlap — with
+    one difference. The top and bottom bands reach `corner` further in than the
+    sides do, because the pixels between a square corner and a rounded one are
+    *inside* the panel's rectangle and *outside* its clip region, so nothing on
+    the canvas can ever draw them: they belong to this half, and they sit
+    beside the corner rather than beyond it.
+    """
+    deep = min(max(0, corner), height // 2)
+    top = (-pad, -pad, width + pad, deep)
+    bottom = (-pad, max(deep, height - deep), width + pad, height + pad)
+    made = [top, bottom]
+    if bottom[1] > top[3]:
+        made.append((-pad, top[3], 0, bottom[1]))
+        made.append((width, top[3], width + pad, bottom[1]))
+    return [box for box in made if box[2] > box[0] and box[3] > box[1]]
+
+
 def profile_of(shape: Shape):
     """The light's cross-section: `(distances, brightness)`, both ascending in d.
 
@@ -216,7 +262,7 @@ def profile_of(shape: Shape):
     arithmetic rather than as a blur so that it is exact at every pixel instead
     of at every byte.
 
-    Three terms:
+    Two terms:
 
       * a near lobe and a wide one, each the *exact* profile of a line of width
         `core` convolved with a gaussian — which is what the old blur was
@@ -224,15 +270,17 @@ def profile_of(shape: Shape):
         functions and evaluated in double precision. Screened together, and each
         normalised to its own peak first, so `OUTER_KEEP` still means what it
         says however wide the two are.
-      * an outward gate, the exact profile of a blurred half-plane, which is the
-        asymmetry. It is one at every pixel inside the path and falls away
-        outside it, and its width is capped by `inset` rather than taken from
-        `edge` alone: the clip is at `inset`, so light that would still be there
-        is light the clip would cut.
+      * the asymmetry, which is now a single number rather than a term: the
+        wide lobe is given one standard deviation inside the path and a larger
+        one outside it. Both sides still peak at one on the path, so the curve
+        is continuous there and the brightest point is the path itself.
 
-    The whole is normalised to peak at one — which the gate puts a pixel or two
-    *inside* the path rather than on it, and that is right: the brightest part
-    of a border that has to end at a boundary is not the part nearest it.
+    There used to be a third, an outward gate — the exact profile of a blurred
+    half-plane, one inside and falling to nothing outside — and it was there
+    only because the window's boundary was `inset` pixels out and light that
+    reached it was light the clip would cut in a straight line. The companion
+    surface has no boundary, so the gate has gone and with it the reason the
+    border looked like a sticker.
     """
     import numpy as np
 
@@ -242,7 +290,6 @@ def profile_of(shape: Shape):
         return made
 
     erf = np.vectorize(math.erf, otypes=[np.float64])
-    erfc = np.vectorize(math.erfc, otypes=[np.float64])
     half = max(0.05, shape.core / 2.0)
 
     def lobe(distance, sigma):
@@ -250,24 +297,22 @@ def profile_of(shape: Shape):
         root = sigma * math.sqrt(2.0)
         return 0.5 * (erf((half + distance) / root) + erf((half - distance) / root))
 
-    # Far enough inward that the wide lobe has died, and far enough outward that
-    # the gate has. Anything beyond either end reads the end's value, which is
-    # zero on both sides by construction.
+    # Far enough each way that the wide lobe has died. Anything beyond either
+    # end reads the end's value, which is zero on both sides by construction.
     inward = shape.reach + shape.core + 8.0
-    outward = shape.inset + 2.0
+    outward = shape.spill + shape.core + 8.0
     grid = np.arange(-inward, outward + SAMPLE, SAMPLE)
     away = np.abs(grid)
 
     near = max(0.35, shape.ridge / SIGMAS)
-    wide = max(0.60, shape.reach / SIGMAS)
+    # One sigma per side, selected per sample rather than solved twice. Both
+    # sides are normalised to their own peak, which is one at `d` = 0 either
+    # way, so the join at the path is a value and not a step.
+    wide = np.where(grid < 0.0, max(0.60, shape.reach / SIGMAS),
+                    max(0.60, shape.spill / SIGMAS))
     ridge = lobe(away, near) / lobe(0.0, near)
     field = OUTER_KEEP * (lobe(away, wide) / lobe(0.0, wide))
-    lit = ridge + field - ridge * field
-
-    gate = 0.5 * erfc(grid / (max(0.35, min(shape.edge,
-                                            shape.inset / EDGE_SIGMAS))
-                              * math.sqrt(2.0)))
-    values = lit * gate
+    values = ridge + field - ridge * field
     values /= values.max()
     values[values < DIM] = 0.0
     made = (grid, values.astype(np.float32))
@@ -275,6 +320,26 @@ def profile_of(shape: Shape):
     # — one per window scale anyone stops at — so this never needs a bound.
     _profiles[key] = made
     return made
+
+
+def pad_of(shape: Shape) -> int:
+    """How much room outside the panel the light needs, in physical pixels.
+
+    Asked of the profile rather than of `spill`, because `spill` is where the
+    wide lobe has faded to about a hundredth and a hundredth of a bright border
+    is still four or five levels of 255. What the surface has to contain is
+    everywhere the profile is not *zero*, and the profile knows where that is:
+    `DIM` is what put the zeros there.
+
+    The companion's own bitmap edge is a cliff exactly like the window's, so
+    getting this wrong is not a dimmer glow, it is a straight line drawn across
+    one in mid-air. `BAND_SLACK` is added for the same reason it is added to a
+    strip boundary.
+    """
+    grid, values = profile_of(shape)
+    lit = values.nonzero()[0]
+    reach = float(grid[lit[-1]]) if len(lit) else 0.0
+    return max(1, math.ceil(reach - shape.inset) + BAND_SLACK)
 
 
 def _around(np, x, y, qx, qy, ax, by, radius, starts):
@@ -346,14 +411,38 @@ def _dither(np, box):
     return _bayer[np.ix_(rows, columns)].astype(np.float32)
 
 
+def _rounded_distance(np, x, y, a: float, b: float, r: float):
+    """Signed distance from `(x, y)` to a rounded rectangle centred on zero.
+
+    Half-extents `a` and `b`, corner radius `r`, negative inside. The same
+    closed form the light is built on, kept as a function because it is now
+    solved twice for two different rectangles — the ring's own path, and the
+    panel's outline, which is where the two halves of the light meet.
+    """
+    qx, qy = np.abs(x) - (a - r), np.abs(y) - (b - r)
+    wide, tall = np.maximum(qx, 0.0), np.maximum(qy, 0.0)
+    return (np.sqrt(wide * wide + tall * tall)
+            + np.minimum(np.maximum(qx, qy), 0.0) - r)
+
+
 def _built(width: int, height: int, radius: float, shape: Shape,
-           band: int) -> list[tuple]:
-    """The static fields for one geometry, over the strips that use them.
+           band: int, pad: int) -> tuple[list, list]:
+    """The static fields for one geometry: `(inward, outward)`.
 
     Only the edge band is evaluated. The interior of the panel is where most of
     its pixels are and none of them are ever lit, so the cost is a function of
     the perimeter rather than of the area — which is why a closed form at full
     resolution is affordable where a full-resolution blur was not.
+
+    The two halves are the same light cut at the panel's own outline, because
+    that is where one window stops and the other starts, and neither can draw a
+    pixel on the other's side. Only the outward half is masked. The canvas half
+    is left whole and the region clip cuts it, which is deliberate: the clip is
+    one bit and rasterised by GDI, and no mask computed here is guaranteed to
+    agree with it to the pixel. Masking both would make a disagreement a *gap* —
+    a dark notch round the corner, which is exactly the artefact all of this
+    exists to remove. Leaving the canvas half whole makes a disagreement an
+    overlap instead, and an overlap is one pixel of light composed twice.
     """
     import numpy as np
 
@@ -369,14 +458,20 @@ def _built(width: int, height: int, radius: float, shape: Shape,
                               2 * ax, quarter, 2 * by, quarter), initial=0.0))
     total = starts[-1] or 1.0
 
+    # The panel's own outline, which is what the window is clipped to and
+    # therefore where the light changes hands. Its centre is the true middle of
+    # the pixel grid rather than the field's `width / 2`, so that the mask lands
+    # where `CreateRoundRectRgn` puts the region rather than half a pixel off it.
+    edge_a, edge_b = (width - 1) / 2.0, (height - 1) / 2.0
+    edge_r = max(0.0, min(float(radius), edge_a, edge_b))
+
     # The cross-section is sampled on an even grid, so it is read by arithmetic
     # rather than by `np.interp`'s search: two gathers and a lerp against a
     # binary search per pixel, over eighty thousand of them.
     first, step = float(grid[0]), float(grid[1] - grid[0])
     last = len(values) - 2
 
-    made = []
-    for box in boxes(width, height, band):
+    def field(box, outside: bool):
         x0, y0, x1, y1 = box
         x = (np.arange(x0, x1, dtype=np.float32) - cx)[None, :]
         y = (np.arange(y0, y1, dtype=np.float32) - cy)[:, None]
@@ -390,6 +485,10 @@ def _built(width: int, height: int, radius: float, shape: Shape,
         rest = at - below
         low = values[below]
         profile = low + (values[below + 1] - low) * rest
+        if outside:
+            panel = _rounded_distance(np, x + (cx - edge_a), y + (cy - edge_b),
+                                      edge_a, edge_b, edge_r)
+            profile = profile * (panel > 0.0)
 
         place = _around(np, x, y, qx, qy, ax, by, r, starts)
         # Position 0 is reserved for "no light here", so the ring is written
@@ -404,8 +503,13 @@ def _built(width: int, height: int, radius: float, shape: Shape,
         # pixels.
         counted = np.bincount(where.reshape(-1), minlength=LUT_SIZE)
         keys = tuple(int(value) for value in counted.nonzero()[0])
-        made.append((box, np.ascontiguousarray(profile), where, keys))
-    return made
+        return (box, np.ascontiguousarray(profile), where, keys)
+
+    inward = [field(box, False) for box in boxes(width, height, band)]
+    corner = math.ceil(edge_r) + 1
+    outward = [field(box, True)
+               for box in outer_boxes(width, height, pad, corner)]
+    return inward, outward
 
 
 class _Strip:
@@ -414,11 +518,148 @@ class _Strip:
     __slots__ = ("box", "dither", "item", "keys", "photo", "profile", "shown",
                  "where")
 
-    def __init__(self, item: int):
+    def __init__(self, item=None):
         self.item = item
         self.box = self.profile = self.where = self.photo = self.shown = None
         self.dither = None
         self.keys: tuple = ()
+
+
+def _lay(strips: list[_Strip], built: list, np) -> None:
+    """Give a set of strips the fields just built for them.
+
+    Shared by both halves, because what a strip carries is the same on either
+    side of the window's edge — a box, the two fields over it, and a dither
+    keyed on where the box sits on the panel rather than where it sits in the
+    strip, so that a repaint reproduces it exactly and two strips agree across
+    the border they share.
+    """
+    for strip, made in zip(strips, built, strict=False):
+        box, profile, where, keys = made
+        if strip.box != box:
+            strip.dither = _dither(np, box)
+        strip.box, strip.profile, strip.where = box, profile, where
+        strip.keys = keys
+        # The fields under it changed, so whatever it is showing no longer
+        # describes it. Left alone, a strip whose colours happened not to move
+        # would keep the picture drawn for the previous panel size.
+        strip.shown = None
+
+
+class Spill:
+    """The half of the light that falls outside the window.
+
+    It has no canvas and no `PhotoImage`: its pixels are written straight into
+    the surface a `chrome.layered.Layered` presents, which is the only place in
+    this process with real per-pixel alpha and no boundary for the light to
+    stop at. The panel's own footprint is a hole in it — the overlay is
+    translucent, so light left under the panel would show *through* it, doubly
+    composed and at the wrong brightness — and that hole is also why the
+    companion cannot cover a word even if it lost its place in the z-order.
+
+    Written premultiplied, because `UpdateLayeredWindow` demands it, and that
+    costs nothing: the opacity a pixel gets is `profile * opacity(where)`, so
+    its premultiplied red is `red(where) * opacity(where) * profile`, and
+    `red * opacity` is a function of `where` alone. It folds into the table.
+    Done the obvious way instead — a second pass over every pixel multiplying
+    the three colour bands by the alpha band — it was measured at 8.53 ms a
+    frame, which is half the budget for arithmetic that need never happen.
+    """
+
+    def __init__(self, glow):
+        self.glow = glow
+        self.strips = [_Strip() for _ in range(4)]
+        self.pad = 0
+        self.size = (0, 0)
+        self.at = (0, 0)
+
+    def reshape(self, built: list, pad: int, width: int, height: int) -> None:
+        """Take the outward fields for a panel of this size, and clear the surface.
+
+        The surface persists between frames — that is what lets a frame rewrite
+        one strip of the edge and hand the whole bitmap over — so a panel that
+        changed size leaves the previous one's light lying in it. Cleared here
+        rather than per strip, because the strips no longer cover the same
+        pixels they did.
+        """
+        import numpy as np
+
+        self.pad = pad
+        self.size = (width + 2 * pad, height + 2 * pad)
+        self.glow.reserve(*self.size)
+        self.glow.frame()[:self.size[1], :self.size[0]] = 0
+        _lay(self.strips, built, np)
+        for strip in self.strips[len(built):]:
+            strip.box, strip.shown = None, None
+
+    def place(self, x: int, y: int) -> None:
+        """Where the *panel's* top-left corner is. The surface sits `pad` outside it."""
+        self.at = (int(x) - self.pad, int(y) - self.pad)
+
+    def move(self) -> None:
+        """Follow a drag, without handing over a bitmap that has not changed.
+
+        Both windows move by the same asynchronous `SetWindowPos`, which is the
+        point: they queue on the one thread that owns them and are applied in
+        the order they were asked for. Presenting the surface instead was tried
+        and is not wrong — the light is unchanged, so the handover is pure cost
+        — but it puts a synchronous call between two asynchronous ones, which
+        is the arrangement most likely to let them interleave. Photographed
+        mid-drag either way, the panel sits exactly in the middle of its light.
+        """
+        self.glow.move(*self.at)
+
+    def present(self) -> None:
+        self.glow.present(self.size[0], self.size[1], self.at)
+
+    def behind(self, hwnd: int) -> None:
+        self.glow.behind(hwnd)
+
+    def visible(self, shown: bool) -> None:
+        self.glow.visible(shown)
+
+    def paint(self, index: int, channels: tuple) -> bool:
+        """Redraw one strip into the surface. True if it needed redrawing.
+
+        Nothing is presented here. The handover is one call for the whole
+        bitmap whatever is in it — 0.12 ms, measured — so it belongs to the
+        frame rather than to the strip.
+        """
+        strip = self.strips[index] if index < len(self.strips) else None
+        if strip is None or strip.box is None:
+            return False
+        want = bytes(table[key] for key in strip.keys for table in channels)
+        if want == strip.shown:
+            return False
+        self._draw(strip, channels)
+        strip.shown = want
+        return True
+
+    def _draw(self, strip: _Strip, channels: tuple) -> None:
+        import numpy as np
+
+        red, green, blue, opacity = (
+            np.asarray(table, dtype=np.float32) for table in channels)
+        # The premultiply, folded into the table where it is free. Alpha is
+        # last, and the three colours can never exceed it because no entry of
+        # `red` exceeds 255 — including after the dither, which is added to all
+        # four equally.
+        tables = (blue * opacity * (1.0 / 255.0), green * opacity * (1.0 / 255.0),
+                  red * opacity * (1.0 / 255.0), opacity)
+        x0, y0, x1, y1 = strip.box
+        pad = self.pad
+        out = self.glow.frame()[y0 + pad:y1 + pad, x0 + pad:x1 + pad]
+        for band, table in enumerate(tables):
+            value = strip.profile * table[strip.where]
+            value += strip.dither
+            np.clip(value, 0.0, 255.0, out=value)
+            # Truncated rather than rounded, because the dither already carries
+            # the half. See `_dither`.
+            out[..., band] = value.astype(np.uint8)
+
+    def destroy(self) -> None:
+        self.strips.clear()
+        self.glow.destroy()
 
 
 class Ring:
@@ -429,13 +670,20 @@ class Ring:
     never cover a word, and an item created later lands on top of the display
     list. A ring that rebuilt its items on a resize would climb over the words
     it was laid under, once, and stay there.
+
+    It owns the outward half as well, when there is a surface to put it on.
+    Two halves of one border cut by a window's boundary are not two effects:
+    they are laid out from one geometry and repainted from one loop and one
+    strip index, because the thing that would show is the two of them
+    disagreeing across the very line the split runs along.
     """
 
-    def __init__(self, canvas):
+    def __init__(self, canvas, glow=None):
         self.canvas = canvas
         self.strips = [_Strip(canvas.create_image(0, 0, anchor="nw",
                                                   state="hidden"))
                        for _ in range(4)]
+        self.spill = Spill(glow) if glow is not None else None
         self._next = 0
 
     def reshape(self, width: int, height: int, radius: float,
@@ -453,26 +701,21 @@ class Ring:
         rectangle and not a sampling of it. The caller still has the points —
         they are the path the light is centred on — and nothing here reads them.
         """
+        import numpy as np
+
         band = max(1, round(shape.inset + shape.reach + shape.core + BAND_SLACK))
+        pad = pad_of(shape)
         key = (width, height, round(float(radius), 2),
-               tuple(round(value, 2) for value in shape), band)
+               tuple(round(value, 2) for value in shape), band, pad)
         built = _cache.take(key)
         if built is None:
-            built = _built(width, height, radius, shape, band)
+            built = _built(width, height, radius, shape, band, pad)
             _cache.keep(key, built)
-        for strip, made in zip(self.strips, built, strict=False):
-            box, profile, where, keys = made
-            resized = strip.box is None or strip.box != box
-            strip.box, strip.profile, strip.where = box, profile, where
-            strip.keys = keys
-            # The fields under it changed, so whatever it is showing no longer
-            # describes it. Left alone, a strip whose colours happened not to
-            # move would keep the picture drawn for the previous panel size.
-            strip.shown = None
-            if resized:
-                import numpy as np
-
-                strip.dither = _dither(np, box)
+        inward, outward = built
+        boxed = [strip.box for strip in self.strips]
+        _lay(self.strips, inward, np)
+        for strip, was in zip(self.strips[:len(inward)], boxed, strict=False):
+            if was != strip.box:
                 # A `PhotoImage` cannot change size, so a strip that did needs a
                 # new one. The canvas item does not: it is the item's position
                 # in the display list that has to survive.
@@ -486,11 +729,13 @@ class Ring:
                 # it.
                 self.canvas.itemconfigure(strip.item, image="")
                 strip.photo = None
-            self.canvas.coords(strip.item, box[0], box[1])
+            self.canvas.coords(strip.item, strip.box[0], strip.box[1])
             self.canvas.itemconfigure(strip.item, state="normal")
-        for strip in self.strips[len(built):]:
+        for strip in self.strips[len(inward):]:
             self.canvas.itemconfigure(strip.item, state="hidden")
             strip.box, strip.shown = None, None
+        if self.spill is not None:
+            self.spill.reshape(outward, pad, width, height)
 
     def paint(self, channels: tuple) -> int:
         """Show the ring lit by `channels`, at most `PER_CALL` strips a call.
@@ -509,17 +754,42 @@ class Ring:
         for _ in range(len(self.strips)):
             if painted >= PER_CALL:
                 break
-            strip = self.strips[self._next % len(self.strips)]
+            index = self._next % len(self.strips)
+            strip = self.strips[index]
             self._next += 1
             if strip.box is None:
                 continue
             want = bytes(table[key] for key in strip.keys for table in channels)
-            if want == strip.shown:
+            inward = want != strip.shown
+            # Asked unconditionally, and before the early exit, because the two
+            # halves are one stretch of edge: skipping the outward one whenever
+            # the inward one happened not to move is how a border ends up lit to
+            # one colour inside the panel and another outside it.
+            outward = (self.spill is not None
+                       and self.spill.paint(index, channels))
+            if not (inward or outward):
                 continue
-            self._show(strip, channels)
-            strip.shown = want
+            if inward:
+                self._show(strip, channels)
+                strip.shown = want
             painted += 1
+        if painted and self.spill is not None:
+            # One handover for the whole surface, once, however many strips of
+            # it were rewritten.
+            self.spill.present()
         return painted
+
+    def place(self, x: int, y: int) -> None:
+        """Tell the outward half where the panel's top-left corner is now."""
+        if self.spill is not None:
+            self.spill.place(x, y)
+            self.spill.present()
+
+    def follow(self, x: int, y: int) -> None:
+        """The same, for a drag: move the surface without handing it over again."""
+        if self.spill is not None:
+            self.spill.place(x, y)
+            self.spill.move()
 
     def image(self, strip: _Strip, channels: tuple):
         """What one strip looks like under `channels`, as a PIL image.
@@ -572,6 +842,14 @@ class Ring:
             strip.photo.paste(image)
 
     def destroy(self) -> None:
+        # The companion first, and that order is load-bearing. Deleting a canvas
+        # item throws if the interpreter has already gone, and one of the ways
+        # this is reached is a root that was destroyed from under the loop — so
+        # the half that would be left on screen is taken down before the half
+        # that can raise on the way out.
+        if self.spill is not None:
+            self.spill.destroy()
+            self.spill = None
         for strip in self.strips:
             self.canvas.delete(strip.item)
             strip.photo = None

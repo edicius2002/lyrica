@@ -27,3 +27,8 @@ desktop.ini
 
 # Agent worktrees: copies of the repository, not source.
 .claude/
+
+# Photographs taken while measuring. They are evidence for a report and for the
+# eye, not source, and they are re-takeable by running the probe beside them —
+# which is the half that is versioned (decision 5.3).
+research/shots/

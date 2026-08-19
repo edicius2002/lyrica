@@ -802,10 +802,17 @@ class Overlay:
         # word; it lives at the very edge, where nothing else is drawn.
         style = config.beam_style()
         if style != "off" and self.chrome.washed:
+            # The half of the border that falls outside the window needs a
+            # window of its own to fall onto, because this one is clipped to a
+            # one-bit rounded rectangle and light does not have edges. None is
+            # still a working border — the inward half of it, ending where it
+            # always used to.
             self.beam = beam_mod.Beam(self.canvas, self.width, self.height,
                                       self.chrome.px(chrome_mod.CORNER_RADIUS),
                                       self.chrome.scale, style,
-                                      config.beam_intensity())
+                                      config.beam_intensity(),
+                                      glow=chrome_mod.glow_surface(self.root))
+            self.beam.place(self.root.winfo_x(), self.root.winfo_y())
 
         # Lyrics must be gone before they reach the card. Without this the
         # outermost line arrives at the top still faintly visible and overlaps
@@ -895,6 +902,11 @@ class Overlay:
             if SUSPEND_GLASS_WHILE_DRAGGING:
                 chrome_mod.suspend_effects(self.root, self.chrome, True)
         chrome_mod.move(self.root, x, y)
+        if self.beam is not None:
+            # The cheaper of the two moves: the light outside the panel has
+            # not changed, only where it is. Photographed mid-drag, the panel
+            # sits exactly in the middle of its own light.
+            self.beam.follow(x, y)
 
     def _remember_where(self) -> None:
         """Keep the horizontal middle and the top edge — the two that survive.
@@ -1189,6 +1201,10 @@ class Overlay:
             self.beam.reshape(width, height,
                               self.chrome.px(chrome_mod.CORNER_RADIUS)
                               if radius is None else radius)
+            # After the reshape, never before: the surface outside the panel is
+            # sized from the geometry that was just built, and placing it first
+            # would present the previous frame's light at this frame's position.
+            self.beam.place(x, top)
         if settling:
             # `SetWindowRgn` repaints the whole window synchronously and is most
             # of that cost on its own. It cannot simply be left stale either,
@@ -1226,6 +1242,11 @@ class Overlay:
         self._hidden = not self._hidden
         if self._hidden:
             self.root.withdraw()
+            # It is a separate window, so `withdraw` says nothing to it. Left
+            # out of this it would be the only thing still on screen: a ring of
+            # light round a panel that is not there.
+            if self.beam is not None:
+                self.beam.visible(False)
             chrome_mod.hold_timer_resolution(False)
             logger.info("overlay hidden")
             return
@@ -1239,6 +1260,14 @@ class Overlay:
         self.root.attributes("-topmost", True)
         self.root.update_idletasks()
         chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+        if self.beam is not None:
+            # Both halves of the same re-assertion. Mapping a window again puts
+            # it back in the z-order as an ordinary one, so the companion has to
+            # be told again where it belongs — under the panel — as well as that
+            # it exists.
+            self.beam.visible(True)
+            self.beam.behind(chrome_mod.window_handle(self.root))
+            self.beam.place(self.root.winfo_x(), self.root.winfo_y())
         # Nothing was drawn while it was away, so whatever line is playing now
         # is not the one on screen. Forgetting which it was makes the next tick
         # place them without animating, rather than gliding through however many
@@ -1391,6 +1420,7 @@ class Overlay:
                 self.beam.set_scale(self.chrome.scale)
                 self.beam.reshape(self.width, self.height,
                                   self.chrome.px(chrome_mod.CORNER_RADIUS))
+                self.beam.place(x, y)
 
         self.canvas.itemconfigure(self._title_item, font=self.f_title)
         self.canvas.itemconfigure(self._artist_item, font=self.f_artist)
@@ -2683,6 +2713,11 @@ class Overlay:
     def _tick(self):
         self._drain_actions()
         if self._closing:
+            # Before the root, because half the border is not a widget: it is a
+            # window of its own with a GDI bitmap in it, and destroying the Tk
+            # side first would leave the light on screen with nothing under it
+            # until the process actually ended.
+            self._drop_beam()
             # Nothing may run after this: every line below touches a widget.
             self.root.destroy()
             return
@@ -2983,6 +3018,25 @@ class Overlay:
         self._presented_scene = None
         return fading
 
+    def _drop_beam(self) -> None:
+        """Take the border down, both halves of it. Safe to call twice.
+
+        The canvas half needs a live interpreter to let go of its items and the
+        companion half does not, so this is written to survive a root that has
+        already gone: the loop can end because something destroyed it, and a
+        layered window nobody destroyed is a ring of light left on the desktop.
+        """
+        beam, self.beam = self.beam, None
+        if beam is None:
+            return
+        try:
+            beam.destroy()
+        except tk.TclError:
+            # `Ring.destroy` takes the companion down first for exactly this
+            # case, so what is lost here is a canvas item on a canvas that no
+            # longer exists.
+            logger.debug("the border's canvas was already gone", exc_info=True)
+
     def _advance_beam(self) -> bool:
         """Move the border light. True while it needs the loop kept awake."""
         if self.beam is None:
@@ -3122,6 +3176,10 @@ class Overlay:
             # leave with it. First in the block because it is the only one that
             # writes anything down.
             self._flush_size()
+            # Every exit again, and for the same reason: the companion glow is
+            # not owned by the Tk root, so an ending that never reached
+            # `_drop_beam` would leave its window behind.
+            self._drop_beam()
             chrome_mod.hold_timer_resolution(False)
             self.tray.stop()
             self.hotkeys.stop()
