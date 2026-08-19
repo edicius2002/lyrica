@@ -36,8 +36,15 @@ E_CONSOLE = 0
 # Vtable slots, counting the three IUnknown entries every interface begins with.
 GET_DEFAULT_ENDPOINT = 4    # IMMDeviceEnumerator
 ACTIVATE = 3                # IMMDevice
+GET_ID = 5                  # IMMDevice
 GET_PEAK_VALUE = 3          # IAudioMeterInformation
 RELEASE = 2
+
+# How often the endpoint is checked against the one Windows is actually
+# playing through. Two seconds is far below noticing a border that has gone
+# still, and far above the cost: the check is one call for the default device
+# and one for its id, against a peak read that happens sixty times a second.
+DEVICE_CHECK_S = 2.0
 
 # How fast the reading is allowed to fall. A peak meter drops to nothing between
 # beats, and a visual following it raw strobes; letting it rise instantly but
@@ -233,8 +240,21 @@ class NullMeter:
 class WindowsMeter:
     """The default speaker's peak, smoothed into something worth drawing."""
 
+    # Carried on the class as well as set in `__init__`, because the tests that
+    # prove a dead endpoint cannot raise into the render tick build one through
+    # `__new__` and hand it only the parts they are about. A meter that needs
+    # its whole constructor to have run before it can be read is a meter those
+    # tests cannot make, and what they are testing is exactly the half-built,
+    # half-broken state.
+    _enumerator = None
+    _device_id = None
+    _since_check = 0.0
+
     def __init__(self):
         self._meter = None
+        self._enumerator = None
+        self._device_id = None
+        self._since_check = 0.0
         self._value = 0.0
         self._envelope = Envelope()
         self.available = False
@@ -251,21 +271,28 @@ class WindowsMeter:
         ole32 = ctypes.windll.ole32
         ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
 
-        enumerator = c_void_p()
-        hr = ole32.CoCreateInstance(
-            byref(_GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")), None,
-            CLSCTX_ALL, byref(_GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")),
-            byref(enumerator))
-        if hr:
-            raise OSError(f"CoCreateInstance failed: 0x{hr & 0xFFFFFFFF:08x}")
+        # Kept, where it used to be released as soon as it had answered. The
+        # default device is asked for again every couple of seconds now, and
+        # building an enumerator each time is most of what that would cost.
+        if self._enumerator is None:
+            enumerator = c_void_p()
+            hr = ole32.CoCreateInstance(
+                byref(_GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")), None,
+                CLSCTX_ALL,
+                byref(_GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")),
+                byref(enumerator))
+            if hr:
+                raise OSError(f"CoCreateInstance failed: 0x{hr & 0xFFFFFFFF:08x}")
+            self._enumerator = enumerator
 
         device = c_void_p()
-        hr = self._call(enumerator, GET_DEFAULT_ENDPOINT,
+        hr = self._call(self._enumerator, GET_DEFAULT_ENDPOINT,
                         [ctypes.c_int, ctypes.c_int, POINTER(c_void_p)],
                         E_RENDER, E_CONSOLE, byref(device))
-        self._release(enumerator)
         if hr:
             raise OSError(f"no default render device: 0x{hr & 0xFFFFFFFF:08x}")
+
+        self._device_id = self._id_of(device)
 
         meter = c_void_p()
         hr = self._call(device, ACTIVATE,
@@ -276,6 +303,73 @@ class WindowsMeter:
         if hr:
             raise OSError(f"endpoint has no meter: 0x{hr & 0xFFFFFFFF:08x}")
         self._meter = meter
+
+    def _id_of(self, device) -> str | None:
+        """The endpoint's identity string, or `None` if it will not say.
+
+        Windows owns the buffer it hands back, so it is copied out and freed
+        here rather than held. `None` is not an identity: a device that will
+        not name itself must never compare unequal to the one already open, or
+        the meter would rebuild itself every time it asked.
+        """
+        ident = c_void_p()
+        if self._call(device, GET_ID, [POINTER(c_void_p)], byref(ident)):
+            return None
+        if not ident:
+            return None
+        name = ctypes.wstring_at(ident)
+        ctypes.windll.ole32.CoTaskMemFree(ident)
+        return name
+
+    def _default_id(self) -> str | None:
+        """The identity of the endpoint Windows is playing through now."""
+        if self._enumerator is None:
+            return None
+        device = c_void_p()
+        if self._call(self._enumerator, GET_DEFAULT_ENDPOINT,
+                      [ctypes.c_int, ctypes.c_int, POINTER(c_void_p)],
+                      E_RENDER, E_CONSOLE, byref(device)):
+            return None
+        name = self._id_of(device)
+        self._release(device)
+        return name
+
+    def _follow_default_device(self, dt: float) -> None:
+        """Rebind to the speaker Windows is actually playing through.
+
+        The endpoint is chosen once, and that choice can stop being true
+        without anything failing. Send the sound to a headset and the old
+        endpoint keeps answering, truthfully, that nothing is coming out of
+        it — so the border goes still and stays still, and nothing anywhere
+        says why. It is the same shape of fault as reading the display scale
+        once: a thing taken at startup that the machine is free to change
+        underneath.
+
+        It is also the only way back from a dead one. `raw` drops an endpoint
+        that stops answering, which is right, because it cannot be read from
+        again — but until this that was permanent, and unplugging a speaker
+        cost the border for the rest of the session.
+
+        Nothing here may raise, for the reason `raw` gives.
+        """
+        self._since_check += dt
+        if self._since_check < DEVICE_CHECK_S:
+            return
+        self._since_check = 0.0
+        try:
+            current = self._default_id()
+            if self._meter is not None and (current is None
+                                            or current == self._device_id):
+                return
+            self._release(self._meter)
+            self._meter = None
+            self._open()
+            self.available = True
+            logger.info("the audio meter moved to the current output device")
+        except OSError:
+            # Nothing to move to. The next check will look again, which is the
+            # whole point of there being one.
+            self.available = False
 
     @staticmethod
     def _call(obj, slot, argtypes, *args):
@@ -335,6 +429,7 @@ class WindowsMeter:
         and easing the fall turns the same readings into an envelope that keeps
         the attack.
         """
+        self._follow_default_device(dt)
         raw = self.raw()
         if raw >= self._value:
             self._value = raw
@@ -351,6 +446,8 @@ class WindowsMeter:
     def close(self) -> None:
         self._release(self._meter)
         self._meter = None
+        self._release(self._enumerator)
+        self._enumerator = None
         self.available = False
 
 
