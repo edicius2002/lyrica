@@ -496,6 +496,7 @@ class Overlay:
         self._card_width = 0
         self._card_raw = None
         self._awaiting_seek = None
+        self._static_mount_pending = False
         self._hidden = False
         self._closing = False
         self._lyrics_state = LYRICS_UNKNOWN
@@ -635,20 +636,43 @@ class Overlay:
         # Several spellings per direction because which one arrives depends on
         # the keyboard — `plus` needs Shift on most layouts, so `equal` is the
         # key under the finger, and the numeric pad sends its own names again.
-        for sequence in ("<Control-plus>", "<Control-equal>", "<Control-KP_Add>"):
+        #
+        # `<Control-plus>` and `<Control-minus>` are deliberately not among
+        # them. They are the whole-second nudge bound above, and `bind` replaces
+        # rather than adds, so listing them here quietly took that nudge away:
+        # the combination the README documents as a whole second of sync resized
+        # the panel instead, and a whole second was unreachable. Splitting them
+        # by name is the rule that keeps holding — `plus` and `minus` are the
+        # offset, with Control and without it, and every other spelling is the
+        # size — and it costs the size keys nothing that Control is not already
+        # a modifier for: `Ctrl` `=` is still the key under the finger going up,
+        # and the pad still covers both directions on any layout.
+        for sequence in ("<Control-equal>", "<Control-KP_Add>"):
             self.root.bind(sequence, lambda e: self._resize(+SIZE_STEP))
-        for sequence in ("<Control-minus>", "<Control-underscore>",
-                         "<Control-KP_Subtract>"):
+        for sequence in ("<Control-underscore>", "<Control-KP_Subtract>"):
             self.root.bind(sequence, lambda e: self._resize(-SIZE_STEP))
         self.root.bind("<Control-0>", lambda e: self._resize_to(1.0))
+
+    # What a size request means, as (absolute size, step). A base of `None` is
+    # "from wherever the panel is now"; `reset` is the one that names a size
+    # outright, which is why it cancels whatever was asked for before it in the
+    # same burst. Kept apart from `ACTIONS` because these are folded rather than
+    # dispatched — see `_drain_actions`.
+    SIZE_ACTIONS: ClassVar[dict] = {
+        "bigger": (None, +SIZE_STEP),
+        "smaller": (None, -SIZE_STEP),
+        "reset": (1.0, 0.0),
+    }
 
     ACTIONS: ClassVar[dict] = {
         "toggle": lambda self: self._toggle_visible(),
         "quit": lambda self: self._close(),
-        "bigger": lambda self: self._resize(+SIZE_STEP),
-        "smaller": lambda self: self._resize(-SIZE_STEP),
-        "reset": lambda self: self._resize_to(1.0),
         "autostart": lambda self: self._toggle_autostart(),
+        # Named with nothing to call. This table is also the list of actions the
+        # shortcut table and the tray menu are checked against, so the size ones
+        # have to appear in it; giving them a handler as well would be a second
+        # definition of a size step that nothing ever reaches.
+        **dict.fromkeys(SIZE_ACTIONS),
     }
 
     def _close(self) -> None:
@@ -670,12 +694,43 @@ class Overlay:
         can do. Drained on the tick rather than delivered from the threads that
         produced them: everything these touch is a Tk widget, and Tk is only
         safe on the thread that made it.
+
+        The size requests in a burst are folded into one. A poll hands back
+        everything that has queued since the last tick, and each step used to be
+        a whole `_apply_scale` — a settings write, a new clip region, the ring
+        rebuilt, every view destroyed and the cover derived again, 35-45 ms —
+        with no frame drawn between them, so N presses painted N-1 sizes that
+        nobody could see. Crossing 0.6 to 2.0 is fourteen of them: half a second
+        of a panel that does not answer, for one visible result.
+
+        Everything else keeps the order it was pressed in, and a pending size
+        goes in before it rather than being carried past it, so a burst still
+        happens in the sequence it was asked for.
         """
+        base: float | None = None       # named by `reset`, which cancels the rest
+        step = 0.0
+
+        def apply_size() -> None:
+            nonlocal base, step
+            if base is None and step == 0.0:
+                return
+            self._resize_to((self._size if base is None else base) + step)
+            base, step = None, 0.0
+
         for source in (self.hotkeys, self.tray):
             for action in source.poll():
+                size = self.SIZE_ACTIONS.get(action)
+                if size is not None:
+                    if size[0] is None:
+                        step += size[1]
+                    else:
+                        base, step = size
+                    continue
                 handler = self.ACTIONS.get(action)
                 if handler:
+                    apply_size()
                     handler(self)
+        apply_size()
 
     def _toggle_autostart(self) -> None:
         state = autostart.set_enabled(not autostart.enabled())
@@ -725,10 +780,17 @@ class Overlay:
         """Place the card's parts and centre the group."""
         gap = self.chrome.px(10)
         title_font, artist_font = self._title_font, self._artist_font
-        # Measured once per pair of strings. `measure` is a round trip into Tk
-        # for an answer that cannot change while the words do not, and this runs
-        # on every frame of a resize.
-        key = (title, artists)
+        # Measured once per pair of strings at a given scale. `measure` is a
+        # round trip into Tk for an answer that cannot change while the words
+        # and the font do not, and this runs on every frame of a resize — where
+        # the scale is fixed, so the short-circuit still holds through one.
+        #
+        # The scale is in the key rather than invalidated from `_apply_scale`,
+        # because a cache only the resize path knows to clear is a cache that
+        # will one day be missed, and this one was: `_apply_scale` dropped the
+        # other two card caches and never this one, so every resize centred the
+        # card on a width measured at the previous font.
+        key = (title, artists, self.chrome.scale)
         if key != self._card_measured:
             self._card_measured = key
             self._card_width = max(title_font.measure(title),
@@ -1154,18 +1216,28 @@ class Overlay:
         # The ring is laid out once for a size and only recoloured after that,
         # so a scale change leaves it tracing the previous window: inset well
         # inside the panel after growing, clipped off the edge after shrinking.
+        #
+        # The widths come first because `reshape` insets the path by half the
+        # halo, so a ring relaid before its thickness is known traces the right
+        # outline at the wrong offset from a corner radius that already scaled.
         if self.beam is not None:
+            self.beam.set_scale(self.chrome.scale)
             self.beam.reshape(self.width, self.height,
                               self.chrome.px(chrome_mod.CORNER_RADIUS))
 
         self.canvas.itemconfigure(self._title_item, font=self.f_title)
         self.canvas.itemconfigure(self._artist_item, font=self.f_artist)
-        # Both card caches, and the second one is not optional. The card is
+        # Both text caches, and the second one is not optional. The card is
         # only laid out again when its *text* changes, so invalidating the
         # fitted text alone leaves a resize where the text happens to come out
         # identical — which is most of them — holding its old coordinates while
         # the cover is rebuilt at the new size and placed into them. Measured at
         # 1.4x: the title started 20 px inside the cover.
+        #
+        # There is a third card cache, the measured width, and it is *not*
+        # cleared here on purpose: it is keyed by the scale, so a resize misses
+        # it without anyone having to remember this line. Listing it here as
+        # well would only give the same fault two places to be forgotten in.
         self._card_raw = None
         self._card_text = None
 
@@ -1182,6 +1254,13 @@ class Overlay:
         self._relay_hold.clear()
         self._incoming_fades.clear()
         self.line_index = -1
+        # The promise the line above makes — that the next tick puts them back —
+        # is only kept while the transport is moving. Paused, `render_lyrics` is
+        # gated off and nothing else rebuilds a column that has not changed
+        # scene, so a size change left the words gone until playback resumed or
+        # the song did. The tick is the only place that knows whether it is
+        # going to render; this just tells it there is nothing left on screen.
+        self._static_mount_pending = True
 
         # The cover has to be re-derived: both images were built for the old
         # window. Inline rather than on a thread — it measures ~18 ms, and this
@@ -2421,7 +2500,13 @@ class Overlay:
         paused_current = (
             snap.ok and not snap.playing and self._shown.snapshot.ok
             and snap.track_key() == self._shown.snapshot.track_key())
-        static_mounted = scene_changed and paused_current
+        # A resize asks for exactly what a promotion asks for: the whole scene
+        # built again, at the size and font it has now. Consumed whatever the
+        # answer is, because a live transport rebuilds through the render below
+        # and a mount would only be the same frame twice.
+        rescaled = self._static_mount_pending
+        self._static_mount_pending = False
+        static_mounted = (scene_changed or rescaled) and paused_current
         if static_mounted:
             self._mount_static_lyrics(snap)
         elif live_transport:
