@@ -264,7 +264,20 @@ SIZE_SETTLE_MS = 700
 # apart from where they belonged. Now that the scheduler holds a millisecond,
 # 60 Hz costs about half a millisecond a frame more and there is no reason to
 # animate one thing on the panel more coarsely than another.
-BEAM_TICK_MS = FAST_TICK_MS
+# Half the lyric rate, because the border is the one thing on screen that never
+# stops, and what it asks for the whole loop pays: nothing else here needs a
+# frame while a line sits still, so this is the number that decides whether the
+# overlay is awake at 60 Hz for the length of an album.
+#
+# It can be halved because the ring is quantised far more coarsely than either
+# rate. The shine's gradient goes round once every 11 seconds over 176
+# segments — sixteen segments a second, so a quarter of a segment per frame at
+# 60 Hz and half a one at 30. Neither draws a colour the ring can hold.
+#
+# What does halve is how quickly the border answers a hit: 16 ms of lag becomes
+# 33. That is the thing to look at if this ever feels wrong, and the reason
+# this is its own number rather than the lyric tick again.
+BEAM_TICK_MS = 33
 
 # What a track's lyrics are known to be. Three states rather than two, and the
 # third is the whole point: `None` lyrics means both "still asking" and "nobody
@@ -2800,7 +2813,11 @@ class Overlay:
             self._mount_static_lyrics(snap)
         elif live_transport:
             if self._advance_beam():
-                interval = BEAM_TICK_MS
+                # The slowest thing anything asks for wins nothing: the border
+                # lowers the interval where it is still the lyric's, and leaves
+                # it alone where a sweep or a glide has already asked for more.
+                # A plain assignment here would have held back the two above.
+                interval = min(interval, BEAM_TICK_MS)
             self._retarget_size()
             if self._advance_collapse():
                 interval = FAST_TICK_MS
