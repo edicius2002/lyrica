@@ -121,6 +121,31 @@ def _lin(v: float) -> float:
     return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
 
 
+def _byte(v: float) -> int:
+    """Linear light back to a byte, the inverse of `_lin`."""
+    v = 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+    return max(0, min(255, round(v * 255)))
+
+
+def blend_light(a: tuple, b: tuple, amount: float) -> tuple:
+    """Mix two colours the way light mixes, rather than the way bytes do.
+
+    sRGB is not a quantity of light; it is light bent through a gamma curve so
+    that dark tones get more of the byte range than their share of photons.
+    Averaging two of them therefore lands nowhere physical: it under-represents
+    the light through the middle of a ramp, which comes out as the muddy,
+    over-saturated midtones that make a ramp from a dark ground to a lit colour
+    read as coloured plastic instead of as something lit.
+
+    Undoing the curve, mixing, and putting it back is what light does. Measured
+    from (16,16,20) to (235,180,120): a quarter of the way along, bytes give
+    (71,57,45) and light gives (127,96,65). The ramp reaches its colour sooner
+    and spends far less of its length in the dirty part.
+    """
+    return tuple(_byte(_lin(x) + (_lin(y) - _lin(x)) * amount)
+                 for x, y in zip(a, b, strict=True))
+
+
 def luminance(rgb: tuple) -> float:
     return 0.2126 * _lin(rgb[0]) + 0.7152 * _lin(rgb[1]) + 0.0722 * _lin(rgb[2])
 

@@ -14,7 +14,7 @@ kick would be guessing.
 import colorsys
 import math
 
-from lyrica.glass import delta_e, hex_of, rgb_of
+from lyrica.glass import blend_light, delta_e, hex_of, rgb_of
 
 # Spacing is deliberately uneven, and evenly spacing it is what looked wrong
 # first. The default panel's perimeter is about 2900 px while a corner arc is
@@ -65,6 +65,28 @@ SHINE_SWING_OPEN = 0.62
 # that is merely *more agitated* when the music is cannot be wrong that way.
 SHINE_SPEED_GAIN = 0.55
 
+# Two smaller waves riding the main one, at three and five times its frequency
+# and offset so they never line up with it or with each other. A single cosine
+# is perfectly even, and perfectly even is the one thing light never is: it
+# gives the ring two opposite bright points and nothing between them, which
+# reads as a drawn gradient rather than as something illuminated. These put
+# hot spots between the two, drifting at their own rates because their offsets
+# are irrational fractions of a turn.
+#
+# Small on purpose. They perturb the shape; they do not compete with it.
+SHINE_RIPPLES = ((3.0, 0.11, 0.31), (5.0, 0.06, 0.73))
+
+# How fast the pulse follows the level, rising and falling, per second. The
+# width is quantised so that it is written to the canvas rarely, and a level
+# that jumps from silence to a peak in one frame crossed three of those steps
+# at once — a snap rather than a swell. Smoothing what gets quantised means the
+# same steps are climbed one at a time instead of jumped across.
+#
+# Faster up than down, like the meter's own envelope and for the same reason: a
+# beat should arrive and then ebb, not arrive and vanish.
+PULSE_ATTACK = 14.0
+PULSE_RELEASE = 4.5
+
 # The old ring was a single two-pixel line. It moved, but against a textured
 # artwork wash it had no spatial presence. A crisp core carries the colour and
 # a quieter wide line underneath gives it a field without covering the words.
@@ -103,6 +125,11 @@ GAIN = 0.38
 # Where the tail stops being the song's colour and starts becoming the head.
 # Below this the beam fades out to nothing; above it, up to white.
 COLOUR_STOP = 0.55
+
+# How far either side of that handover the two runs are blended into each
+# other. Wide enough that no seam is visible, narrow enough that the ramp is
+# still two straight runs everywhere else and keeps its full spread of shades.
+COLOUR_BLEND = 0.16
 GRADIENT_STEPS = 96
 
 
@@ -183,12 +210,30 @@ def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
     out = []
     for i in range(steps):
         t = i / (steps - 1)
-        if t < COLOUR_STOP:
-            k, src, dst = t / COLOUR_STOP, dark, mid
-        else:
-            k, src, dst = (t - COLOUR_STOP) / (1 - COLOUR_STOP), mid, head
-        out.append(hex_of(tuple(s + (d - s) * k
-                                for s, d in zip(src, dst, strict=True))))
+        # Two straight runs, as before, but with the corner between them
+        # rounded off. A corner in a ramp is a seam, and the ring showed a hard
+        # vertical edge exactly where the song's colour handed over to the
+        # head. Nothing lit has a kink in its falloff, and that kink was the
+        # single most plastic thing about the border.
+        #
+        # Rounded by crossfading the two runs *extended past their meeting*
+        # rather than by replacing them with one curve through all three. A
+        # curve through all three flattens toward its ends, which costs the
+        # bright end most of its range — measured, the lit part of the ring
+        # collapsed from 60 shades of separation to 27, and a shine with
+        # nothing moving through it is the thing the style exists to avoid.
+        # Extending and crossfading keeps every shade and smooths only the
+        # join.
+        #
+        # And mixed as light rather than as bytes, because an sRGB average
+        # under-represents the light through the middle of a ramp. Neither
+        # change is worth much alone: correcting the colour space by itself
+        # only sharpened the seam it could not see.
+        low = blend_light(dark, mid, t / COLOUR_STOP)
+        high = blend_light(mid, head, (t - COLOUR_STOP) / (1 - COLOUR_STOP))
+        edge = (t - (COLOUR_STOP - COLOUR_BLEND)) / (2 * COLOUR_BLEND)
+        edge = max(0.0, min(1.0, edge))
+        out.append(hex_of(blend_light(low, high, edge * edge * (3 - 2 * edge))))
     return out
 
 
@@ -236,6 +281,7 @@ class Beam:
         self.style = style
         self.intensity = max(0.5, min(2.0, intensity))
         self._phase = 0.0
+        self._pulse = 0.0
         self._items: list[int] = []
         self._halo_items: list[int] = []
         self._shades: list[str] = []
@@ -395,7 +441,10 @@ class Beam:
         # width is written only when the step changes, and each write is two
         # calls against a tag. Six steps is the most this can be given before
         # loud music writes on nearly every frame.
-        width_state = round((level * 0.7 + dynamics * 0.3) * 6)
+        want = level * 0.7 + dynamics * 0.3
+        speed = PULSE_ATTACK if want > self._pulse else PULSE_RELEASE
+        self._pulse += (want - self._pulse) * min(1.0, dt * speed)
+        width_state = round(self._pulse * 6)
         if width_state != self._width_state:
             self._width_state = width_state
             pulse = width_state / 6
@@ -430,6 +479,9 @@ class Beam:
                 # wrapped. This one has no ends.
                 turn = (i / count) * SHINE_CYCLES + self._phase
                 wave = 0.5 + 0.5 * math.cos(2 * math.pi * turn)
+                for times, depth, offset in SHINE_RIPPLES:
+                    wave += depth * math.cos(2 * math.pi * (turn * times + offset))
+                wave = max(0.0, min(1.0, wave))
                 shade = self._gradient[int(top * (base + swing * wave) * strength)]
                 self._paint(i, item, shade, palette)
             return

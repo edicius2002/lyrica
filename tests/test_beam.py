@@ -182,8 +182,15 @@ def test_music_energy_changes_the_beams_spatial_weight(canvas):
     ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
     ring.advance(0.0, Character(level=0.0, dynamics=0.0), palette)
     quiet = float(canvas.itemcget(ring._halo_items[0], "width"))
-    ring.advance(0.0, Character(level=1.0, dynamics=1.0), palette)
-    loud = float(canvas.itemcget(ring._halo_items[0], "width"))
+    # Over frames rather than in one, because the width follows the level
+    # through an envelope now: a level that jumps from silence to a peak used
+    # to cross three quantised steps in a single frame, which is a snap where
+    # a swell was wanted. `dt=0` therefore no longer means "at once" — it means
+    # no time has passed, and nothing that answers over time can have answered.
+    loud = quiet
+    for _ in range(12):
+        ring.advance(1 / 30, Character(level=1.0, dynamics=1.0), palette)
+        loud = float(canvas.itemcget(ring._halo_items[0], "width"))
     assert loud > quiet
     ring.destroy()
 
