@@ -179,7 +179,8 @@ def _declare() -> None:
     gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
 
 
-_declare()
+if sys.platform == "win32":
+    _declare()
 
 # Windows calls the window procedure long after the call that installed it has
 # returned, so the `WNDPROC` and the `WNDCLASS` naming it have to outlive this
