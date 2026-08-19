@@ -545,6 +545,49 @@ KEYED = Palette(
 GLOW_LEVELS = [f"#{g:02x}{g:02x}{g:02x}" for g in range(RAMP_STEPS)]
 
 
+# How many solved palettes to keep. The case this exists for is "the same song
+# at a different window size", which needs exactly one: Ctrl+Alt +/- builds a
+# new `Chrome` and rebuilds the cover, and then asks for the palette already on
+# screen. The rest of the room is for the few that are alive at once — the
+# outgoing song and the incoming one across a track change, the grey one a
+# track without a cover falls back to, and both compositions during a test run.
+# Small on purpose: a session plays many songs, and each entry held is a ramp of
+# 64 strings plus two memos that only ever grow.
+MEMO_SIZE = 8
+
+# How far the wash may drift and still count as the same one. It does not
+# survive a resize unchanged: `artwork.make_backdrop` samples the cover at a
+# resolution derived from the window, so the mean it reports moves with the
+# window. Measured over twelve covers across the whole 0.6-2.0 size range, one
+# keypress moves a channel by up to 2 and the full range by up to 5 — so a key
+# demanding the exact tuple would miss on precisely the presses this is for.
+#
+# Two units is inside the noise twice over. The solver reads the wash only
+# through `worst_contrast`, and shifting it by 2 in every channel moves that by
+# at most 0.204 — measured over both compositions, five washes and twelve
+# hues — against margins of 0.4 and up. And the value is a *mean* standing in
+# for an image that varies by tens of units across the window, so the palette is
+# already working from a coarser approximation than this.
+BACKDROP_TOLERANCE = 2
+
+# Most recent first: (key, the wash it was solved against, the palette).
+_MEMO: list[tuple] = []
+
+
+def _same_wash(a: tuple, b: tuple) -> bool:
+    return len(a) == len(b) and all(abs(x - y) <= BACKDROP_TOLERANCE
+                                    for x, y in zip(a, b, strict=True))
+
+
+def _memoised(key: tuple, backdrop: tuple) -> Palette | None:
+    for i, (seen, wash, pal) in enumerate(_MEMO):
+        if seen == key and _same_wash(wash, backdrop):
+            if i:
+                _MEMO.insert(0, _MEMO.pop(i))
+            return pal
+    return None
+
+
 def for_chrome(chrome: Chrome) -> Palette:
     """The palette to start with, before any cover has been seen."""
     if chrome.mode is ChromeMode.KEYED:
@@ -558,6 +601,21 @@ def for_song(chrome: Chrome, song: SongColour | None,
 
     Keyed mode ignores the cover: its colours have to stay legible over whatever
     video is behind the window, which the artwork says nothing about.
+
+    Returns *the same object* for a repeat of a question already answered, and
+    that is load-bearing rather than a nicety. Two consumers compare the palette
+    by identity — the panel to decide whether to restyle everything on screen,
+    the beam to decide whether to rebuild its 96-step gradient — so an equal but
+    fresh instance costs a full repaint for no visible change.
+
+    Which matters because the derivation does not depend on the window's *size*
+    and a resize asks for it anyway. Nothing below reads `chrome.scale`: the
+    mode picks the branch, the composition sets the ceiling and the clamp, the
+    song supplies a hue and a strength, and the wash is a contrast floor. But
+    `_apply_scale` builds a new `Chrome` for every keypress and rebuilds the
+    cover with it, and each press then spent the whole solver — some fifteen
+    passes of a bisection against eighteen desktops, on the render thread — to
+    arrive back at the palette already on screen.
     """
     if chrome.mode is ChromeMode.KEYED:
         return KEYED
@@ -565,11 +623,28 @@ def for_song(chrome: Chrome, song: SongColour | None,
     song = song or NEUTRAL
     strength = strength_of(song)
     backdrop = tuple(backdrop)
+    # The hue is dropped where there is no strength to carry it, so every
+    # greyscale cover shares one entry and one palette — the derivation ignores
+    # the hue on that branch, and two black-and-white sleeves in a row are then
+    # not a repaint. `accent_hue` and `dominant` are absent because nothing in
+    # this file reads them, and the sweep target is a module constant.
+    key = (chrome.mode, law, (song.hue, strength) if strength > 0 else (0.0, 0.0))
+    hit = _memoised(key, backdrop)
+    if hit is not None:
+        return hit
     if strength <= 0:
         colours = _derive_neutral(SWEEP_DE, law)
     else:
         colours = _derive_coloured(song.hue, strength, SWEEP_DE, law, backdrop)
-    return _assemble(colours, backdrop=backdrop, law=law)
+    pal = _assemble(colours, backdrop=backdrop, law=law)
+    # Sharing one instance is safe because nothing mutates a palette: it is
+    # frozen, and `dimmed` and `rebacked` both build a new one with empty memos.
+    # The two dicts a shared palette does share are pure caches of its own
+    # fields, bounded at 64 blooms and 66 fades, and sharing them is the point —
+    # a resize now keeps them warm instead of refilling both.
+    _MEMO.insert(0, (key, backdrop, pal))
+    del _MEMO[MEMO_SIZE:]
+    return pal
 
 
 def rebacked(pal: Palette, backdrop: tuple) -> Palette:
