@@ -43,15 +43,16 @@ CORNER_POINTS = 9
 STRAIGHT_SPACING = 16.0
 
 # How finely the light's own path is sampled, against that spacing. Half, and
-# free to be: these points are walked once, when the panel changes size, rather
-# than once a frame as the line ring's were.
+# free to be: nothing walks these points to draw with any more — `halo` solves
+# the rounded rectangle rather than rasterising it — so they are the *centreline*
+# and nothing else, handed out to whatever wants to know where the light is
+# brightest and built only when something asks.
 #
-# Halving is also as far as it is worth going. The colour is looked up through
-# one byte, so the circumference is quantised to 255 positions however many
-# points are drawn into it — about ten pixels each round the default panel — and
-# 316 points is what saturates that where the unhalved 176 would not. The
-# consequence is the one quantisation left in the picture: the colour steps
-# every ten pixels *along* the border, by one or two levels of 255 at the
+# The quantisation the sampling used to carry has moved to where it belongs.
+# Colour is looked up through one byte, so the circumference is quantised to 255
+# positions whatever the path is sampled at — about nine pixels each round the
+# default panel — and that is now the only quantisation left along the border:
+# the colour steps every nine pixels by one or two levels of 255 at the
 # gradient's steepest. The line ring stepped every sixteen, by the same amount.
 LIGHT_SPACING = 0.5
 
@@ -118,7 +119,7 @@ EDGE_INSET = 7.0
 EDGE_SOFT = 3.4
 
 # What the music does to the light's presence. The line ring pulsed its stroke
-# *widths*, which an image cannot do without rebuilding the blur; scaling the
+# *widths*, which an image cannot do without rebuilding its fields; scaling the
 # whole ring's opacity moves the same thing, because the distance at which a
 # falloff stops being visible moves with how bright it started. Quantised to
 # quarters, as the widths were, so the pulse is not a new reason to repaint.
@@ -267,6 +268,51 @@ def _ramp(palette, steps: int = GRADIENT_STEPS) -> list[tuple[tuple, float]]:
     return out
 
 
+def _along(ramp: list[tuple], t: float) -> tuple:
+    """The ramp at `t` in 0..1, read between its entries rather than at one.
+
+    The table has ends — it runs from invisible to the head and does not close —
+    so this is a plain interpolation with no wrap to worry about, unlike the
+    position field `halo` indexes it by.
+
+    Reading it by `int(t * (steps - 1))` was the second of the two staircases
+    the border had. Ninety-six entries over a swing the shine only uses a
+    fraction of leaves a handful of distinct colours round the whole ring: the
+    default panel in silence used five of them, so the edge stepped by two or
+    three levels every few hundred pixels. What the table describes between its
+    entries is two straight lines with one knee, so interpolating it is not an
+    approximation of the intended colour — it *is* the intended colour, to
+    within the one cell the knee falls in.
+    """
+    at = max(0.0, min(1.0, t)) * (len(ramp) - 1)
+    low = min(int(at), len(ramp) - 2)
+    (red, green, blue), amount = ramp[low]
+    (to_red, to_green, to_blue), to_amount = ramp[low + 1]
+    k = at - low
+    # Spelled out rather than handed to `_lerp`, which zips and rebuilds a
+    # tuple: this runs 255 times for every table and the table is rebuilt
+    # whenever the music moves a step, so it is one of the few places in this
+    # module where the shape of the arithmetic is worth more than its brevity.
+    return ((red + (to_red - red) * k, green + (to_green - green) * k,
+             blue + (to_blue - blue) * k),
+            amount + (to_amount - amount) * k)
+
+
+def _around(wheel: list[tuple], turn: float) -> tuple:
+    """The hue wheel at `turn` in 0..1, read between its entries.
+
+    Unlike `_along` this table *is* a ring — entry 0 follows the last one — so
+    the pair being interpolated wraps with it rather than clamping at the end.
+    """
+    at = (turn % 1.0) * len(wheel)
+    low = int(at)
+    red, green, blue = wheel[low % len(wheel)]
+    to_red, to_green, to_blue = wheel[(low + 1) % len(wheel)]
+    k = at - low
+    return (red + (to_red - red) * k, green + (to_green - green) * k,
+            blue + (to_blue - blue) * k)
+
+
 def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[tuple]:
     """Neighbouring hues from the song colour, closed into a seamless ring."""
     base = tuple(channel / 255 for channel in rgb_of(palette.beam))
@@ -296,7 +342,7 @@ class Beam:
         self.style = style
         self.intensity = max(0.5, min(2.0, intensity))
         self._phase = 0.0
-        self._points: list[tuple] = []
+        self._panel: tuple | None = None
         self._ramp: list[tuple] = []
         self._aurora: list[tuple] = []
         self._palette = None
@@ -328,12 +374,27 @@ class Beam:
                                 reach=max(2.0, HALO_REACH * weight),
                                 edge=max(0.8, EDGE_SOFT * weight))
 
+    @property
+    def _points(self) -> list[tuple]:
+        """The path the light is centred on, clockwise from the top left.
+
+        Derived on demand rather than kept, because nothing in the drawing needs
+        it: `halo` is handed the rectangle and solves it. What still wants it is
+        anything asking *where* the border is — which is how the light is
+        measured, since the ridge sits on this line.
+        """
+        if self._panel is None:
+            return []
+        width, height, radius = self._panel
+        return _rounded_path(width, height, radius, self.shape.inset,
+                             STRAIGHT_SPACING * self.scale * LIGHT_SPACING)
+
     def reshape(self, width: int, height: int, radius: int) -> None:
         """Lay the light out again, for a window that changed size.
 
-        The whole cost of the border now lives here rather than in `advance`,
-        which is the trade `halo` is built on: the blur, the two fields and the
-        four strips are derived once per size and then only looked up.
+        The whole cost of the border lives here rather than in `advance`, which
+        is the trade `halo` is built on: the two fields and the four strips are
+        derived once per size and then only looked up.
 
         That is the one place this variant is dearer than the line ring, and it
         is paid on every frame of a collapse. Measured over the twenty-one
@@ -344,13 +405,12 @@ class Beam:
         comes back 1.11 ms — cheaper than the ring it replaced, in the direction
         that is asked for twice.
         """
-        self._points = _rounded_path(width, height, radius, self.shape.inset,
-                                     STRAIGHT_SPACING * self.scale * LIGHT_SPACING)
-        self.light.reshape(self._points, width, height, self.shape)
+        self._panel = (width, height, radius)
+        self.light.reshape(width, height, radius, self.shape)
 
     def destroy(self) -> None:
         self.light.destroy()
-        self._points = []
+        self._panel = None
 
     def advance(self, dt: float, music, palette) -> None:
         """Move the phase and, if anything visible moved with it, repaint.
@@ -409,7 +469,6 @@ class Beam:
         pulse = round((level * 0.7 + dynamics * 0.3) * 4) / 4
         presence = PRESENCE_FLOOR + (1.0 - PRESENCE_FLOOR) * pulse
         span = size - 1                       # positions 1 .. size - 1
-        top = len(self._ramp) - 1
 
         if self.style == AURORA:
             wheel = len(self._aurora)
@@ -434,13 +493,13 @@ class Beam:
                 # wrapped. This one has no ends.
                 wave = 0.5 + 0.5 * math.cos(
                     2 * math.pi * (turn * SHINE_CYCLES + phase))
-                colour, amount = self._ramp[
-                    int(top * (base + swing * wave) * strength)]
+                colour, amount = _along(self._ramp,
+                                        (base + swing * wave) * strength)
             else:
                 # Distance behind the head, once round the ring.
                 behind = (phase - turn) % 1.0
                 glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
-                colour, amount = self._ramp[int(top * glow * strength)]
+                colour, amount = _along(self._ramp, glow * strength)
             red[index] = min(255, max(0, round(colour[0])))
             green[index] = min(255, max(0, round(colour[1])))
             blue[index] = min(255, max(0, round(colour[2])))

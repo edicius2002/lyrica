@@ -33,7 +33,15 @@ analysis = Analysis(
     runtime_hooks=[],
     # Trimmed because they arrive through Pillow and are large. Nothing here
     # draws a plot or a window toolkit other than tkinter.
-    excludes=["matplotlib", "numpy", "scipy", "pandas", "PyQt5", "PyQt6",
+    #
+    # `numpy` used to be on this list and cannot be any more: `halo` evaluates
+    # the border's falloff as arithmetic over the edge band rather than blurring
+    # a mask, and there is no other way to do eighty thousand pixels of that in a
+    # frame. It costs about 15 MB in the one-file executable and 130 ms the first
+    # time the overlay lays its ring out, against a border that is exact instead
+    # of quantised twice — and `scipy` stays excluded, since the two error
+    # functions this needs are `math.erf` and `math.erfc`.
+    excludes=["matplotlib", "scipy", "pandas", "PyQt5", "PyQt6",
               "PySide2", "PySide6", "IPython", "pytest"],
     noarchive=False,
 )

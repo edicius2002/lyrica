@@ -538,13 +538,14 @@ def test_a_relaid_ring_wears_the_presence_the_rest_of_it_wears(canvas):
     # phase moving there is always a strip a frame or two behind, which is the
     # trade `PER_CALL` makes and not a strip left wearing the old weight.
     #
-    # Long enough for the fields to be built again at full resolution and for
-    # every strip to be repainted from them afterwards. Settling means that
-    # too now: a still panel replaces the third-scale fields it collapsed with,
-    # which invalidates all four strips at once however long they had been
-    # right for.
-    from lyrica.halo import FINE_AFTER
-    for _ in range(FINE_AFTER + 2 * len(ring.light.strips)):
+    # One pass over the strips is now all settling takes. It used to be that
+    # plus `halo.FINE_AFTER`, because the fields were blurred at a third of the
+    # resolution while the panel moved and built again at full resolution once
+    # it stopped — so a still panel replaced its own fields a fifth of a second
+    # in and invalidated all four strips at once. Nothing is blurred any more
+    # and the closed form is evaluated at full resolution the first time, so
+    # there is no second build to wait for and no constant to name.
+    for _ in range(2 * len(ring.light.strips)):
         ring.advance(0.0, loud, palette)
     for strip in ring.light.strips:
         if strip.box is None:
