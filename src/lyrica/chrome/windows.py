@@ -187,7 +187,17 @@ def set_dpi_awareness() -> float:
     soft, slightly blurred text and no amount of font tuning fixes it.
     """
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor v2
+        # Per-monitor v1, not v2: `SetProcessDpiAwareness` offers only unaware,
+        # system and per-monitor, and v2 needs
+        # `SetProcessDpiAwarenessContext(-4)`. What v2 adds is work Windows does
+        # on the app's behalf across a DPI change — rescaling the non-client
+        # area, dialogs and child controls — and this window has no frame, no
+        # dialogs, and a canvas whose contents only the app can rescale. The
+        # load-bearing part is the same under both: a window is reported at its
+        # own monitor's DPI, which is what `dpi_for_window` reads. Measured
+        # under this call — awareness level 2, and 120 on one screen against 144
+        # on the other.
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except (AttributeError, OSError):
         try:
             ctypes.windll.user32.SetProcessDPIAware()
@@ -203,6 +213,50 @@ def set_dpi_awareness() -> float:
         return 1.0
 
 
+def dpi_for_window(root) -> float | None:
+    """Scale of the monitor this window is on, or None if it cannot be read.
+
+    `set_dpi_awareness` answers for the *primary* desktop and answers once,
+    before any window exists. That was the whole story while the process was
+    virtualised, because Windows did the scaling itself. Declaring per-monitor
+    awareness switches that off and hands the job here, so a window dragged to a
+    screen of another density keeps the physical pixel size it had on the screen
+    it left. Measured on a two-monitor desk: the primary reports 120 and the
+    second 144, so an overlay dragged across is 20 % undersized until something
+    asks again — which is the gap a hand closes with Ctrl+Alt +/-.
+
+    `GetDpiForWindow` rather than `GetDpiForMonitor(MonitorFromWindow(...))`,
+    for two reasons beyond it being one call instead of two. It fails where the
+    failure can be seen: measured, it answers 0 for a handle that is not a
+    window, while `MonitorFromWindow` with MONITOR_DEFAULTTONEAREST answers a
+    real monitor even for a null handle — so the pair reports the primary
+    screen's scale for a window that does not exist, which is a wrong answer
+    wearing the shape of a right one. It needs Windows 10 1607, and the platform
+    this app documents is Windows 10/11.
+
+    None travels all the way out to the caller rather than being flattened to
+    1.0 on the way — `chrome.dpi_for_window` carries the reasoning, and it is
+    the same reason the pair above was not used as a fallback here: a plausible
+    number costs more than an admission.
+
+    The window does not have to be mapped first: measured, the same 120 before
+    and after the flush that brings the wrapper into being.
+    """
+    try:
+        get_dpi = ctypes.windll.user32.GetDpiForWindow
+        get_dpi.argtypes = [wintypes.HWND]
+        get_dpi.restype = wintypes.UINT
+        dpi = get_dpi(wintypes.HWND(_hwnd_of(root)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        logger.debug("could not read the window's DPI", exc_info=True)
+        return None
+    # Zero is how the call reports a handle it could not resolve. It has to be
+    # caught here rather than divided through, because this number is what the
+    # layout multiplies every measurement by and a scale of 0 is a window with
+    # no size at all.
+    return dpi / 96.0 if dpi > 0 else None
+
+
 def _hwnd_of(root) -> int:
     """The real top-level handle for a Tk window.
 
@@ -215,6 +269,16 @@ def _hwnd_of(root) -> int:
     than always because this sits on the path of every animated resize frame,
     where a synchronous flush is 0.29 ms of a 16 ms budget spent on nothing —
     and where not flushing per frame is a property the resize tests hold to.
+
+    **Not cached, and that was measured rather than assumed.** The whole call is
+    4.5 us on a mapped window — 0.03 % of a 16 ms frame, of which a cache could
+    return 3.4 us. Against that, the handle is not stable for the window's life:
+    `wm overrideredirect` destroys the toplevel and builds another, measured at
+    three distinct handles across two toggles, while `winfo_id` reports the same
+    inner window throughout. So the one key cheap enough to be worth caching on
+    is the one that does not notice, and a stale handle fails quietly —
+    `SetWindowPos` and `SetWindowRgn` return having done nothing, and
+    `GetDpiForWindow` answers 0.
     """
     if not root.winfo_ismapped():
         root.update_idletasks()

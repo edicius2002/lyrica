@@ -197,6 +197,34 @@ def monitor_bounds(root: tk.Tk, x: int, y: int) -> tuple:
     return (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
 
 
+def dpi_for_window(root: tk.Tk) -> float | None:
+    """The display scale of the monitor the window is actually on.
+
+    `prepare` reports the primary desktop's scale, once, before there is a
+    window to ask about — which is the best that can be known at that point and
+    stops being true the moment the window is dragged somewhere else. Per-monitor
+    awareness means Windows no longer resizes the window across that boundary,
+    so on a desk whose screens are scaled differently the panel arrives wearing
+    the wrong size. This is how the app asks again.
+
+    **None means the question could not be answered**, and is deliberately not
+    flattened to 1.0. A caller that cannot tell a refusal from a genuine 96-dpi
+    screen has to pick which one to get wrong: treat 1.0 as real and a single
+    failed call downgrades a correct 1.25 to an unscaled window, or ignore 1.0
+    and a move onto an unscaled monitor is never followed. On None the caller
+    keeps the scale it already had, which is wrong only if the window really did
+    move and is right in every other case.
+
+    Off Windows the answer is 1.0 rather than None: there is no per-monitor
+    scaling to follow there, so that is a measurement and not a shrug. It never
+    raises on any platform.
+    """
+    if sys.platform != "win32":
+        return 1.0
+    from lyrica.chrome import windows as win
+    return win.dpi_for_window(root)
+
+
 def place_in_monitor(root: tk.Tk, place: tuple[int, int],
                      size: tuple[int, int],
                      monitor_point: tuple[int, int]) -> tuple[int, int]:
