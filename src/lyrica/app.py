@@ -248,6 +248,16 @@ CONTEXT = 1
 # not crossed by accident.
 SIZE_STEP = 0.1
 
+# How long the size has to stand still before it is written down. `save_size` is
+# a read-modify-write of the whole settings file — `read_text`, `json.loads`,
+# `json.dumps`, `write_text` — done synchronously inside the render tick, and
+# `cache_root` deliberately allows that file to live in a synced folder, where a
+# sync client or an antivirus turns a sub-millisecond write into tens of them.
+# Folding a burst already spared the presses inside one tick; this spares the
+# bursts, so holding the key down writes once, when the hand stops. Longer than
+# a comfortable key repeat and short enough that nobody quits inside it.
+SIZE_SETTLE_MS = 700
+
 # The border runs at the same rate as the lyric sweep. It was 30 Hz while the
 # loop could not keep an even 30 — measured at 22, with frames landing 2 ms
 # apart from where they belonged. Now that the scheduler holds a millisecond,
@@ -497,6 +507,10 @@ class Overlay:
         self._card_raw = None
         self._awaiting_seek = None
         self._static_mount_pending = False
+        # A size chosen but not yet written down, and the timer that will write
+        # it. See `_remember_size_later`.
+        self._size_unsaved: float | None = None
+        self._size_save_after: str | None = None
         self._hidden = False
         self._closing = False
         self._lyrics_state = LYRICS_UNKNOWN
@@ -534,6 +548,9 @@ class Overlay:
         self._outgoing_fade_at: float | None = None
         self._lyrics_fade_at: float | None = None
         self._lyrics_reveal_pending = False
+        # The scene state the last wash was painted over. See
+        # `_hold_text_scene_washed`.
+        self._presented_scene: tuple | None = None
 
         # Before Tk exists: Tk reads the display metrics when the root window is
         # created, so declaring DPI awareness afterwards leaves it holding
@@ -685,6 +702,13 @@ class Overlay:
         request is recorded here and acted on at the top of the loop, where
         nothing follows it.
         """
+        # Before the loop stops, because the deferred write is scheduled on that
+        # loop: a size chosen and then quit within `SIZE_SETTLE_MS` would have
+        # its timer destroyed along with the root and be forgotten. Losing the
+        # last size on exit is the one regression deferring it could cause, so
+        # every way out flushes — here for the ordinary quit, and again after
+        # `mainloop` returns for the ways that never reach this method.
+        self._flush_size()
         self._closing = True
 
     def _drain_actions(self) -> None:
@@ -1162,8 +1186,43 @@ class Overlay:
         if abs(size - self._size) < 1e-6:
             return          # already at the limit; rebuilding would only flicker
         self._size = size
-        config.save_size(size)
+        self._remember_size_later(size)
         self._apply_scale()
+
+    def _remember_size_later(self, size: float) -> None:
+        """Write the chosen size down once the size stops changing.
+
+        Same rule as the window position, which `config` states in as many
+        words: settings are written when a hand stops moving rather than in a
+        loop. A drag has a button release to say when that is; the size keys
+        have nothing, so the timer is restarted by each press and only the press
+        nobody follows gets as far as the disk.
+
+        `save_size` itself is unchanged and still the only writer — what moves
+        is when it runs, off the render tick, where a settings file in a synced
+        folder was charging the frame for someone else's I/O.
+        """
+        self._size_unsaved = size
+        if self._size_save_after is not None:
+            self.root.after_cancel(self._size_save_after)
+        self._size_save_after = self.root.after(SIZE_SETTLE_MS, self._flush_size)
+
+    def _flush_size(self) -> None:
+        """Write a size that is still owed to the disk, if there is one.
+
+        Safe to call twice and safe to call with the root already gone: it
+        cancels its own timer and touches nothing but `config`.
+        """
+        if self._size_save_after is not None:
+            try:
+                self.root.after_cancel(self._size_save_after)
+            except tk.TclError:         # the interpreter is already gone
+                pass
+            self._size_save_after = None
+        if self._size_unsaved is None:
+            return
+        size, self._size_unsaved = self._size_unsaved, None
+        config.save_size(size)
 
     def _apply_scale(self) -> None:
         """Rebuild every measurement against the new scale.
@@ -2236,6 +2295,30 @@ class Overlay:
         clear of each other. A row that is still gliding is never jumped: the
         preview waits dissolved until the rise has cleared it, and that is the
         separation `_present_incoming_preview` starts its entrance fade on.
+
+        Both callers run in an ordinary frame, and neither is the redundant one
+        — checked, because a second call that is a no-op by construction looks
+        like one that can go:
+
+        * They cover different frames. The glide step is inside `render_lyrics`,
+          so it does not run at all while playback is paused or the scene was
+          mounted statically; the frame contract does, and is the only seating
+          those frames get. The contract in turn is gated on a stable scene, so
+          it does not run while any presentation fade is in flight; the glide
+          step does, and is the only seating *those* frames get.
+        * The order matters inside the glide step. Capping the active row is
+          what the two separation loops below then chain their spans off, so
+          seating after them instead of before would space every other row
+          against an active row that has not been capped yet.
+        * The scene can change between them without anything having moved.
+          `_restyle` runs in between and sets each row's growth, and
+          `glyph_padding` is derived from it, so two boxes clear of each other
+          at the glide step can be overlapping by the frame boundary.
+
+        The repeat is cheap where it is redundant, which is what makes leaving
+        it right: every step here is arithmetic on numbers already held, and
+        `move_to` returns without touching the canvas when the distance rounds
+        to zero. A settled frame therefore costs no Tcl at all.
         """
         view.move_to(self._safe_view_y(view, self._targets.get(index, view.y)))
         active = self._views.get(self.line_index)
@@ -2292,21 +2375,95 @@ class Overlay:
                 view.move_to(wanted)
             upper_bottom = view.glyph_vertical_span()[1]
 
+    def _text_scene_views(self) -> list:
+        """Every row a presentation fade owns, the backing vocal included."""
+        views = list(self._views.values())
+        if self._echo is not None:
+            views.append(self._echo)
+        return views
+
+    @staticmethod
+    def _text_scene_state(views: list) -> tuple:
+        """What decides the colour Tk is currently holding for every glyph.
+
+        A `LineView` writes a glyph's fill only when its own `_state` changes:
+        `show_inactive` and `show_sweep` both return early otherwise, and
+        `set_palette` and `set_active` clear that state rather than repainting.
+        So an unchanged `_state`, over an unchanged palette and an unchanged
+        count of items, says nothing has touched a fill since this was last
+        read — which is what lets a constant progress be applied once instead
+        of once per frame.
+
+        The views go in by object rather than by `id`, so a row rebuilt at the
+        address of the one it replaced cannot pass for it.
+        """
+        return tuple((view, view._state, view.palette.backdrop,
+                      len(view._items), len(view._outline))
+                     for view in views)
+
+    def _hold_text_scene_washed(self) -> None:
+        """Keep the scene at the backdrop while the panel expands into it.
+
+        The expansion runs for `COLLAPSE_MS`, about twenty frames, and asked
+        for progress 0.0 on every one of them — the same colour written to the
+        same ~180 glyphs and their outline rings, twenty times, sharing the
+        frame with the most expensive thing the app does. Applied once now, and
+        again only when a renderer has actually repainted something.
+        """
+        if self._presented_scene == self._text_scene_state(
+                self._text_scene_views()):
+            return
+        self._fade_text_scene(0.0)
+
     def _fade_text_scene(self, progress: float) -> None:
         """Present every lyric glyph between the wash and its true colour."""
         # `entry[3]` remains the renderer's target colour. Only the colour sent
         # to Tk is blended, so the ordinary sweep can keep calculating its true
         # state while this short presentation effect catches up with it.
-        views = list(self._views.values())
-        if self._echo is not None:
-            views.append(self._echo)
+        #
+        # Two savings, because a scene is a great many items: three rows of
+        # sixty characters is ~180 texts, and in keyed mode each character
+        # carries a ring of outline copies as well, so the same frame is well
+        # over a thousand more.
+        #
+        # `_between` parses a hex colour and formats another, and it was asked
+        # once per item for an answer that depends only on the target colour.
+        # A frame holds a handful of those — the ramp's two ends, whatever the
+        # feather is passing through, `palette.side`, the outline's black — so
+        # it is memoised for the length of the call.
+        #
+        # And when every glyph of a row lands on the same presented colour it
+        # is written by the row's own tag in one Tcl call rather than one per
+        # item. That is not the rare case: it is every inactive row, and it is
+        # every frame of a wash, where the blend collapses to the backdrop
+        # whatever each glyph was heading for. Same trick, and the same reason,
+        # as `present_inactive` and `set_visible` inside `LineView`.
+        canvas = self.canvas
+        views = self._text_scene_views()
         for view in views:
+            backdrop = view.palette.backdrop
+            shown: dict[str, str] = {}
             for entry in view._items:
-                self.canvas.itemconfigure(
-                    entry[2], fill=_between(view.palette.backdrop, entry[3], progress))
-            for item in view._outline:
-                self.canvas.itemconfigure(
-                    item, fill=_between(view.palette.backdrop, OUTLINE_COLOUR, progress))
+                target = entry[3]
+                if target not in shown:
+                    shown[target] = _between(backdrop, target, progress)
+            presented = set(shown.values())
+            if len(presented) == 1:
+                canvas.itemconfigure(view._text_tag, fill=presented.pop())
+            elif presented:
+                for entry in view._items:
+                    canvas.itemconfigure(entry[2], fill=shown[entry[3]])
+            if view._outline:
+                # Every copy in the ring is the same black at the same
+                # progress, so there is nothing here to iterate at all.
+                canvas.itemconfigure(
+                    view._outline_tag,
+                    fill=_between(backdrop, OUTLINE_COLOUR, progress))
+        # Only 0.0 is ever held for more than a frame, so that is the only one
+        # worth remembering; anything else recorded here would be compared
+        # against once and never match.
+        self._presented_scene = (
+            self._text_scene_state(views) if progress == 0.0 else None)
 
     def _advance_fade(self, started: float | None, duration: float,
                       *, appearing: bool) -> tuple[bool, float | None]:
@@ -2611,8 +2768,9 @@ class Overlay:
             if self._lyrics_reveal_pending:
                 # The renderer updates true target colours on every frame;
                 # overwrite only their presentation colour until the resize
-                # has completely settled.
-                self._fade_text_scene(0.0)
+                # has completely settled. Only when it has actually updated
+                # one, though — see `_hold_text_scene_washed`.
+                self._hold_text_scene_washed()
                 if live_transport and self._collapse is not None:
                     interval = FAST_TICK_MS
             elif self._advance_lyrics_fade():
@@ -2677,6 +2835,11 @@ class Overlay:
         # changing LineView's target caches; the tag-based implementation is a
         # constant two Tcl calls regardless of how long the wrapped line is.
         incoming.present_inactive(colour)
+        # This wrote a presentation colour over the whole row without changing
+        # anything a `LineView` records, which is exactly the case
+        # `_text_scene_state` cannot see. Say so, rather than let a later wash
+        # read an unchanged scene and leave this row lit.
+        self._presented_scene = None
         return fading
 
     def _advance_beam(self) -> bool:
@@ -2802,6 +2965,10 @@ class Overlay:
         chrome_mod.hold_timer_resolution(True)
         self._tick()
         self.root.mainloop()
+        # Every exit, not only the one that goes through `_close`: the loop can
+        # also end because the root was destroyed from under it, and a size
+        # still owed to the disk must not leave with it.
+        self._flush_size()
         chrome_mod.hold_timer_resolution(False)
         self.tray.stop()
         self.hotkeys.stop()

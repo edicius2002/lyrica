@@ -97,19 +97,25 @@ def test_a_cut_correction_fades_the_landed_scene_out_of_the_wash(monkeypatch):
     shown = {}
     panel.canvas = SimpleNamespace(
         itemconfigure=lambda item, **values: shown.update({item: values["fill"]}))
+    # A row carries the two tags a real `LineView` has, because a row whose
+    # glyphs all land on the same presented colour is coloured by its text tag
+    # in one call — the same shape `present_inactive` and `set_visible` use.
+    # What is asserted is still the colour the row is presented in.
     panel._views = {
         0: SimpleNamespace(
             palette=SimpleNamespace(backdrop=(0, 0, 0)),
-            _items=[[0, 0, "glyph", "#ffffff"]], _outline=[])
+            _items=[[0, 0, "glyph", "#ffffff"]], _outline=[],
+            _text_tag="row-text", _outline_tag="row-outline")
     }
     panel._echo = None
     panel._cut_fade_at = 10.0
+    panel._presented_scene = None
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.06)
 
     assert panel._advance_cut_fade() is True
-    assert shown["glyph"] not in ("#000000", "#ffffff")
+    assert shown["row-text"] not in ("#000000", "#ffffff")
 
     monkeypatch.setattr(app.time, "monotonic", lambda: 10.20)
     assert panel._advance_cut_fade() is False
-    assert shown["glyph"] == "#ffffff"
+    assert shown["row-text"] == "#ffffff"
     assert panel._cut_fade_at is None
