@@ -68,8 +68,17 @@ SHINE_SPEED_GAIN = 0.55
 # The old ring was a single two-pixel line. It moved, but against a textured
 # artwork wash it had no spatial presence. A crisp core carries the colour and
 # a quieter wide line underneath gives it a field without covering the words.
-CORE_WIDTH = 3.0
-HALO_WIDTH = 9.0
+#
+# Widened from 3 and 9. At those the border was something you noticed having
+# looked for it: three pixels of colour is a hairline beside a panel four
+# hundred tall, and what the music did to it was smaller still. The halo grows
+# by more than the core because it is the half that reads as presence — the
+# core says what colour, the field says how much.
+#
+# `LYRICA_BEAM_INTENSITY` scales both, 0.5 to 2.0, for anyone who wants the
+# hairline back or twice this.
+CORE_WIDTH = 5.0
+HALO_WIDTH = 15.0
 HALO_KEEP = 0.42
 
 # Palette roles guarantee text contrast, not border contrast. The beam gets its
@@ -375,14 +384,25 @@ class Beam:
         top = len(self._gradient) - 1
         count = len(self._items)
 
-        width_state = round((level * 0.7 + dynamics * 0.3) * 4)
+        # Six steps rather than four, and a far wider swing between them. The
+        # ring answers a beat by thickening, and at 22% of three pixels that
+        # answer was under a pixel — arithmetically present and not visible.
+        # The core now carries half again its width at a peak and the halo
+        # close to double, so a hit is something the eye catches at the edge
+        # of vision rather than something found by staring at the border.
+        #
+        # The quantising is what keeps this off the canvas most frames: the
+        # width is written only when the step changes, and each write is two
+        # calls against a tag. Six steps is the most this can be given before
+        # loud music writes on nearly every frame.
+        width_state = round((level * 0.7 + dynamics * 0.3) * 6)
         if width_state != self._width_state:
             self._width_state = width_state
-            pulse = width_state / 4
+            pulse = width_state / 6
             self.canvas.itemconfigure(
-                self._core_tag, width=self._core_width * (1.0 + 0.22 * pulse))
+                self._core_tag, width=self._core_width * (1.0 + 0.5 * pulse))
             self.canvas.itemconfigure(
-                self._halo_tag, width=self._halo_width * (0.82 + 0.38 * pulse))
+                self._halo_tag, width=self._halo_width * (0.75 + 0.85 * pulse))
 
         if self.style == AURORA:
             period = AURORA_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
