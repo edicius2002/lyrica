@@ -14,7 +14,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 
-from PIL import ImageGrab
+from PIL import ImageColor, ImageGrab
 
 from lyrica import bloom
 from lyrica.app import (
@@ -139,10 +139,27 @@ class Renderer:
         following.destroy()
 
     def beam(self, name: str, character: Character) -> None:
+        """Composed in PIL rather than grabbed off the glass.
+
+        The border is images now, so its frame can be assembled from the exact
+        pixels the canvas would be handed — which is both more faithful than a
+        screen capture and free of the two things a capture costs: a visible
+        window that something else can land on top of, and a dependence on
+        whatever the compositor did to the panel on the way to the screen.
+        """
+        from PIL import Image
+
         self.clear()
         ring = Beam(self.canvas, WIDTH, HEIGHT, 18, 1.0, SHINE)
         ring.advance(0.7, character, DEFAULT)
-        self.capture(name)
+        frame = Image.new("RGBA", (WIDTH, HEIGHT),
+                          (*ImageColor.getrgb(BACKGROUND), 255))
+        for strip in ring.light.strips:
+            if strip.box is None:
+                continue
+            frame.alpha_composite(ring.light.image(strip, ring._tables),
+                                  (strip.box[0], strip.box[1]))
+        frame.convert("RGB").save(self.output / f"{name}.png")
         ring.destroy()
 
     def close(self) -> None:

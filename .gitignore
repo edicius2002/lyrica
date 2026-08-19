@@ -24,3 +24,6 @@ mvp/cache/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Agent worktrees: copies of the repository, not source.
+.claude/

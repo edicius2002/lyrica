@@ -13,7 +13,7 @@
     "row_gap": 50,
     "lane_step": 160,
     "safe_margin": 36,
-    "minimum_separation_ratio": 0.3
+    "minimum_separation_ratio": 0.30
   },
   "backing_vocal": {
     "corner_inset": 10,
@@ -22,8 +22,10 @@
     "exit_lane_fraction": 0.75
   },
   "beam": {
-    "core_width": 5.0,
-    "halo_width": 15.0,
+    "core_width": 3.0,
+    "core_soft": 7.0,
+    "halo_reach": 22.0,
+    "edge_inset": 7.0,
     "minimum_delta_e": 18.0
   }
 }

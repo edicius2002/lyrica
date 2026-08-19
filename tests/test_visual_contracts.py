@@ -45,11 +45,19 @@ def test_backing_lane_matches_the_visual_contract():
 
 
 def test_beam_layers_match_the_visual_contract():
+    # `halo_width` is gone from this contract because the thing it measured is:
+    # the border was a flat nine-pixel stroke under a crisp core, and it is a
+    # falloff now with no stroke anywhere in it. The numbers that decide how
+    # wide it reads are the ones recorded instead — the ink, how far it is
+    # smeared, how far the field carries, and how far inside the panel's own
+    # edge the whole thing sits.
     from lyrica import beam
 
     expected = CONTRACTS["beam"]
     assert beam.CORE_WIDTH == expected["core_width"]
-    assert beam.HALO_WIDTH == expected["halo_width"]
+    assert beam.CORE_SOFT == expected["core_soft"]
+    assert beam.HALO_REACH == expected["halo_reach"]
+    assert beam.EDGE_INSET == expected["edge_inset"]
     assert beam.MIN_BEAM_DE == expected["minimum_delta_e"]
 
 

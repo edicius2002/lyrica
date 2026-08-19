@@ -1,6 +1,7 @@
 """The path the border light travels, and the meter that drives it (offline)."""
 import math
 import sys
+from itertools import pairwise
 
 import pytest
 
@@ -111,21 +112,72 @@ def test_asking_for_even_frames_is_safe_on_any_platform():
 
 
 # --- the two styles ---------------------------------------------------------
+#
+# The ring is drawn as images now rather than as line items, so what the border
+# is lit to is read off the pixels the compositor will show rather than off a
+# list of fills. That is what these assertions were always about — the fills
+# were only the evidence available while the ring was made of `create_line` —
+# and reading the picture is the stronger evidence of the two: it covers the
+# opacity as well as the colour, which the fills could not see.
 
-def _lit(style, level, canvas):
-    """What every segment of a ring would be lit to, as brightness 0..255."""
+def _panel(width=600, height=200):
     from lyrica import palette as pal_mod
-    from lyrica.beam import Beam
     from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL, rgb_of
+    from lyrica.glass import PANEL
     from lyrica.songcolour import SongColour
 
-    palette = pal_mod.for_song(
+    return pal_mod.for_song(
         Chrome(ChromeMode.PANEL, "#000", PANEL),
         SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
-    ring = Beam(canvas, 600, 200, 18, 1.0, style)
+
+
+def frame(ring, palette, width, height):
+    """The panel as the canvas will show it: the backdrop, then the ring's light."""
+    from PIL import Image
+
+    made = Image.new("RGBA", (width, height),
+                     (*(int(c) for c in palette.backdrop), 255))
+    for strip in ring.light.strips:
+        if strip.box is None:
+            continue
+        made.alpha_composite(ring.light.image(strip, ring._tables),
+                             (strip.box[0], strip.box[1]))
+    return made.convert("RGB")
+
+
+def ridge(ring, palette, width, height, span=3):
+    """The brightest the light gets at each point round the ring, 0..255.
+
+    The brightest *near* each point rather than exactly on it, because the
+    profile is a falloff sampled on a pixel grid: whether a ridge lands on a
+    pixel centre or between two of them moves the reading by a few levels, and
+    that is the picture's own sampling rather than anything the music did. The
+    line ring had no such term, so its fills could be read straight off.
+    """
+    pixels = frame(ring, palette, width, height).load()
+    levels = []
+    for x, y in ring._points:
+        near = [max(pixels[min(width - 1, max(0, round(x) + dx)),
+                           min(height - 1, max(0, round(y) + dy))])
+                for dx in range(-span, span + 1)
+                for dy in range(-span, span + 1)]
+        levels.append(max(near))
+    return levels
+
+
+def _lit(style, level, canvas, width=600, height=200):
+    """What the border is lit to all the way round it, as brightness 0..255.
+
+    Sampled on the ring's own path, which is where the light is brightest, and
+    against the backdrop it is composed over — so an unlit stretch reads as the
+    backdrop exactly as it does on screen.
+    """
+    from lyrica.beam import Beam
+
+    palette = _panel()
+    ring = Beam(canvas, width, height, 18, 1.0, style)
     ring.advance(0.0, level, palette)
-    levels = [max(rgb_of(s)) for s in ring._shades]
+    levels = ridge(ring, palette, width, height)
     ring.destroy()
     return levels
 
@@ -159,18 +211,60 @@ def test_the_shine_stays_lit_with_no_audio_at_all(canvas):
     assert min(_lit(SHINE, 0.0, canvas)) > 20
 
 
-def test_the_ring_has_a_crisp_core_and_a_wider_field(canvas):
-    from lyrica.beam import SHINE, Beam
+def _section(ring, palette, width, height):
+    """The light's cross-section through the middle of the left edge.
 
+    Opacity rather than composited colour, because it is the *shape* of the
+    falloff that is being measured and the colour varies along the ring while
+    the shape does not.
+    """
+    strip = next(s for s in ring.light.strips
+                 if s.box is not None and s.box[0] == 0 and s.box[2] < width)
+    image = ring.light.image(strip, ring._tables)
+    row = image.height // 2
+    return [image.getpixel((x, row))[3] for x in range(image.width)]
+
+
+def test_the_border_is_a_falloff_and_not_a_step(canvas):
+    # What the two `create_line` strokes could not do, and the whole reason the
+    # ring became an image. A five-pixel core at full colour under a fifteen-
+    # pixel halo at a flat 42 % gives a cross-section that is bright, then a
+    # plateau, then nothing — one step, and no width or percentage removes it,
+    # because having ends is what a stroke is. This asserts the replacement has
+    # the property the strokes could not: a single peak, and a descent that
+    # never sits still and never jumps.
+    from lyrica.beam import SHINE, Beam
+    from lyrica.meter import Character
+
+    palette = _panel()
     ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
-    assert len(ring._items) == len(ring._halo_items) > 0
-    core = float(canvas.itemcget(ring._items[0], "width"))
-    halo = float(canvas.itemcget(ring._halo_items[0], "width"))
-    assert halo >= core * 2
+    ring.advance(0.0, Character(level=0.8, dynamics=0.5), palette)
+    section = _section(ring, palette, 600, 200)
+    peak = section.index(max(section))
+    assert 0 < peak < len(section) - 4, "the light is cut off by its own strip"
+    tail = section[peak:]
+    assert tail[-1] == 0, "the light does not end, it is cut"
+    # Monotone down, over a distance, with no drop in one pixel big enough to
+    # read as an end. The two strokes it replaced dropped 58 % of the peak at
+    # the core's edge and the remaining 42 % at the halo's; a sixth is well
+    # under either and well over the 11 % the ridge's own shoulder costs.
+    assert len(tail) > 20, "the light ends too abruptly to be a falloff"
+    assert all(b <= a for a, b in pairwise(tail))
+    steps = [a - b for a, b in pairwise(tail)]
+    assert max(steps) <= max(section) / 6, f"a step of {max(steps)} in the falloff"
+    # And it keeps moving: a stroke of fixed opacity would show as a long run
+    # of one value, which is exactly what the flat halo was.
+    lit = [value for value in tail if value > 4]
+    assert len(set(lit)) > len(lit) * 0.6, "too much of the falloff is flat"
     ring.destroy()
 
 
 def test_music_energy_changes_the_beams_spatial_weight(canvas):
+    # The line ring pulsed its stroke *widths*; an image cannot, without
+    # rebuilding the blur. The same thing is said by how much light there is,
+    # because the distance at which a falloff stops being visible moves with how
+    # bright it started — so this measures both: the total light on the edge,
+    # and how far from the edge it can still be seen.
     from lyrica import palette as pal_mod
     from lyrica.beam import SHINE, Beam
     from lyrica.chrome import Chrome, ChromeMode
@@ -180,35 +274,37 @@ def test_music_energy_changes_the_beams_spatial_weight(canvas):
 
     palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
     ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
-    ring.advance(0.0, Character(level=0.0, dynamics=0.0), palette)
-    quiet = float(canvas.itemcget(ring._halo_items[0], "width"))
-    # Over frames rather than in one, because the width follows the level
-    # through an envelope now: a level that jumps from silence to a peak used
-    # to cross three quantised steps in a single frame, which is a snap where
-    # a swell was wanted. `dt=0` therefore no longer means "at once" — it means
-    # no time has passed, and nothing that answers over time can have answered.
-    loud = quiet
-    for _ in range(12):
-        ring.advance(1 / 30, Character(level=1.0, dynamics=1.0), palette)
-        loud = float(canvas.itemcget(ring._halo_items[0], "width"))
-    assert loud > quiet
+    weights = []
+    for character in (Character(level=0.0, dynamics=0.0),
+                      Character(level=1.0, dynamics=1.0)):
+        ring.advance(0.0, character, palette)
+        section = _section(ring, palette, 600, 200)
+        weights.append((sum(section), sum(1 for v in section if v > 8)))
+    quiet, loud = weights
+    assert loud[0] > quiet[0], "the loud border carries no more light"
+    assert loud[1] > quiet[1], "the loud border is no wider"
     ring.destroy()
 
 
 def test_the_beam_colour_has_a_contrast_floor():
     from types import SimpleNamespace
 
-    from lyrica.beam import COLOUR_STOP, MIN_BEAM_DE, _gradient
-    from lyrica.glass import delta_e, rgb_of
+    from lyrica.beam import COLOUR_STOP, MIN_BEAM_DE, _lerp, _ramp
+    from lyrica.glass import delta_e
 
     back = (40, 40, 40)
     palette = SimpleNamespace(backdrop=back, beam="#282828", sung="#ffffff")
-    gradient = _gradient(palette)
-    middle = rgb_of(gradient[round((len(gradient) - 1) * COLOUR_STOP)])
-    assert delta_e(back, middle) >= MIN_BEAM_DE - 1
+    ramp = _ramp(palette)
+    # The same entry as before, but composed onto the backdrop the way the
+    # canvas composes it — the ramp carries a colour *and* an opacity now, and
+    # a floor that only held for the colour would be no floor at all.
+    colour, opacity = ramp[round((len(ramp) - 1) * COLOUR_STOP)]
+    assert delta_e(back, _lerp(back, colour, opacity)) >= MIN_BEAM_DE - 1
 
 
 def test_aurora_uses_several_neighbouring_hues(canvas):
+    # Counted on the pixels the ring is actually painted in rather than on a
+    # list of fills, which is where the distinct shades used to be countable.
     from lyrica import palette as pal_mod
     from lyrica.beam import AURORA, Beam
     from lyrica.chrome import Chrome, ChromeMode
@@ -219,7 +315,10 @@ def test_aurora_uses_several_neighbouring_hues(canvas):
     palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
     ring = Beam(canvas, 600, 200, 18, 1.0, AURORA)
     ring.advance(0.5, Character(level=0.7, dynamics=0.7, rate=0.5), palette)
-    assert len(set(ring._shades)) > 8
+    pixels = frame(ring, palette, 600, 200).load()
+    shades = {pixels[min(599, round(x)), min(199, round(y))]
+              for x, y in ring._points}
+    assert len(shades) > 8
     ring.destroy()
 
 
@@ -239,18 +338,13 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
 # --- the music's character drives the shine ---------------------------------
 
 def _shine(character, canvas):
-    from lyrica import palette as pal_mod
+    """How far the border swings between its lightest and darkest part."""
     from lyrica.beam import SHINE, Beam
-    from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL, rgb_of
-    from lyrica.songcolour import SongColour
 
-    palette = pal_mod.for_song(
-        Chrome(ChromeMode.PANEL, "#000", PANEL),
-        SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
+    palette = _panel()
     ring = Beam(canvas, 1125, 375, 18, 1.25, SHINE)
     ring.advance(0.0, character, palette)
-    levels = [max(rgb_of(s)) for s in ring._shades]
+    levels = ridge(ring, palette, 1125, 375)
     ring.destroy()
     return max(levels) - min(levels)
 
@@ -336,110 +430,147 @@ def _ring(canvas, style, width=900, height=320, scale=1.0, radius=18):
     return Beam(canvas, width, height, radius, scale, style), palette
 
 
-def test_reshaping_moves_the_segments_it_already_has(canvas):
-    # `reshape` runs once per frame of the collapse animation. Rebuilding the
-    # ring there spent 352 deletes and 352 creates a frame to put items back
-    # where they already were; the segment count barely moves between
-    # consecutive frames, so the items are reused and only the difference is
-    # created or deleted.
+def test_reshaping_reuses_the_items_it_already_has(canvas):
+    # What the segment pool was for, on what the ring is made of now. `reshape`
+    # runs once per frame of the collapse animation, and the ring is drawn as
+    # four images rather than 352 lines, so there is nothing left to pool by
+    # count — but the stronger half of the old property still has to hold: the
+    # canvas items are never torn down and laid again, whatever the size does.
+    # An item created later lands on top of the display list, and the overlay
+    # lays the beam *before* the card and the lyrics precisely so it can never
+    # cover a word.
     from lyrica.beam import SHINE
 
     ring, _palette = _ring(canvas, SHINE)
-    before = list(ring._items), list(ring._halo_items)
-    ring.reshape(760, 217, 18)
-    kept = len(ring._items)
-    assert kept < len(before[0]), "the smaller ring should need fewer segments"
-    assert ring._items == before[0][:kept], "the cores were rebuilt, not moved"
-    assert ring._halo_items == before[1][:kept], "the halos were rebuilt"
-    # And the ones that went are really gone from the canvas, not merely
-    # dropped from the list.
-    for item in before[0][kept:] + before[1][kept:]:
-        assert not canvas.type(item)
+    before = [strip.item for strip in ring.light.strips]
+    seen = set(canvas.find_all())
+    for width, height in ((760, 217), (620, 114), (1100, 380), (900, 320)):
+        ring.reshape(width, height, 18)
+        assert [s.item for s in ring.light.strips] == before, (
+            "the ring's items were rebuilt, not reused")
+        assert set(canvas.find_all()) == seen, "a reshape left items behind"
     ring.destroy()
+    for item in before:
+        assert not canvas.type(item)
 
 
-def test_a_relaid_ring_keeps_every_halo_under_every_core(canvas):
-    # The reason `reshape` creates all the halos before any of the cores: a
-    # halo is three times the width of a core, so one sitting above its
-    # neighbour's core covers the end of it and a continuous gradient reads as
-    # a dashed line at every join. Items created to grow the ring land on top
-    # of the display list, which would put the new halos over the old cores.
+def test_the_ring_tiles_the_edge_without_overlapping_itself(canvas):
+    # The reason the ring is four images and not one per edge plus corners.
+    # Every pixel of the light carries partial opacity, so two strips laid over
+    # each other compose twice and the overlap reads as a bright band straight
+    # across the glow — the same defect as the dashed joins the line ring got
+    # when a halo climbed over its neighbour's core, and just as visible.
     from lyrica.beam import SHINE
 
     ring, _palette = _ring(canvas, SHINE, 620, 114)
-    for width, height in ((900, 320), (620, 114), (1100, 380)):
+    for width, height in ((900, 320), (620, 114), (1100, 380), (240, 90)):
         ring.reshape(width, height, 18)
-        order = {item: index for index, item in enumerate(canvas.find_all())}
-        halos = [order[item] for item in ring._halo_items]
-        cores = [order[item] for item in ring._items]
-        assert max(halos) < min(cores), "a halo climbed above a core"
-        assert halos == sorted(halos) and cores == sorted(cores)
+        boxes = [strip.box for strip in ring.light.strips if strip.box]
+        assert boxes, "the ring drew nothing"
+        for i, a in enumerate(boxes):
+            for b in boxes[i + 1:]:
+                assert (a[2] <= b[0] or b[2] <= a[0]
+                        or a[3] <= b[1] or b[3] <= a[1]), f"{a} overlaps {b}"
+        # And between them they cover the whole edge, which is the other half
+        # of tiling: a gap is a stretch of border that is simply not drawn.
+        covered = sum((a[2] - a[0]) * (a[3] - a[1]) for a in boxes)
+        band = min(min(width, height) // 2,
+                   round(ring.shape.inset + ring.shape.reach + ring.shape.core + 4))
+        assert covered >= width * height - max(0, width - 2 * band) * max(
+            0, height - 2 * band)
     ring.destroy()
 
 
 def test_a_relaid_ring_never_lies_about_what_it_painted(canvas):
-    # `_shades` and `_halo_shades` are `_paint`'s only evidence of what the
-    # canvas is carrying: an unchanged core shade is taken as proof the halo is
-    # unchanged too, and the halo write is skipped. A reused segment keeps its
-    # fill, so its entry stays true — but a segment whose fill was reset
-    # without its entry being reset would keep that stale halo for good, which
-    # is the defect the sentinel seeding was introduced to close.
-    from lyrica.beam import HALO_KEEP, SHINE, _mix
-    from lyrica.glass import rgb_of
+    # `_shades` was `_paint`'s only evidence of what the canvas was carrying;
+    # `strip.shown` is `paint`'s. Same trap: it is what lets an unchanged table
+    # skip the repaint, so a strip whose *fields* were rebuilt under it while
+    # its entry was left alone would go on showing the picture drawn for the
+    # previous panel size for as long as the music happened not to move.
+    #
+    # So a reshape must reset it, and the ring must then paint its way back to
+    # the truth — which takes as many calls as there are strips, since only
+    # `PER_CALL` of them are repainted at a time.
+    from lyrica import halo
+    from lyrica.beam import SHINE
     from lyrica.meter import Character
 
     ring, palette = _ring(canvas, SHINE)
     for step, (width, height) in enumerate(
             ((900, 320), (760, 217), (620, 114), (900, 320), (1100, 380))):
         ring.reshape(width, height, 18)
-        ring.advance(1 / 60, Character(level=0.2 + 0.2 * step, dynamics=0.5,
-                                       rate=0.3), palette)
-        for index, core in enumerate(ring._items):
-            assert canvas.itemcget(core, "fill") == ring._shades[index]
-            want = _mix(tuple(palette.backdrop),
-                        rgb_of(ring._shades[index]), HALO_KEEP)
-            assert canvas.itemcget(ring._halo_items[index], "fill") == want, (
-                "the halo was left behind by its core")
+        assert all(strip.shown is None for strip in ring.light.strips), (
+            "a reshape left a strip claiming to show the old panel")
+        music = Character(level=0.2 + 0.15 * step, dynamics=0.5, rate=0.3)
+        for _ in range(len(ring.light.strips)):
+            ring.advance(0.0, music, palette)
+        for strip in ring.light.strips:
+            if strip.box is None:
+                continue
+            want = bytes(table[key] for key in strip.keys
+                         for table in ring._tables)
+            assert strip.shown == want, "a strip was left behind by the table"
+            assert canvas.itemcget(strip.item, "state") == "normal"
+        assert halo.PER_CALL >= 1
     ring.destroy()
 
 
-def test_a_grown_ring_wears_the_pulse_the_rest_of_it_wears(canvas):
-    # Segments are created at the base width, so a ring that grew mid-song
-    # would carry a few unpulsed segments among pulsed ones until the level
-    # next happened to cross a quartile.
+def test_a_relaid_ring_wears_the_presence_the_rest_of_it_wears(canvas):
+    # The line ring created fresh segments at the base stroke width, so a ring
+    # that grew mid-song carried a few unpulsed segments among pulsed ones
+    # until the level next crossed a quartile. The image ring cannot have that
+    # defect per *segment*, because every strip reads the same table — but it
+    # can have it per *strip*, since only one is repainted a call. The property
+    # is the same: once the ring has settled, no part of it is still wearing
+    # the weight the music had before the reshape.
     from lyrica.beam import SHINE
     from lyrica.meter import Character
 
     ring, palette = _ring(canvas, SHINE, 620, 114)
+    quiet = Character(level=0.0, dynamics=0.0, rate=0.0)
     loud = Character(level=1.0, dynamics=1.0, rate=0.3)
-    ring.advance(1 / 60, loud, palette)
+    for _ in range(8):
+        ring.advance(1 / 60, quiet, palette)
     ring.reshape(900, 320, 18)
-    ring.advance(1 / 60, loud, palette)
-    assert len({canvas.itemcget(i, "width") for i in ring._items}) == 1
-    assert len({canvas.itemcget(i, "width") for i in ring._halo_items}) == 1
+    for _ in range(8):
+        ring.advance(1 / 60, loud, palette)
+    # Then held still, so the ring has a fixed thing to settle on: with the
+    # phase moving there is always a strip a frame or two behind, which is the
+    # trade `PER_CALL` makes and not a strip left wearing the old weight.
+    for _ in range(len(ring.light.strips)):
+        ring.advance(0.0, loud, palette)
+    for strip in ring.light.strips:
+        if strip.box is None:
+            continue
+        want = bytes(table[key] for key in strip.keys for table in ring._tables)
+        assert strip.shown == want
     ring.destroy()
 
 
-def test_a_bigger_window_does_not_buy_segments_it_pays_for_every_frame(canvas):
+def test_a_bigger_window_does_not_buy_points_it_pays_for_every_resize(canvas):
     # `STRAIGHT_SPACING` is in physical pixels, so before it was scaled a
-    # Ctrl+Alt+plus took the default panel from 176 segments to 316 and then
-    # charged for them on every frame of `advance` for the rest of the
-    # session — measured 2.7 ms a frame against 1.7 for the shine, and 5.3
-    # against 3.3 for the comet, at 60 Hz and a 16 ms budget. The density is
-    # constant in design units instead; the corners never depended on the
-    # spacing, since they have a fixed point budget of their own.
+    # Ctrl+Alt+plus took the default panel from 176 points to 316. That used to
+    # be charged on every frame of `advance`; it is charged on every frame of a
+    # *resize* now, since the points are drawn into the light's fields and then
+    # only looked up. Either way the density has to be constant in the units
+    # the design is written in. The corners never depended on the spacing, since
+    # they have a fixed point budget of their own.
     from lyrica.beam import CORNER_POINTS, SHINE
 
-    counts = {}
+    counts, items = {}, {}
     for scale in (0.6, 1.0, 2.0):
         # The same three things the window scales together: the panel, the
-        # corner radius and the ring's own thickness.
+        # corner radius and the light's own shape.
         ring, _palette = _ring(canvas, SHINE, round(900 * scale),
                                round(320 * scale), scale, round(18 * scale))
-        counts[scale] = len(ring._items)
+        counts[scale] = len(ring._points)
+        items[scale] = len(ring.light.strips)
         ring.destroy()
     assert counts[0.6] == counts[1.0] == counts[2.0], counts
     assert counts[1.0] > 4 * CORNER_POINTS, "the straights vanished"
+    # And whatever the scale, a frame has the same handful of canvas items to
+    # think about, where it used to have two per point.
+    assert items[0.6] == items[1.0] == items[2.0] == 4
 
 
 # --- reading the character off a level ---------------------------------------
