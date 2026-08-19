@@ -76,16 +76,23 @@ SHINE_SPEED_GAIN = 0.55
 # Small on purpose. They perturb the shape; they do not compete with it.
 SHINE_RIPPLES = ((3.0, 0.11, 0.31), (5.0, 0.06, 0.73))
 
-# How fast the pulse follows the level, rising and falling, per second. The
-# width is quantised so that it is written to the canvas rarely, and a level
-# that jumps from silence to a peak in one frame crossed three of those steps
-# at once — a snap rather than a swell. Smoothing what gets quantised means the
-# same steps are climbed one at a time instead of jumped across.
+# The pulse rises with the level and eases back down, which is the shape of the
+# meter's own envelope and is a shape a hit has: it arrives, then it ebbs.
 #
-# Faster up than down, like the meter's own envelope and for the same reason: a
-# beat should arrive and then ebb, not arrive and vanish.
-PULSE_ATTACK = 14.0
+# Rising is not smoothed, and smoothing it was a mistake worth recording. Eased
+# up at 14 a second it climbed under a quarter of the way per frame, and the
+# peak of a beat lasts a handful of frames — so the top of every hit was
+# clipped before it arrived. Measured across 80 to 200 bpm, the level swung its
+# full range at all of them while the width reached only three of its six steps,
+# and two of them at 200. What was meant to stop the width snapping was quietly
+# flattening the thing it was there to show.
+#
+# Falling is smoothed, and faster when the music is busier. At 200 bpm a beat
+# lands every 300 ms, so a decay slow enough to look graceful at 80 has not
+# finished before the next hit arrives and the border sits at a constant width.
+# The onset rate is what says how much time there is.
 PULSE_RELEASE = 4.5
+PULSE_RELEASE_GAIN = 3.0
 
 # The old ring was a single two-pixel line. It moved, but against a textured
 # artwork wash it had no spatial presence. A crisp core carries the colour and
@@ -442,8 +449,11 @@ class Beam:
         # calls against a tag. Six steps is the most this can be given before
         # loud music writes on nearly every frame.
         want = level * 0.7 + dynamics * 0.3
-        speed = PULSE_ATTACK if want > self._pulse else PULSE_RELEASE
-        self._pulse += (want - self._pulse) * min(1.0, dt * speed)
+        if want >= self._pulse:
+            self._pulse = want
+        else:
+            ebb = PULSE_RELEASE * (1.0 + PULSE_RELEASE_GAIN * rate)
+            self._pulse += (want - self._pulse) * min(1.0, dt * ebb)
         width_state = round(self._pulse * 6)
         if width_state != self._width_state:
             self._width_state = width_state
