@@ -507,6 +507,7 @@ class Overlay:
         self._card_raw = None
         self._awaiting_seek = None
         self._static_mount_pending = False
+        self._scale_gliding = False
         # A size chosen but not yet written down, and the timer that will write
         # it. See `_remember_size_later`.
         self._size_unsaved: float | None = None
@@ -1051,7 +1052,8 @@ class Overlay:
         # Nothing cancels now: the window stays where it is and unfolds to the
         # right, and the only thing moving is the card finding its place.
         self._collapse = (self.width, self.height, *target, time.monotonic(),
-                          self.root.winfo_x(), self.root.winfo_y())
+                          self.root.winfo_x(), self.root.winfo_y(),
+                          self.chrome.scale)
         # One region for the whole move, big enough for either end of it. A
         # region wider than the window clips nothing, so the panel is never cut
         # short of itself; the corners are square while it travels and rounded
@@ -1063,29 +1065,52 @@ class Overlay:
         """Move one frame along the collapse. True while it is still going."""
         if self._collapse is None:
             return False
-        from_w, from_h, to_w, to_h, started, left, top = self._collapse
+        from_w, from_h, to_w, to_h, started, left, top, from_scale = self._collapse
         elapsed = (time.monotonic() - started) * 1000
         done = elapsed >= COLLAPSE_MS
         t = motion.cubic_bezier(1.0 if done else elapsed / COLLAPSE_MS,
                                 motion.RESIZE_CURVE)
+        # The ring is the one thing that can follow a scale the whole way. Its
+        # widths and its corner are arithmetic, so they take the same curve the
+        # window does; the text cannot, because Tk font sizes are integers and
+        # the staircase that produces is the reason word growth is drawn from
+        # images in the first place. So the border travels and the words wait.
+        radius = None
+        if from_scale != self.chrome.scale:
+            live = from_scale + (self.chrome.scale - from_scale) * t
+            radius = max(1, round(chrome_mod.CORNER_RADIUS * live))
+            if self.beam is not None:
+                self.beam.set_scale(live)
         self._resize_window(round(from_w + (to_w - from_w) * t),
                             round(from_h + (to_h - from_h) * t), settling=done,
-                            anchor=(left, top))
+                            anchor=(left, top), radius=radius)
         if not done:
             return True
         self._collapse = None
+        self._scale_gliding = False
         return False
 
     def _resize_window(self, width: int, height: int,
                        settling: bool = True,
-                       anchor: tuple | None = None) -> None:
+                       anchor: tuple | None = None,
+                       radius: int | None = None) -> None:
         """Put the window at a size, keeping the card exactly where it is.
 
         The top edge and the horizontal centre are held. The card lives at the
         top, so anchoring there means the one thing still on screen does not
         move while everything below it goes away.
+
+        `radius` is the corner the ring is drawn to, for a move that is also
+        changing scale; the panel's own corner comes from the clip region and
+        is square for the whole of a move anyway.
         """
-        if (width, height) == (self.width, self.height):
+        if (width, height) == (self.width, self.height) and not settling \
+                and radius is None:
+            # Two frames of a curve can round to the same pixel. Skipping the
+            # work is right for a move that is only travelling, and wrong for
+            # the frame that lands — that one still owes the window its exact
+            # clip region — and wrong while a scale is moving, which changes
+            # the ring even when the window has not caught up.
             return
         old_centre = (self.root.winfo_x() + self.width // 2,
                       self.root.winfo_y() + self.height // 2)
@@ -1119,7 +1144,8 @@ class Overlay:
         # were what took a resize frame to 30.8 ms against a budget of 16.
         if self.beam is not None:
             self.beam.reshape(width, height,
-                              self.chrome.px(chrome_mod.CORNER_RADIUS))
+                              self.chrome.px(chrome_mod.CORNER_RADIUS)
+                              if radius is None else radius)
         if settling:
             # `SetWindowRgn` repaints the whole window synchronously and is most
             # of that cost on its own. It cannot simply be left stale either,
@@ -1187,7 +1213,7 @@ class Overlay:
             return          # already at the limit; rebuilding would only flicker
         self._size = size
         self._remember_size_later(size)
-        self._apply_scale()
+        self._apply_scale(glide=True)
 
     def _remember_size_later(self, size: float) -> None:
         """Write the chosen size down once the size stops changing.
@@ -1224,14 +1250,21 @@ class Overlay:
         size, self._size_unsaved = self._size_unsaved, None
         config.save_size(size)
 
-    def _apply_scale(self) -> None:
+    def _apply_scale(self, glide: bool = False) -> None:
         """Rebuild every measurement against the new scale.
 
         Everything the layout knows is derived from `chrome.px()` and the
         scaled fonts, so this recomputes exactly the same things `__init__`
         did — which is the reason it can be this short, and the reason to keep
         the two lists next to each other if either ever grows.
+
+        `glide` hands the window and the ring to the collapse animation
+        instead of putting them at the new size outright. Only those two can
+        take the journey: they are arithmetic, and the ring is cheap to relay
+        now that it is pooled rather than rebuilt. The words cannot, so they
+        are rebuilt once when it lands.
         """
+        was = (self.width, self.height, self.chrome.scale)
         scale = self._dpi_scale * self._size
         self.chrome = replace(self.chrome, scale=scale)
 
@@ -1256,33 +1289,55 @@ class Overlay:
         # flight is abandoned: it was interpolating toward a size from the old
         # scale, and its destination no longer exists.
         self._collapse = None
-        self.width, self.height = self._target_size()
-        self.anchor_y = self.height * ANCHOR
+        target = self._target_size()
 
         # Grow or shrink from the last place the user chose: horizontal centre
         # and top edge. The old on-screen centre selects the current monitor;
         # the saved place remains the anchor even when a larger size has to be
         # temporarily clamped at an edge.
         x, y = chrome_mod.place_in_monitor(
-            self.root, place, (self.width, self.height), old_centre)
-        self.root.geometry(chrome_mod.geometry(self.width, self.height, x, y))
-        self.canvas.configure(width=self.width, height=self.height)
-        # After the geometry, never before: the clip region is in device pixels
-        # and does not track the window, so applying it early clips the window
-        # to whatever size it used to be.
-        self.root.update_idletasks()
-        chrome_mod.shape(self.root, self.chrome, self.width, self.height)
-        # The ring is laid out once for a size and only recoloured after that,
-        # so a scale change leaves it tracing the previous window: inset well
-        # inside the panel after growing, clipped off the edge after shrinking.
-        #
-        # The widths come first because `reshape` insets the path by half the
-        # halo, so a ring relaid before its thickness is known traces the right
-        # outline at the wrong offset from a corner radius that already scaled.
-        if self.beam is not None:
-            self.beam.set_scale(self.chrome.scale)
-            self.beam.reshape(self.width, self.height,
-                              self.chrome.px(chrome_mod.CORNER_RADIUS))
+            self.root, place, target, old_centre)
+        if glide and target != was[:2]:
+            # Landed on the same corner it would have jumped to, so the move
+            # arrives exactly where the jump did and nothing drifts. One region
+            # for the whole of it, big enough for either end — the same trick
+            # `_retarget_size` uses, and the reason the panel's own corners are
+            # square while it travels. The ring keeps its rounded ones, and is
+            # now the only thing drawing them.
+            chrome_mod.shape(self.root, self.chrome,
+                             max(was[0], target[0]), max(was[1], target[1]))
+            self._collapse = (*was[:2], *target, time.monotonic(), x, y, was[2])
+            # Nothing is written into the column while it travels. The lines
+            # below have already been destroyed for the new fonts, and letting
+            # the next tick lay them out again would put text sized for the
+            # window it is going to inside the window it is still in: growing,
+            # a line was wider than the panel carrying it and hung out past the
+            # border for the whole of the move.
+            self._scale_gliding = True
+        else:
+            self.width, self.height = target
+            self.anchor_y = self.height * ANCHOR
+            self.root.geometry(
+                chrome_mod.geometry(self.width, self.height, x, y))
+            self.canvas.configure(width=self.width, height=self.height)
+            # After the geometry, never before: the clip region is in device
+            # pixels and does not track the window, so applying it early clips
+            # the window to whatever size it used to be.
+            self.root.update_idletasks()
+            chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+            # The ring is laid out once for a size and only recoloured after
+            # that, so a scale change leaves it tracing the previous window:
+            # inset well inside the panel after growing, clipped off the edge
+            # after shrinking.
+            #
+            # The widths come first because `reshape` insets the path by half
+            # the halo, so a ring relaid before its thickness is known traces
+            # the right outline at the wrong offset from a corner radius that
+            # already scaled.
+            if self.beam is not None:
+                self.beam.set_scale(self.chrome.scale)
+                self.beam.reshape(self.width, self.height,
+                                  self.chrome.px(chrome_mod.CORNER_RADIUS))
 
         self.canvas.itemconfigure(self._title_item, font=self.f_title)
         self.canvas.itemconfigure(self._artist_item, font=self.f_artist)
@@ -1326,7 +1381,11 @@ class Overlay:
         # is a keypress rather than a track change, so there is a hand waiting
         # for it and nothing else in flight.
         self._reshape_art()
-        logger.info("overlay size %.2f (%dx%d)", self._size, self.width, self.height)
+        # The size it is going to, which during a glide is not the size it is:
+        # the window is still the old one until the animation has walked it
+        # there, and a log that named the old one read as the press having done
+        # nothing.
+        logger.info("overlay size %.2f (%dx%d)", self._size, *target)
 
     # --- lyrics ---
     def _track_for_result(self, gen: int) -> Track | None:
@@ -2661,8 +2720,14 @@ class Overlay:
         # built again, at the size and font it has now. Consumed whatever the
         # answer is, because a live transport rebuilds through the render below
         # and a mount would only be the same frame twice.
-        rescaled = self._static_mount_pending
-        self._static_mount_pending = False
+        gliding = self._scale_gliding and self._collapse is not None
+        # Held, not spent, while the panel is still travelling: mounting now
+        # would build the scene into a window that is not the one it was sized
+        # for. Read against the collapse as well as the flag, so a glide that
+        # ended by any road other than its own last frame cannot strand it.
+        rescaled = self._static_mount_pending and not gliding
+        if not gliding:
+            self._static_mount_pending = False
         static_mounted = (scene_changed or rescaled) and paused_current
         if static_mounted:
             self._mount_static_lyrics(snap)
@@ -2670,6 +2735,15 @@ class Overlay:
             if self._advance_beam():
                 interval = BEAM_TICK_MS
             self._retarget_size()
+            if self._advance_collapse():
+                interval = FAST_TICK_MS
+            self._refit_views()
+        if self._collapse is not None and not live_transport:
+            # A size the keyboard asked for still has to arrive when nothing is
+            # playing. Until a resize could arm one, the only thing that did was
+            # a track changing, so reaching this exclusively through the live
+            # branch cost nothing; now a panel paused halfway through a move
+            # stays halfway through it, which is worse than never having moved.
             if self._advance_collapse():
                 interval = FAST_TICK_MS
             self._refit_views()
@@ -2685,7 +2759,7 @@ class Overlay:
         lyr = self.lyrics
         lyrics_revealing = (
             self._lyrics_reveal_pending or self._lyrics_fade_at is not None)
-        render_lyrics = (not static_mounted
+        render_lyrics = (not static_mounted and not gliding
                          and (live_transport or late_reveal or lyrics_revealing))
         if render_lyrics and lyr is not None and lyr.synced and lyr.lines:
             self._settle_cuts(lyr, snap)
