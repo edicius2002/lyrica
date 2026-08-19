@@ -55,17 +55,31 @@ is 1.66 ms median and 3.03 ms worst.
 """
 import ctypes
 import logging
+import sys
 from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
 
-user32 = ctypes.WinDLL("user32", use_last_error=True)
-gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+# `WinDLL` and `WINFUNCTYPE` exist only on Windows, and reaching for either at
+# import time is what stops the module being importable anywhere else. Nothing
+# here is ever *called* off Windows — there is no companion window to drive —
+# but `test_every_module_imports_on_any_platform` imports every module there
+# is, on purpose: a package that cannot be imported cannot be inspected, and
+# the failure lands on whoever next runs the suite on a Mac rather than on
+# whoever wrote it. The structures below are plain `ctypes`, and `wintypes` is
+# portable, so only these four names need the guard.
+if sys.platform == "win32":
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                                 wintypes.UINT, wintypes.WPARAM,
+                                 wintypes.LPARAM)
+else:
+    user32 = gdi32 = kernel32 = None
+    WNDPROC = ctypes.c_void_p
 
 LRESULT = ctypes.c_ssize_t
-WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
-                             wintypes.WPARAM, wintypes.LPARAM)
 
 WS_POPUP = 0x80000000
 WS_EX_LAYERED = 0x00080000
