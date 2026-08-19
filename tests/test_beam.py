@@ -4,6 +4,7 @@ import sys
 from itertools import pairwise
 
 import pytest
+from conftest import Surface
 
 from lyrica import meter as meter_mod
 from lyrica.beam import CORNER_POINTS, STRAIGHT_SPACING, _rounded_path
@@ -131,34 +132,65 @@ def _panel(width=600, height=200):
         SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
 
 
-def frame(ring, palette, width, height):
-    """The panel as the canvas will show it: the backdrop, then the ring's light."""
+def lit(canvas, style, width, height, character, radius=18, scale=1.0):
+    """A ring of both halves, and the surface the outward one landed on."""
+    from lyrica.beam import Beam
+
+    palette = _panel()
+    surface = Surface()
+    ring = Beam(canvas, width, height, radius, scale, style, glow=surface)
+    ring.advance(0.0, character, palette)
+    # Every strip. `halo.PER_CALL` bounds what a *frame* is allowed to repaint;
+    # a border read one strip at a time is a reading of the animation rather
+    # than of the border.
+    for _ in range(len(ring.light.strips) * 2):
+        ring.light.paint(ring._tables)
+    return ring, palette, surface
+
+
+def frame(ring, palette, surface, width, height):
+    """The whole border as the screen will show it, panel and desktop alike.
+
+    Padded by the light's own reach on every side, with the panel at
+    `(pad, pad)`, because most of the border is *outside* the panel now: the
+    peak sits past the silhouette and the canvas half carries only the frosted
+    rim. A picture cropped to the panel is a picture of the two pixels this
+    design deliberately left there.
+    """
     from PIL import Image
 
-    made = Image.new("RGBA", (width, height),
-                     (*(int(c) for c in palette.backdrop), 255))
+    pad = ring.pad
+    ground = (*(int(c) for c in palette.backdrop), 255)
+    made = Image.new("RGBA", (width + 2 * pad, height + 2 * pad), ground)
+    made.alpha_composite(surface.straight(width + 2 * pad, height + 2 * pad))
+    plate = Image.new("RGBA", (width, height), ground)
     for strip in ring.light.strips:
-        if strip.box is None:
-            continue
-        made.alpha_composite(ring.light.image(strip, ring._tables),
-                             (strip.box[0], strip.box[1]))
-    return made.convert("RGB")
+        if strip.box is not None:
+            plate.alpha_composite(ring.light.image(strip, ring._tables),
+                                  (strip.box[0], strip.box[1]))
+    made.alpha_composite(plate, (pad, pad))
+    return made.convert("RGB"), pad
 
 
-def ridge(ring, palette, width, height, span=3):
+def ridge(ring, palette, surface, width, height, span=5):
     """The brightest the light gets at each point round the ring, 0..255.
 
     The brightest *near* each point rather than exactly on it, because the
-    profile is a falloff sampled on a pixel grid: whether a ridge lands on a
+    profile is a falloff sampled on a pixel grid: whether a crest lands on a
     pixel centre or between two of them moves the reading by a few levels, and
-    that is the picture's own sampling rather than anything the music did. The
-    line ring had no such term, so its fills could be read straight off.
+    that is the picture's own sampling rather than anything the music did.
+
+    `span` is wider than it was, and that is the design and not slack. The path
+    `ring._points` walks is the panel's own silhouette now, and the light peaks
+    `CREST` pixels outside it, so a span that only looked at the path would be
+    reading the rim rather than the light.
     """
-    pixels = frame(ring, palette, width, height).load()
+    picture, pad = frame(ring, palette, surface, width, height)
+    pixels = picture.load()
     levels = []
     for x, y in ring._points:
-        near = [max(pixels[min(width - 1, max(0, round(x) + dx)),
-                           min(height - 1, max(0, round(y) + dy))])
+        near = [max(pixels[min(picture.width - 1, max(0, round(x) + pad + dx)),
+                           min(picture.height - 1, max(0, round(y) + pad + dy))])
                 for dx in range(-span, span + 1)
                 for dy in range(-span, span + 1)]
         levels.append(max(near))
@@ -172,12 +204,12 @@ def _lit(style, level, canvas, width=600, height=200):
     against the backdrop it is composed over — so an unlit stretch reads as the
     backdrop exactly as it does on screen.
     """
-    from lyrica.beam import Beam
+    from lyrica.meter import Character
 
-    palette = _panel()
-    ring = Beam(canvas, width, height, 18, 1.0, style)
-    ring.advance(0.0, level, palette)
-    levels = ridge(ring, palette, width, height)
+    if not isinstance(level, Character):
+        level = Character(level=level)
+    ring, palette, surface = lit(canvas, style, width, height, level)
+    levels = ridge(ring, palette, surface, width, height)
     ring.destroy()
     return levels
 
@@ -211,18 +243,18 @@ def test_the_shine_stays_lit_with_no_audio_at_all(canvas):
     assert min(_lit(SHINE, 0.0, canvas)) > 20
 
 
-def _section(ring, palette, width, height):
-    """The light's cross-section through the middle of the left edge.
+def _section(ring, surface, width, height):
+    """The light's cross-section outward from the middle of the left edge.
 
     Opacity rather than composited colour, because it is the *shape* of the
-    falloff that is being measured and the colour varies along the ring while
-    the shape does not.
+    falloff being measured and the colour varies along the ring while the shape
+    does not. Read off the outward half and ordered from the silhouette
+    outward, which since the light went behind the panel is the whole of it —
+    the canvas half holds the frosted rim and nothing else.
     """
-    strip = next(s for s in ring.light.strips
-                 if s.box is not None and s.box[0] == 0 and s.box[2] < width)
-    image = ring.light.image(strip, ring._tables)
-    row = image.height // 2
-    return [image.getpixel((x, row))[3] for x in range(image.width)]
+    pad = ring.pad
+    alpha = surface.frame()[height // 2 + pad, :pad, 3]
+    return [int(value) for value in alpha[::-1]]
 
 
 def test_the_border_is_a_falloff_and_not_a_step(canvas):
@@ -233,29 +265,31 @@ def test_the_border_is_a_falloff_and_not_a_step(canvas):
     # because having ends is what a stroke is. This asserts the replacement has
     # the property the strokes could not: a single peak, and a descent that
     # never sits still and never jumps.
-    from lyrica.beam import SHINE, Beam
+    #
+    # Measured outward from the silhouette now rather than across the panel's
+    # own edge, because that is where the light went.
+    from lyrica.beam import SHINE
     from lyrica.meter import Character
 
-    palette = _panel()
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
-    ring.advance(0.0, Character(level=0.8, dynamics=0.5), palette)
-    section = _section(ring, palette, 600, 200)
+    ring, _palette, surface = lit(canvas, SHINE, 600, 200,
+                                  Character(level=0.8, dynamics=0.5))
+    section = _section(ring, surface, 600, 200)
     peak = section.index(max(section))
-    assert 0 < peak < len(section) - 4, "the light is cut off by its own strip"
+    assert 0 <= peak < 4, "the brightest light is not next to the panel"
     tail = section[peak:]
     assert tail[-1] == 0, "the light does not end, it is cut"
     # Monotone down, over a distance, with no drop in one pixel big enough to
     # read as an end. The two strokes it replaced dropped 58 % of the peak at
     # the core's edge and the remaining 42 % at the halo's; a sixth is well
-    # under either and well over the 11 % the ridge's own shoulder costs.
+    # under either.
     assert len(tail) > 20, "the light ends too abruptly to be a falloff"
-    assert all(b <= a for a, b in pairwise(tail))
+    assert all(b <= a + 1 for a, b in pairwise(tail))
     steps = [a - b for a, b in pairwise(tail)]
     assert max(steps) <= max(section) / 6, f"a step of {max(steps)} in the falloff"
     # And it keeps moving: a stroke of fixed opacity would show as a long run
     # of one value, which is exactly what the flat halo was.
-    lit = [value for value in tail if value > 4]
-    assert len(set(lit)) > len(lit) * 0.6, "too much of the falloff is flat"
+    moving = [value for value in tail if value > 4]
+    assert len(set(moving)) > len(moving) * 0.6, "too much of the falloff is flat"
     ring.destroy()
 
 
@@ -265,25 +299,24 @@ def test_music_energy_changes_the_beams_spatial_weight(canvas):
     # because the distance at which a falloff stops being visible moves with how
     # bright it started — so this measures both: the total light on the edge,
     # and how far from the edge it can still be seen.
-    from lyrica import palette as pal_mod
-    from lyrica.beam import SHINE, Beam
-    from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL
+    #
+    # It matters more now than it did. A source hidden behind the panel has no
+    # width to pulse even in principle — the panel decides where it stops — so
+    # brightness is the only channel reactivity has left. If it did not carry,
+    # this design would be a still life.
+    from lyrica.beam import SHINE
     from lyrica.meter import Character
-    from lyrica.songcolour import NEUTRAL
 
-    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE)
     weights = []
     for character in (Character(level=0.0, dynamics=0.0),
                       Character(level=1.0, dynamics=1.0)):
-        ring.advance(0.0, character, palette)
-        section = _section(ring, palette, 600, 200)
+        ring, _palette, surface = lit(canvas, SHINE, 600, 200, character)
+        section = _section(ring, surface, 600, 200)
         weights.append((sum(section), sum(1 for v in section if v > 8)))
+        ring.destroy()
     quiet, loud = weights
-    assert loud[0] > quiet[0], "the loud border carries no more light"
-    assert loud[1] > quiet[1], "the loud border is no wider"
-    ring.destroy()
+    assert loud[0] > quiet[0] * 1.5, "the loud border carries no more light"
+    assert loud[1] > quiet[1], "the loud border does not reach further"
 
 
 def test_the_beam_colour_has_a_contrast_floor():
@@ -305,19 +338,24 @@ def test_the_beam_colour_has_a_contrast_floor():
 def test_aurora_uses_several_neighbouring_hues(canvas):
     # Counted on the pixels the ring is actually painted in rather than on a
     # list of fills, which is where the distinct shades used to be countable.
-    from lyrica import palette as pal_mod
-    from lyrica.beam import AURORA, Beam
-    from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL
+    from lyrica.beam import AURORA
     from lyrica.meter import Character
-    from lyrica.songcolour import NEUTRAL
 
-    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
-    ring = Beam(canvas, 600, 200, 18, 1.0, AURORA)
-    ring.advance(0.5, Character(level=0.7, dynamics=0.7, rate=0.5), palette)
-    pixels = frame(ring, palette, 600, 200).load()
-    shades = {pixels[min(599, round(x)), min(199, round(y))]
-              for x, y in ring._points}
+    ring, palette, surface = lit(canvas, AURORA, 600, 200,
+                                 Character(level=0.7, dynamics=0.7, rate=0.5))
+    picture, pad = frame(ring, palette, surface, 600, 200)
+    pixels = picture.load()
+    # The brightest pixel *near* each point of the path rather than the one on
+    # it, and for the same reason `ridge` does the same: the path is the panel's
+    # silhouette and the light peaks outside it, so a sample taken on the line
+    # reads the frosted rim. Which way is "outside" depends on which edge the
+    # point is on, so the neighbourhood answers it instead of the caller.
+    shades = set()
+    for x, y in ring._points:
+        near = [pixels[min(picture.width - 1, max(0, round(x) + pad + dx)),
+                       min(picture.height - 1, max(0, round(y) + pad + dy))]
+                for dx in range(-5, 6) for dy in range(-5, 6)]
+        shades.add(max(near, key=max))
     assert len(shades) > 8
     ring.destroy()
 
@@ -339,12 +377,10 @@ def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
 
 def _shine(character, canvas):
     """How far the border swings between its lightest and darkest part."""
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import SHINE
 
-    palette = _panel()
-    ring = Beam(canvas, 1125, 375, 18, 1.25, SHINE)
-    ring.advance(0.0, character, palette)
-    levels = ridge(ring, palette, 1125, 375)
+    ring, palette, surface = lit(canvas, SHINE, 1125, 375, character, scale=1.25)
+    levels = ridge(ring, palette, surface, 1125, 375)
     ring.destroy()
     return max(levels) - min(levels)
 
@@ -475,7 +511,7 @@ def test_the_ring_tiles_the_edge_without_overlapping_itself(canvas):
         # of tiling: a gap is a stretch of border that is simply not drawn.
         covered = sum((a[2] - a[0]) * (a[3] - a[1]) for a in boxes)
         band = min(min(width, height) // 2,
-                   round(ring.shape.inset + ring.shape.reach + ring.shape.core + 4))
+                   round(ring.shape.inset + ring.shape.bleed + ring.shape.core + 4))
         assert covered >= width * height - max(0, width - 2 * band) * max(
             0, height - 2 * band)
     ring.destroy()

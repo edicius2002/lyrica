@@ -45,20 +45,29 @@ def test_backing_lane_matches_the_visual_contract():
 
 
 def test_beam_layers_match_the_visual_contract():
-    # `halo_width` is gone from this contract because the thing it measured is:
-    # the border was a flat nine-pixel stroke under a crisp core, and it is a
-    # falloff now with no stroke anywhere in it. The numbers that decide how
-    # wide it reads are the ones recorded instead — the ink, how far it is
-    # smeared, how far the field carries, and how far inside the panel's own
-    # edge the whole thing sits.
+    # This contract has been rewritten twice and each rewrite is the record of
+    # a design that stopped being true. `halo_width` went when the border
+    # stopped being a stroke; `core_soft` and `halo_reach` go now, because they
+    # described light laid *on* the panel and there is none. What is recorded
+    # instead is where the light is relative to the panel's own silhouette:
+    # `edge_inset` puts the field's rectangle on it, `crest` says how far
+    # outside it the brightest pixel is, and the three reaches say how far the
+    # light carries back onto the face, out as a rim, and out as a bloom.
     from lyrica import beam
 
     expected = CONTRACTS["beam"]
-    assert beam.CORE_WIDTH == expected["core_width"]
-    assert beam.CORE_SOFT == expected["core_soft"]
-    assert beam.HALO_REACH == expected["halo_reach"]
     assert beam.EDGE_INSET == expected["edge_inset"]
+    assert beam.CREST == expected["crest"]
+    assert beam.CORE_WIDTH == expected["core_width"]
+    assert beam.BLEED_REACH == expected["bleed_reach"]
+    assert beam.RIM_REACH == expected["rim_reach"]
+    assert beam.SPILL_REACH == expected["spill_reach"]
     assert beam.MIN_BEAM_DE == expected["minimum_delta_e"]
+    # The crest is outside the panel and the bleed cannot reach the words. Both
+    # are properties of the design rather than of these five numbers, so they
+    # are asserted about the numbers rather than left to the pictures.
+    assert beam.CREST > 0.0, "the brightest pixel is on the panel"
+    assert beam.BLEED_REACH < beam.RIM_REACH
 
 
 def test_committed_reference_frames_are_real_images():

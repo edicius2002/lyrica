@@ -96,37 +96,72 @@ SHINE_SWING_OPEN = 0.62
 # that is merely *more agitated* when the music is cannot be wrong that way.
 SHINE_SPEED_GAIN = 0.55
 
-# The shape of the light across the border, in design pixels before the window
-# scale, and asymmetric because the panel is.
+# Where the light is, in design pixels before the window scale. All six are
+# measured from the panel's own silhouette, because there is nothing else in
+# the picture left to measure from.
 #
-# `CORE_WIDTH` is the ink drawn into the mask and `CORE_SOFT` is how far it is
-# smeared — together they are the near falloff, the part that still gives the
-# panel somewhere to end. `HALO_REACH` is how far the wide field carries inward
-# after that. The old halo was a flat 9-pixel stroke reaching 4.5 px each way
-# and stopping dead; this carries six times as far inward and never stops.
+# The border has been rejected eleven times and every one of those versions was
+# an *outline*: a bright ring `EDGE_INSET` = 7 px inside the panel's edge, a
+# 22 px halo laid inward across the panel's face, and a 34 px lobe outside at
+# 55 % of the peak. Given six frames of a real resize the user picked the one
+# where three quarters of the border had simply failed to repaint. That frame
+# is a defect, but as a signal it is not ambiguous: there is far too much light,
+# and the part of it that is on the panel is the part that is wrong.
 #
-# `EDGE_INSET` is where the ridge sits relative to the panel's own edge, and
-# `SPILL_REACH` is how far the light carries *past* it, onto the desktop.
+# So the light is behind the panel now, and the panel occludes it.
 #
-# That second number used to be `EDGE_SOFT`, and it meant the opposite: how
-# sharply the outward field was taken away, so that nothing was left by the
-# time it reached the window's boundary. The window is clipped to a rounded
-# rectangle by `SetWindowRgn`, which is one bit per pixel, so light that ran
-# past the panel's edge met a cliff — and a hard edge across a glow is the
-# defect all of this replaced, arriving through the back door. The border was
-# rejected ten times for looking plastic and the answer was never in the
-# profile, the blur, the ramp or the sampling: it was that half the light was
-# being deleted to hide a boundary. `chrome/layered.py` gives that half a
-# surface of its own, and this is how far it now goes.
+#   EDGE_INSET   0.5 puts the field's rectangle exactly on the panel's outline
+#                — `halo` solves `a = width / 2 - inset` and the outline is at
+#                `(width - 1) / 2`. The ring *is* the silhouette; there is no
+#                second rectangle to fall out of step with it, and the mask that
+#                divides the two halves lands on the same number the field does.
+#   CREST        how far outside the silhouette the brightest pixel sits. One
+#                and a half, which is far enough that the peak lives in the
+#                companion surface — the only place in this process with real
+#                per-pixel alpha — and near enough that what it draws is still
+#                plainly the panel's own shape. It is also what answers the
+#                seam: the Tk window is presented at 0.92 alpha, so everything
+#                on the canvas side is 8 % dimmer than it was built, and with
+#                the peak out here the largest value that scaling ever touches
+#                is the 58 % of peak the boundary pixel carries.
+#   CORE_WIDTH   how wide the crest's flat top is. One pixel, which is as near
+#                to none as the closed form allows. A plateau is a line, and a
+#                line is the thing being removed.
+#   BLEED_REACH  how far the light carries back onto the panel's face — the
+#                little a frosted rim picks up from what is behind it. Four,
+#                which measures 53 of 255 one pixel in, 11 two pixels in and
+#                nothing at all four. This is the number that used to be 22,
+#                and the 22 is the whole rejection: integrated across the
+#                cross-section, the old shape laid 11.6 pixel-peaks of light on
+#                the panel's own face and this one lays 0.51 — twenty-three
+#                times less — while putting 7.2 out on the desktop against 4.2.
 #
-# Longer than `HALO_REACH` on purpose. Inward there is panel to cross and words
-# not to wash out; outward there is nothing in the way, which is what makes a
-# border look like light falling on a desk rather than a sticker on it.
-CORE_WIDTH = 3.0
-CORE_SOFT = 7.0
-HALO_REACH = 22.0
-EDGE_INSET = 7.0
-SPILL_REACH = 34.0
+#                It is also the one number here that was *raised* during
+#                tuning, from three, and the picture said why: at three the
+#                climb from a tenth of the peak to nine tenths took 1.8 px and
+#                the silhouette read as a drawn stroke again. Four takes 2.3,
+#                which is a lit edge. Anything past five starts laying light on
+#                the face and gives the whole design away — see
+#                `test_the_silhouette_is_a_ramp_and_not_a_cliff`, which guards
+#                the first of those and `test_the_panel_keeps_its_own_face_dark`
+#                the second.
+#   RIM_REACH    how far the concentrated part carries outward. Twelve, and it
+#                was five first. Five is "sharp, concentrated" read literally
+#                and it photographs as a three-pixel hairline — which is a
+#                stroke, which is the thing eleven versions were rejected for.
+#                Twelve is a pool of light hugging the panel: still concentrated
+#                against the twenty-two of inward halo it replaces, but with a
+#                falloff long enough to read as light landing on a desk.
+#   SPILL_REACH  how far the faint bloom carries. Twenty-six, at 14 % of the
+#                peak (`halo.BLOOM_KEEP`) rather than the 55 % it was — long,
+#                because light with nothing in its way does go a long way, and
+#                weak, because a bloom you can name is a lamp.
+EDGE_INSET = 0.5
+CREST = 1.5
+CORE_WIDTH = 1.0
+BLEED_REACH = 4.0
+RIM_REACH = 12.0
+SPILL_REACH = 26.0
 
 # What the music does to the light's presence. The line ring pulsed its stroke
 # *widths*, which an image cannot do without rebuilding its fields; scaling the
@@ -185,6 +220,31 @@ PHASE_STEPS = {COMET: 256, SHINE: 128, AURORA: 128}
 # 96 entries a band, which is a step in a soft glow rather than a change.
 LEVEL_STEPS = 24
 DYNAMICS_STEPS = 16
+
+
+def shape_at(weight: float) -> halo.Shape:
+    """Where the light is on a display of this weight, in physical pixels.
+
+    `weight` is the window scale times the configured intensity. Public and in
+    one place because two things ask for it — a `Beam` on every scale change,
+    and anything wanting to know how much room outside the panel the light
+    needs before there is a panel to ask.
+
+    `inset` alone is **not** scaled, and that is the one line here worth
+    reading twice. It is not a width: it is the half pixel that puts the
+    field's rectangle exactly on the panel's outline, which `halo` solves as
+    `width / 2 - inset` against an outline at `(width - 1) / 2`. Scaled with
+    the rest, a 2.0 display would push the silhouette a pixel inside itself,
+    and the mask that hands the light from the canvas to the companion would
+    cut it somewhere the region clip does not — which is a notch round every
+    corner.
+    """
+    return halo.Shape(inset=EDGE_INSET,
+                      crest=max(1.0, CREST * weight),
+                      core=max(0.5, CORE_WIDTH * weight),
+                      bleed=max(1.0, BLEED_REACH * weight),
+                      rim=max(1.5, RIM_REACH * weight),
+                      spill=max(2.0, SPILL_REACH * weight))
 
 
 def _rounded_path(width: int, height: int, radius: int, inset: float,
@@ -409,11 +469,7 @@ class Beam:
         """
         self.scale = scale
         weight = scale * self.intensity
-        self.shape = halo.Shape(inset=max(2.0, EDGE_INSET * weight),
-                                core=max(1.0, CORE_WIDTH * weight),
-                                ridge=max(1.0, CORE_SOFT * weight),
-                                reach=max(2.0, HALO_REACH * weight),
-                                spill=max(2.0, SPILL_REACH * weight))
+        self.shape = shape_at(weight)
 
     @property
     def _points(self) -> list[tuple]:
@@ -421,8 +477,9 @@ class Beam:
 
         Derived on demand rather than kept, because nothing in the drawing needs
         it: `halo` is handed the rectangle and solves it. What still wants it is
-        anything asking *where* the border is — which is how the light is
-        measured, since the ridge sits on this line.
+        anything asking *where* the border is — which, at an `inset` of half a
+        pixel, is the panel's own silhouette. The light does not sit on this
+        line. It sits `CREST` pixels outside it, which is the point.
         """
         if self._panel is None:
             return []

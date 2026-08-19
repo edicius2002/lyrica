@@ -35,22 +35,25 @@ on the CPU, and `numpy` makes it a dozen vectorised passes over the edge band.
 
 Two things the closed form has to be *told*, because a blur used to imply them:
 
-    * The falloff is asymmetric. Inward there is panel to spread across, so the
-      light carries `reach`; outward there is desktop, so it carries `spill`,
-      and `spill` is the longer of the two because that is where light with
-      nothing in its way goes.
+    * The light comes from **behind** the panel. That is the whole shape of it
+      and it is not a metaphor: the peak sits `crest` pixels *outside* the
+      silhouette, the panel's face gets `bleed` and nothing more, and the
+      silhouette itself is drawn by the panel occluding its own source rather
+      than by a bright line laid along its edge.
 
-      This used to say the opposite, and that was the whole fault. The overlay
-      is clipped to a rounded rectangle by `SetWindowRgn`, which is one bit per
-      pixel, so the light *stopped dead* at the window's edge; the shape
-      therefore carried an `edge` term whose only purpose was to extinguish the
-      outward half before it arrived there, because a hard cut across a glow
-      reads worse than no glow at all. Ten iterations were spent on the
-      profile, the blur, the colour ramp and the supersampling, and none of
-      them was the fault: the light was being killed to hide a boundary.
-      `chrome/layered.py` removes the boundary instead, and this module now
-      builds *both* halves — the inward one for the canvas, the outward one for
-      the companion surface that has no edge to stop at.
+      Eleven versions put the peak on a ring `inset` pixels inside the panel
+      and reached twenty-two more inward, which is an outline with a wash
+      behind it — and an outline is exactly what "plastic" means when somebody
+      says it about a border. What escapes past an occluder is the opposite
+      distribution: bright immediately outside the edge, gone immediately
+      inside it, and faint a long way out. `chrome/layered.py` is what makes it
+      possible to say so — until it existed the outward half was clipped dead
+      at the window's edge, so all the light there was anywhere to *put* was
+      inward.
+    * That a corner is dimmer than a straight run, because flux past a convex
+      edge spreads over an arc rather than a band. See `_spread`. Without it,
+      four edges lit identically read as four edges, whatever the corner radius
+      says.
     * Where a pixel is *round* the ring, which is what carries the rotating
       colour. That is closed-form too: the arc length of the nearest point on
       the path. Better than the old one, in fact — the old field was drawn as
@@ -78,19 +81,24 @@ from typing import NamedTuple
 
 
 class Shape(NamedTuple):
-    """How wide the light is and how it falls off, in physical pixels.
+    """Where the hidden source escapes and how far it carries, in physical pixels.
 
-    Asymmetric, and that is the point of describing it here rather than as one
-    radius. Inward there is panel to spread across and words not to drown, so
-    the field carries `reach`. Outward there is desktop, so it carries `spill`
-    — which is free to be the larger of the two now that the window's edge is
-    no longer where the light dies.
+    Every one of these is measured from the panel's own silhouette, because
+    that is the only edge in the picture: `inset` puts the field's rectangle on
+    the panel's outline and nothing else is offset from anything.
+
+    The asymmetry is the whole design. Outward there is desktop and the light
+    goes there — `rim` for the concentrated part, `spill` for the faint bloom
+    behind it. Inward there is a panel that is *occluding its own source*, so
+    the only thing that carries that way is `bleed`, and `bleed` is short
+    enough that the panel's face is unlit two or three pixels in.
     """
-    inset: float        # how far the ridge sits inside the panel's own edge
-    core: float         # how wide the brightest part of the light is
-    ridge: float        # how far the near falloff carries
-    reach: float        # how far the wide field carries inward
-    spill: float        # and how far it carries outward, onto the desktop
+    inset: float        # where the field's rectangle sits; 0.5 is the outline
+    crest: float        # how far outside the silhouette the brightest pixel is
+    core: float         # how wide the crest's own flat top is, if any
+    bleed: float        # how far the light carries back onto the panel's face
+    rim: float          # how far the concentrated part carries outward
+    spill: float        # and how far the faint bloom carries, onto the desktop
 
 # Entries in the table that turns "how far round the ring" into a colour. One
 # byte's worth, because that is what the `where` field can hold and what a
@@ -103,11 +111,21 @@ LUT_SIZE = 256
 # that changed only where the ring is dark cannot force a repaint.
 OFF_RING = 0
 
-# How the light falls off across the border. The narrow lobe is the ridge that
-# gives the panel an edge to end at; the wide one is the weak field that lets it
-# survive a textured cover wash. Screened together rather than added, so the
-# ridge keeps its opacity where the two overlap.
-OUTER_KEEP = 0.55
+# How much of the peak the wide lobe carries. The narrow lobe is the rim of
+# light that escapes past the silhouette; the wide one is the bloom behind it,
+# and a bloom is the thing that has to be *faint* or the panel stops reading as
+# an object with a light behind it and starts reading as a lamp.
+#
+# It was 0.55, which is where eleven rejections came from. At 0.55 the wide lobe
+# is more than half the peak everywhere near the edge and it carries three times
+# as far, so the integral under it is an order of magnitude more light than the
+# rim — a panel wearing a coloured cloud rather than a panel with something
+# behind it. Measured on the cross-section at eighteen pixels outside the
+# panel: 12.5 of 255 then against 5.9 now, and at twelve, 34.7 against 24.9.
+# Nearer in than that the new shape is the brighter of the two, which is the
+# point of it — the light is *concentrated* at the silhouette rather than
+# spread over fifty pixels of cloud.
+BLOOM_KEEP = 0.14
 
 # How many standard deviations of the wide lobe fit inside `reach` and inside
 # `spill`. Three, so the field has faded to about a hundredth of its peak by the
@@ -257,30 +275,44 @@ def outer_boxes(width: int, height: int, pad: int, corner: int) -> list[tuple]:
 def profile_of(shape: Shape):
     """The light's cross-section: `(distances, brightness)`, both ascending in d.
 
-    `d` is the signed distance to the ring's path, negative inside the panel.
-    Everything the border looks like is in this one curve, and it is written as
-    arithmetic rather than as a blur so that it is exact at every pixel instead
-    of at every byte.
+    `d` is the signed distance to the **panel's own silhouette**, negative
+    inside it. Everything the border looks like is in this one curve, and it is
+    written as arithmetic rather than as a blur so that it is exact at every
+    pixel instead of at every byte.
 
-    Two terms:
+    The curve this version draws is not a border. It is what you see of a light
+    that is *behind* the panel: the panel occludes its own source, so the peak
+    is not on the panel and not at its edge but `crest` pixels **outside** it,
+    and the only thing that carries inward is the little the panel's own frosted
+    rim picks up. Two terms, screened, both centred on the crest:
 
-      * a near lobe and a wide one, each the *exact* profile of a line of width
-        `core` convolved with a gaussian — which is what the old blur was
-        approximating in eight bits, spelled out as a difference of error
-        functions and evaluated in double precision. Screened together, and each
-        normalised to its own peak first, so `OUTER_KEEP` still means what it
-        says however wide the two are.
-      * the asymmetry, which is now a single number rather than a term: the
-        wide lobe is given one standard deviation inside the path and a larger
-        one outside it. Both sides still peak at one on the path, so the curve
-        is continuous there and the brightest point is the path itself.
+      * `rim`, the concentrated part — the exact profile of a line of width
+        `core` convolved with a gaussian, spelled out as a difference of error
+        functions in double precision.
+      * `spill`, the faint bloom behind it, at `BLOOM_KEEP` of the peak.
 
-    There used to be a third, an outward gate — the exact profile of a blurred
-    half-plane, one inside and falling to nothing outside — and it was there
-    only because the window's boundary was `inset` pixels out and light that
-    reached it was light the clip would cut in a straight line. The companion
-    surface has no boundary, so the gate has gone and with it the reason the
-    border looked like a sticker.
+    and both are given a *third*, much shorter standard deviation on the side
+    facing the panel, taken from `bleed`. Each side is normalised to its own
+    peak, which is one at the crest either way, so the curve is continuous
+    there.
+
+    Three things this removes, and each of them was a reason the border read as
+    drawn on rather than shining past:
+
+      * The peak used to sit on a ring `inset` pixels *inside* the panel's own
+        edge, which is the definition of an outline. There is no ring here. The
+        crest is outside the silhouette, in the half of the light the panel
+        cannot occlude, which is also the half with real per-pixel alpha.
+      * The inward lobe used to carry `reach` — twenty-two design pixels of
+        light laid across the panel's face. It carries `bleed` now, three and a
+        half, so the face is unlit two pixels in and the silhouette is what
+        defines the shape.
+      * The wide lobe used to be `OUTER_KEEP` = 0.55 of the peak. See
+        `BLOOM_KEEP`.
+
+    What is *kept* from the version before is the reason there is a closed form
+    at all: the falloff has to be exact per pixel, because the whole visible
+    signal now lives in a five-pixel band where a quantisation is a contour.
     """
     import numpy as np
 
@@ -297,22 +329,27 @@ def profile_of(shape: Shape):
         root = sigma * math.sqrt(2.0)
         return 0.5 * (erf((half + distance) / root) + erf((half - distance) / root))
 
-    # Far enough each way that the wide lobe has died. Anything beyond either
-    # end reads the end's value, which is zero on both sides by construction.
-    inward = shape.reach + shape.core + 8.0
-    outward = shape.spill + shape.core + 8.0
+    # Far enough each way that the bloom has died. Anything beyond either end
+    # reads the end's value, which is zero on both sides by construction.
+    inward = shape.bleed + shape.core + 8.0
+    outward = shape.crest + shape.spill + shape.core + 8.0
     grid = np.arange(-inward, outward + SAMPLE, SAMPLE)
-    away = np.abs(grid)
+    # Distance from the crest rather than from the silhouette, because the crest
+    # is where the light is brightest and the silhouette is merely where the
+    # panel stops. Negative means "toward the panel".
+    away = grid - shape.crest
+    back = away < 0.0
 
-    near = max(0.35, shape.ridge / SIGMAS)
-    # One sigma per side, selected per sample rather than solved twice. Both
-    # sides are normalised to their own peak, which is one at `d` = 0 either
-    # way, so the join at the path is a value and not a step.
-    wide = np.where(grid < 0.0, max(0.60, shape.reach / SIGMAS),
-                    max(0.60, shape.spill / SIGMAS))
-    ridge = lobe(away, near) / lobe(0.0, near)
-    field = OUTER_KEEP * (lobe(away, wide) / lobe(0.0, wide))
-    values = ridge + field - ridge * field
+    toward = max(0.35, shape.bleed / SIGMAS)
+    near = np.where(back, toward, max(0.35, shape.rim / SIGMAS))
+    # The bloom is given the same short sigma on the way back, so that the wide
+    # lobe cannot do what the narrow one is forbidden from doing and wash the
+    # panel's face anyway. One sigma per side per lobe, selected per sample
+    # rather than solved four times.
+    wide = np.where(back, toward, max(0.60, shape.spill / SIGMAS))
+    rim = lobe(np.abs(away), near) / lobe(0.0, near)
+    bloom = BLOOM_KEEP * (lobe(np.abs(away), wide) / lobe(0.0, wide))
+    values = rim + bloom - rim * bloom
     values /= values.max()
     values[values < DIM] = 0.0
     made = (grid, values.astype(np.float32))
@@ -381,6 +418,44 @@ def _around(np, x, y, qx, qy, ax, by, radius, starts):
             np.where(below, starts[5] + (turn - angle) * radius,
                      starts[7] + angle * radius))
     return place
+
+
+def _spread(np, qx, qy, distance, radius: float):
+    """How much dimmer a corner is than a straight run at the same distance.
+
+    This is the term that stops four lit edges reading as four lit edges. Light
+    escaping past a *straight* silhouette spreads across a band of constant
+    width, so its brightness at distance `d` is whatever the profile says.
+    Escaping past a convex corner of radius `r` it spreads across an arc of
+    radius `r + d`, which is longer — the same flux over more room, so it is
+    `r / (r + d)` as bright. At the crest of the default panel that is 0.9; at
+    the far end of the bloom it is 0.4.
+
+    Two things fall out of it, and they are the whole reason it is here rather
+    than in a comment about physics:
+
+      * a corner is *dimmer* than the edges beside it, which is what a rounded
+        object under a light behind it looks like and what a traced outline
+        never does;
+      * the bloom therefore ends sooner at the corners than along the straights,
+        so the outer envelope of the light is rounder than the panel is. The
+        glow's radius is not the clip radius, and it did not have to be chosen:
+        it comes out of the same number the corner is drawn with.
+
+    Feathered rather than switched on at the wedge boundary. `qx` and `qy` are
+    the distances past the corner's own centre lines, so `min(qx, qy)` is zero
+    exactly where the arc meets its straight and grows to about `0.7 * (r + d)`
+    at the diagonal. Applied as a step it puts a ten-percent discontinuity along
+    a line perpendicular to each edge, four times over, which is a seam in the
+    one place the design cannot afford one; a smoothstep over half the radius
+    spreads it across a quarter of the arc, where nothing can find it.
+    """
+    if radius <= 0.0:
+        return 1.0
+    into = np.clip(np.minimum(qx, qy) * (2.0 / radius), 0.0, 1.0)
+    into *= into * (3.0 - 2.0 * into)
+    out = np.maximum(distance, 0.0)
+    return 1.0 - into * (out / (radius + out))
 
 
 def _dither(np, box):
@@ -485,6 +560,7 @@ def _built(width: int, height: int, radius: float, shape: Shape,
         rest = at - below
         low = values[below]
         profile = low + (values[below + 1] - low) * rest
+        profile = profile * _spread(np, qx, qy, distance, r)
         if outside:
             panel = _rounded_distance(np, x + (cx - edge_a), y + (cy - edge_b),
                                       edge_a, edge_b, edge_r)
@@ -685,6 +761,7 @@ class Ring:
                        for _ in range(4)]
         self.spill = Spill(glow) if glow is not None else None
         self._next = 0
+        self._whole = False
 
     def reshape(self, width: int, height: int, radius: float,
                 shape: Shape) -> None:
@@ -703,7 +780,29 @@ class Ring:
         """
         import numpy as np
 
-        band = max(1, round(shape.inset + shape.reach + shape.core + BAND_SLACK))
+        # Everything about the border changed, so `PER_CALL` does not apply to
+        # the frame that follows. It is a cap on how much *recolouring* a frame
+        # may do, and recolouring is what it is safe to spread over four frames:
+        # the ring closes on a new colour within 67 ms against a gradient that
+        # takes eleven seconds to go round, so nobody sees the lag.
+        #
+        # A resize is not recolouring. Every strip has moved and the companion's
+        # whole surface has been cleared, so a capped frame shows one lit edge
+        # and three blank ones — photographed, and it is what a panel folding to
+        # its card looked like for the whole animation. It has always been that
+        # way and it used to be survivable, because a soft wash three-quarters
+        # missing reads as a dim border; a bright rim three-quarters missing
+        # reads as a bar down one side of the panel. Concentrating the light is
+        # what made the old defect unmissable, so the fix belongs with it.
+        self._whole = True
+        # How far into the panel the canvas half has to be evaluated. It is
+        # `bleed` now rather than the twenty-two pixels of inward halo the
+        # border used to lay across the panel's face, so the strips are eleven
+        # physical pixels deep on the default panel where they were fifty. That
+        # is not a saving that was looked for — it is what "the panel occludes
+        # its own source" costs, and it happens to be four times less canvas to
+        # rewrite on the frame that repaints one.
+        band = max(1, round(shape.inset + shape.bleed + shape.core + BAND_SLACK))
         pad = pad_of(shape)
         key = (width, height, round(float(radius), 2),
                tuple(round(value, 2) for value in shape), band, pad)
@@ -749,10 +848,15 @@ class Ring:
         affordable: a comet lights a seventh of the ring, so the other strips
         are told most frames that nothing happened to them. Returns how many
         were repainted, which is the unit a frame's cost is measured in.
+
+        `PER_CALL` is lifted for exactly one call after a `reshape`, because
+        what it bounds is recolouring and a reshape is not that. See there.
         """
         painted = 0
+        cap = len(self.strips) if self._whole else PER_CALL
+        self._whole = False
         for _ in range(len(self.strips)):
-            if painted >= PER_CALL:
+            if painted >= cap:
                 break
             index = self._next % len(self.strips)
             strip = self.strips[index]

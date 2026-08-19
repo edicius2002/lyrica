@@ -11,72 +11,33 @@ the outward half is wide enough for it and follows the panel everywhere it goes.
 import sys
 
 import pytest
+from conftest import Surface
 
 from lyrica import halo
 
 
 def shape(scale=1.0):
-    from lyrica.beam import CORE_SOFT, CORE_WIDTH, EDGE_INSET, HALO_REACH, SPILL_REACH
+    from lyrica.beam import (
+        BLEED_REACH,
+        CORE_WIDTH,
+        CREST,
+        EDGE_INSET,
+        RIM_REACH,
+        SPILL_REACH,
+    )
 
-    return halo.Shape(inset=EDGE_INSET * scale, core=CORE_WIDTH * scale,
-                      ridge=CORE_SOFT * scale, reach=HALO_REACH * scale,
-                      spill=SPILL_REACH * scale)
-
-
-class Surface:
-    """A stand-in for the layered window: the same five calls, in memory.
-
-    Not a mock. It reproduces the two properties of the real one the code
-    leans on — a surface that only ever grows, and content that survives
-    between frames — so a test can read back what a strip actually wrote.
-    """
-
-    def __init__(self):
-        import numpy as np
-
-        self._np = np
-        self.capacity = (0, 0)
-        self._frame = None
-        self.presented: list = []
-        self.moved: list = []
-        self.shown = True
-        self.destroyed = False
-        self.rebuilds = 0
-        self.under = None
-
-    def reserve(self, width, height):
-        if width <= self.capacity[0] and height <= self.capacity[1]:
-            return False
-        width = max(width, self.capacity[0])
-        height = max(height, self.capacity[1])
-        self._frame = self._np.zeros((height, width, 4), self._np.uint8)
-        self.capacity = (width, height)
-        self.rebuilds += 1
-        return True
-
-    def frame(self):
-        return self._frame
-
-    def present(self, width, height, at):
-        self.presented.append((width, height, at))
-
-    def move(self, x, y):
-        self.moved.append((x, y))
-
-    def behind(self, hwnd):
-        self.under = hwnd
-
-    def visible(self, shown):
-        self.shown = shown
-
-    def destroy(self):
-        self.destroyed = True
+    # `inset` is not scaled, and `Beam.set_scale` does not scale it either: it
+    # is the half pixel that puts the field's rectangle on the panel's outline,
+    # not a width.
+    return halo.Shape(inset=EDGE_INSET, crest=CREST * scale,
+                      core=CORE_WIDTH * scale, bleed=BLEED_REACH * scale,
+                      rim=RIM_REACH * scale, spill=SPILL_REACH * scale)
 
 
 def halves(width=600, height=200, radius=18, at=1.0):
     made = shape(at)
     pad = halo.pad_of(made)
-    band = round(made.inset + made.reach + made.core + halo.BAND_SLACK)
+    band = round(made.inset + made.bleed + made.core + halo.BAND_SLACK)
     inward, outward = halo._built(width, height, radius, made, band, pad)
     return made, pad, inward, outward
 
@@ -92,32 +53,98 @@ def sample(strips, x, y):
 
 # --- the light itself -------------------------------------------------------
 
-def test_the_light_survives_past_the_windows_own_edge():
-    # The defect this whole thing exists for. `Shape.edge` used to take the
-    # outward field away over `inset` pixels so that nothing was left when it
-    # met the clip; measured then, the light was 3 of 255 at the boundary
-    # against a peak of 255 nine pixels in. It must now still be plainly there.
+def test_the_brightest_point_sits_outside_the_panel_and_not_on_it():
+    # The whole design in one assertion. Eleven versions put the peak on a ring
+    # `inset` pixels *inside* the panel's edge, which is an outline; this one
+    # puts it outside the silhouette, where a source the panel is occluding
+    # would show. Move the crest back onto the panel and everything else here
+    # still passes.
     made = shape()
     grid, values = halo.profile_of(made)
-    at_edge = float(values[abs(grid - made.inset).argmin()])
-    assert at_edge > 0.3, "the light is being killed before it leaves the panel"
-    assert at_edge < 0.9, "the panel's edge should not be the brightest part"
+    peak = float(grid[values.argmax()])
+    assert peak > 0.5, "the brightest pixel is on the panel; that is an outline"
+    assert peak == pytest.approx(made.crest, abs=0.2)
 
 
-def test_the_light_carries_further_out_than_in():
-    # Inward there is panel to cross and words not to wash out; outward there
-    # is nothing in the way. A symmetric falloff is a border, not a light.
+def test_the_panel_keeps_its_own_face_dark():
+    # It is occluding its source, so the only light on it is what a frosted rim
+    # picks up. The number that used to be here was 22 px of halo laid inward
+    # across the face, at more than half the peak for the first ten of them, and
+    # that is what "plastic" meant.
+    # Measured a pixel or two in rather than at the boundary itself. The
+    # boundary pixel is *meant* to be lit — that is the frosted rim, and it is
+    # what keeps the silhouette a ramp rather than a cliff. What must not
+    # happen is the light getting any further than that.
+    grid, values = halo.profile_of(shape())
+    at = lambda d: float(values[abs(grid - d).argmin()])       # noqa: E731
+    assert at(-2.0) < 0.2, "the light is two pixels onto the panel's face"
+    assert at(-4.0) == 0.0, "the light is four pixels onto the panel's face"
+    lit = values.nonzero()[0]
+    assert float(grid[lit[0]]) > -5.0, "the light reaches too far onto the panel"
+
+
+def test_the_light_carries_much_further_out_than_in():
+    # Inward there is a panel in the way; outward there is nothing. Seven times
+    # as far, against the barely-two the version before this managed — and the
+    # inward two of those pixels are a rim rather than a wash.
     grid, values = halo.profile_of(shape())
     lit = values.nonzero()[0]
-    assert float(grid[lit[-1]]) > abs(float(grid[lit[0]]))
+    assert float(grid[lit[-1]]) > 7.0 * abs(float(grid[lit[0]]))
 
 
-def test_the_brightest_point_sits_on_the_ring_itself():
-    # The outward gate used to push the peak a pixel or two inside the path,
-    # because the brightest part of a border that has to end at a boundary is
-    # not the part nearest it. There is no boundary now, so there is no reason.
-    grid, values = halo.profile_of(shape())
-    assert abs(float(grid[values.argmax()])) < 0.5
+def test_the_silhouette_is_a_ramp_and_not_a_cliff():
+    # With nothing bright left on the panel, the boundary between the panel and
+    # its own light is what defines the shape — so it is the one edge in the
+    # picture that must not be a step. The profile has to be plainly lit where
+    # the two halves meet and rise to its peak over more than a pixel, or the
+    # silhouette is a drawn line again by another name.
+    made = shape()
+    grid, values = halo.profile_of(made)
+    at_edge = float(values[abs(grid).argmin()])
+    assert 0.4 < at_edge < 0.8, "the boundary is a cliff, not a ramp"
+    # Measured as a length rather than as a step, because a step is a number
+    # about the monitor's scale and this is a claim about the shape: the climb
+    # from a tenth of the peak to nine tenths of it takes at least two pixels
+    # at the design scale, and more on any display that magnifies it.
+    flank = values[grid < made.crest]
+    climb = float(grid[1] - grid[0]) * int(
+        ((flank > 0.1) & (flank < 0.9)).sum())
+    assert climb > 2.0, f"the silhouette climbs in {climb:.1f} px"
+
+
+def test_a_corner_is_dimmer_than_the_edges_beside_it():
+    # Flux escaping past a convex corner spreads over an arc rather than a band,
+    # so a corner that is exactly as bright as its straights is four lit edges
+    # meeting — which is what the border kept giving itself away as. See
+    # `halo._spread`.
+    import numpy as np
+
+    radius, out = 24.0, 10.0
+    straight = halo._spread(np, np.array([-5.0]), np.array([out]),
+                            np.array([out]), radius)
+    corner = halo._spread(np, np.array([out / 1.5]), np.array([out / 1.5]),
+                          np.array([out]), radius)
+    assert float(straight[0]) == pytest.approx(1.0)
+    assert float(corner[0]) < 0.85
+    # And the difference grows with distance, because the arc does.
+    far = halo._spread(np, np.array([40.0]), np.array([40.0]),
+                       np.array([40.0]), radius)
+    assert float(far[0]) < float(corner[0])
+
+
+def test_the_corner_is_feathered_rather_than_switched_on():
+    # Applied as a step at the point the arc meets its straight, the corner
+    # term puts a tenth of the peak's worth of discontinuity along a line
+    # perpendicular to each edge, four times over — a seam in the one place
+    # this design cannot afford one.
+    import numpy as np
+
+    radius, out = 24.0, 12.0
+    walk = np.linspace(-2.0, radius, 40)
+    along = halo._spread(np, walk, np.full_like(walk, radius),
+                         np.full_like(walk, out), radius)
+    steps = np.abs(np.diff(np.atleast_1d(along)))
+    assert float(steps.max()) < 0.03, "the corner term switches on"
 
 
 # --- the split --------------------------------------------------------------
@@ -156,9 +183,15 @@ def test_the_two_halves_agree_about_where_they_are_round_the_ring():
     # And across a straight edge, where they meet rather than overlap: the
     # position round the ring carries on through the boundary, and so does the
     # brightness, which is what makes the seam invisible.
+    #
+    # The *outward* pixel is the brighter one now, which is the whole change of
+    # design: the light peaks outside the silhouette rather than on a ring
+    # inside it, so crossing the boundary outward is a climb and not a fall.
+    # What still has to hold is that it is a climb the profile is making anyway
+    # rather than a jump the split introduced.
     outside, inside = sample(outward, -1, 100), sample(inward, 0, 100)
     assert outside[1] == inside[1]
-    assert 0 < inside[0] - outside[0] < 0.1
+    assert 0 < outside[0] - inside[0] < 0.25
 
 
 def test_the_surface_is_wide_enough_for_what_it_carries():
@@ -326,6 +359,39 @@ def test_both_halves_are_painted_from_one_loop_and_one_strip(canvas):
     assert lit.any(), "the outward half was never drawn"
     ring.destroy()
     assert surface.destroyed, "the companion window outlived the border"
+
+
+def test_a_resize_lights_the_whole_border_and_not_one_edge_of_it(canvas):
+    # `halo.PER_CALL` lets a frame repaint one strip, which is right for
+    # recolouring and wrong for a resize: every strip has moved and the
+    # companion's surface has been cleared, so a capped frame leaves three
+    # quarters of the border blank. Photographed mid-fold, that is a bright bar
+    # down one side of an otherwise unlit panel — and it is the frame the user
+    # was shown six of and picked, which makes it the single most expensive bug
+    # in this effort's history.
+    from lyrica.beam import SHINE, Beam
+    from lyrica.meter import Character
+
+    surface = Surface()
+    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE, glow=surface)
+    music, palette = Character(level=0.6, dynamics=0.4), _palette()
+    ring.advance(0.0, music, palette)
+    assert all(strip.shown is not None for strip in ring.light.strips), (
+        "a strip of the border was never drawn at all")
+
+    surface.frame()[:] = 0
+    ring.reshape(560, 190, 18)
+    ring.advance(1 / 60, music, palette)
+    assert all(strip.shown is not None for strip in ring.light.strips), (
+        "the resized border is lit on some edges and not others")
+    lit = surface.frame()[..., 3]
+    # And on the surface, where the outward half went: each side of the panel
+    # has light beyond it rather than one of them having all of it.
+    pad = ring.pad
+    for name, band in (("top", lit[:pad, :]), ("bottom", lit[190 + pad:, :]),
+                       ("left", lit[:, :pad]), ("right", lit[:, 560 + pad:])):
+        assert band.any(), f"the {name} of the border is blank after a resize"
+    ring.destroy()
 
 
 def test_the_border_takes_its_companion_with_it_wherever_it_goes(canvas):

@@ -31,6 +31,80 @@ def canvas(tk_root):
     made.destroy()
 
 
+class Surface:
+    """A stand-in for the layered window: the same five calls, in memory.
+
+    Not a mock. It reproduces the two properties of the real one the code leans
+    on — a surface that only ever grows, and content that survives between
+    frames — so a test can read back what a strip actually wrote.
+
+    Shared, because since the light moved behind the panel *most* of it lands
+    here: a test that measures the border on the canvas half alone is now
+    measuring the two pixels of frosted rim and calling it the border.
+    """
+
+    def __init__(self):
+        import numpy as np
+
+        self._np = np
+        self.capacity = (0, 0)
+        self._frame = None
+        self.presented: list = []
+        self.moved: list = []
+        self.shown = True
+        self.destroyed = False
+        self.rebuilds = 0
+        self.under = None
+
+    def reserve(self, width, height):
+        if width <= self.capacity[0] and height <= self.capacity[1]:
+            return False
+        width = max(width, self.capacity[0])
+        height = max(height, self.capacity[1])
+        self._frame = self._np.zeros((height, width, 4), self._np.uint8)
+        self.capacity = (width, height)
+        self.rebuilds += 1
+        return True
+
+    def frame(self):
+        return self._frame
+
+    def present(self, width, height, at):
+        self.presented.append((width, height, at))
+
+    def move(self, x, y):
+        self.moved.append((x, y))
+
+    def behind(self, hwnd):
+        self.under = hwnd
+
+    def visible(self, shown):
+        self.shown = shown
+
+    def destroy(self):
+        self.destroyed = True
+
+    # --- reading it back --------------------------------------------------
+
+    def straight(self, width: int, height: int):
+        """The premultiplied BGRA it holds, as the straight RGBA PIL wants.
+
+        `UpdateLayeredWindow` demands premultiplied and `halo.Spill` folds the
+        multiply into the colour table, where it is free. Everything that reads
+        the surface back has to undo it, and doing that in one place is what
+        stops two tests disagreeing about how bright the border is.
+        """
+        import numpy as np
+        from PIL import Image
+
+        got = self._frame[:height, :width].astype(np.float32)
+        alpha = got[..., 3:4]
+        colour = np.where(alpha > 0,
+                          got[..., 2::-1] * 255.0 / np.maximum(alpha, 1e-6), 0.0)
+        out = np.concatenate([np.clip(colour, 0, 255), alpha], axis=2)
+        return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 @pytest.fixture(scope="session")
 def _overlay_once(tk_root):
     """One `Overlay`, and one Tcl interpreter, for the whole suite.

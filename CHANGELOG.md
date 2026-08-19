@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Put the border's light *behind* the panel and let the panel occlude it. Every
+  version of this border for eleven rejections has been an outline: a bright
+  ring seven pixels inside the panel's own edge, twenty-two more of halo laid
+  inward across its face, and a wide lobe outside at 55 % of the peak. That is
+  the definition of a sticker, and no width, blur or ramp was ever going to make
+  a sticker read as light. What escapes past an occluder is the opposite
+  distribution — bright immediately outside the silhouette, gone immediately
+  inside it, faint a long way out — so the peak now sits one and a half pixels
+  *outside* the panel, the face gets four pixels of frosted rim and nothing
+  more, and the panel's own silhouette against its light is what draws the
+  shape. Integrated across the cross-section: 11.6 pixel-peaks of light on the
+  panel's face before and 0.51 now, against 4.2 out on the desktop before and
+  7.2 now. Half the light altogether, and almost none of it where it was wrong.
+- Make a corner dimmer than the edges beside it. Flux escaping past a convex
+  corner spreads over an arc rather than a band, so it arrives `r / (r + d)` as
+  bright — which means the bloom ends sooner at the corners than along the
+  straights and the light's own outer envelope is rounder than the panel is.
+  Nothing chose that radius; it falls out of the one the corner is already drawn
+  with. Four edges lit identically read as four edges however round the corners
+  between them are, and that is what the border kept giving itself away as.
+- Draw the whole border on the frame after a resize rather than a quarter of
+  it. `halo.PER_CALL` lets a frame repaint one strip, which is right for
+  recolouring — the ring closes on a new colour in 67 ms against a gradient
+  that takes eleven seconds to go round — and wrong for a resize, where every
+  strip has moved and the companion's surface has been cleared. Photographed
+  mid-fold it is a bright bar down one side of an unlit panel, and it is the
+  frame the user was shown six of and preferred. It has always been that way;
+  concentrating the light is what made it unmissable, so the fix belongs with
+  it. A fold costs 49 ms a frame against the 56 it cost before any of this.
+- Take the border's cost down with it. The canvas half is evaluated eleven
+  physical pixels into the panel where it used to be fifty, so a frame that
+  repaints one strip costs 2.3 ms against 5.6 and the whole border 4.5 against
+  7.7. A fold of the panel is 30 ms a frame against 56. The companion surface's
+  own share is unchanged at ~2.2 ms, and it is now most of what the border
+  costs rather than a quarter of it.
 - Let the border's light leave the panel. The overlay is clipped to a one-bit
   rounded rectangle by `SetWindowRgn`, so the glow stopped dead at the window's
   edge — and the falloff carried a term whose only purpose was to extinguish its

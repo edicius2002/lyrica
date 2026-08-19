@@ -22,10 +22,12 @@
     "exit_lane_fraction": 0.75
   },
   "beam": {
-    "core_width": 3.0,
-    "core_soft": 7.0,
-    "halo_reach": 22.0,
-    "edge_inset": 7.0,
+    "edge_inset": 0.5,
+    "crest": 1.5,
+    "core_width": 1.0,
+    "bleed_reach": 4.0,
+    "rim_reach": 12.0,
+    "spill_reach": 26.0,
     "minimum_delta_e": 18.0
   }
 }
