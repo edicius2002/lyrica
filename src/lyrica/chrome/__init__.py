@@ -210,9 +210,25 @@ def place_in_monitor(root: tk.Tk, place: tuple[int, int],
     return x, y
 
 
-def geometry(width: int, height: int, x: int, y: int) -> str:
-    """Tk geometry with valid explicit signs in every desktop quadrant."""
-    return f"{width}x{height}{x:+d}{y:+d}"
+def place(root: tk.Tk, x: int, y: int, width: int, height: int) -> None:
+    """Put the window at a size and a real desktop position. **Not `wm geometry`.**
+
+    `wm geometry` cannot express a negative coordinate, and this used to ask it
+    to. Its offsets are signed, but a leading `-` does not mean "negative": Tk
+    reads it as "this far from the *opposite* edge of the screen", and the
+    screen it measures against is the primary one. So `1800x640+2262-20`, built
+    for a panel whose top belongs at -20, put it at 1200 - 20 - 640 = 540
+    instead — 560 px away, and off the monitor it was on. There is no spelling
+    that works either, because `+-20` is not a geometry Tk accepts.
+
+    Any monitor sitting above or left of the primary has negative coordinates
+    across part or all of it, which is an ordinary desktop rather than an exotic
+    one. So the size goes through Tk, where `WxH` alone carries no offsets and
+    no ambiguity, and the position goes through the platform, which has always
+    taken signed desktop coordinates and is already what a drag uses.
+    """
+    root.geometry(f"{int(width)}x{int(height)}")
+    move(root, x, y)
 
 
 def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
@@ -229,12 +245,19 @@ def suspend_effects(root: tk.Tk, chrome: Chrome, suspended: bool) -> None:
 
 
 def move(root: tk.Tk, x: int, y: int) -> None:
-    """Move the window, by the quickest route the platform offers."""
+    """Move the window, by the quickest route the platform offers.
+
+    The fallback carries the same limit `place` exists to avoid, and cannot do
+    better: a Tk offset of `+-20` is not a geometry, and `-20` means twenty from
+    the far edge. Off Windows a negative coordinate is clamped to zero rather
+    than sent somewhere it was never asked to go, because landing at the corner
+    of the desktop is wrong in a way you can see and drag back from.
+    """
     if sys.platform == "win32":
         from lyrica.chrome import windows as win
         if win.move_window(root, x, y):
             return
-    root.geometry(f"+{int(x)}+{int(y)}")
+    root.geometry(f"+{max(0, int(x))}+{max(0, int(y))}")
 
 
 def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:

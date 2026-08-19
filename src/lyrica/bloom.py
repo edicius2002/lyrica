@@ -14,17 +14,8 @@ recolouring four items. The honest version is twenty times cheaper per frame
 than the fake one.
 
 Images are cached and held here on purpose: Tk keeps only a weak claim on an
-image, so anything dropped goes blank on screen. That argues for holding the
-ones a canvas is still showing, not for holding every one ever made, and the
-cache was doing the second: its key carries both the font spec and a colour
-derived from the palette, so a font size change retained the whole previous
-generation while it built another, and every song brought a new pair of tints.
-Measured with no ceiling at all: thirty songs at one size came to 14,152 images
-and 212 MB, fifteen sizes at one song to 10,440 and 184 MB, and the two axes
-together — fifteen sizes, ten songs — to 73,080 images and 1.3 GB, none of it
-ever released. So the cache is bounded now, and the weak claim is what decides
-what may go: `image inuse` is Tk's own answer to whether a widget is still
-showing a photo, and nothing it says yes to is ever dropped.
+image, so anything dropped goes blank on screen. Held, though, is not held
+forever — see `_Images` for what bounds the cache and why it has to be bounded.
 """
 import logging
 import sys
@@ -56,89 +47,91 @@ GROWTH = 0.14          # default for direct users; the overlay passes its settin
 # edges and the halo has corners.
 PAD = 20
 
-# The cache holds pictures, so its ceiling is counted in pictures rather than
-# in bytes: `len` cannot drift out of step with the dict, and this dict is
-# cleared from outside — by the tests and by the baseline renderer — which a
-# running byte total would not survive.
+# --- how many of them are kept ----------------------------------------------
+# Every image in here is a Windows GDI bitmap from the moment it is first drawn:
+# measured at exactly one handle and 29.6 KiB each. A process is given 10,000 GDI
+# handles. The keys carry the palette colour, and the palette follows the cover,
+# so each song asks for images of its own and none of the previous song's are
+# ever asked for again — which made an unbounded cache a leak on the one axis
+# that never stops moving. Reproduced: the quota was reached after about fifteen
+# songs, and Tk ended the process from `Tk_GetPixmap` with "Fail to allocate
+# bitmap". That is a `Tcl_Panic`, so there is nothing to catch and no chance to
+# log a word: the only defence is never to hold that many.
 #
-# Where 512 comes from: one 89-character line driven through a full sweep at
-# the default 30 px lyric built 86 distinct images for the whole line and held
-# at most 16 of them on the canvas at once. Six lines' worth is room enough for
-# a chorus to come round again warm, and it is about 10 MB at that size, four
-# times that at the largest size the settings allow. What it replaces had no
-# ceiling and reached 1.3 GB.
-CACHE_LIMIT = 512
+# One song's whole appetite is two colours — sung and unsung — times the distinct
+# characters in its lyrics times `SCALES`, which is about 800 images for a Latin
+# lyric. Halos are white whatever the song, so they are shared by every song in
+# the font. Three songs' worth is kept: 2,400 of the 10,000 handles, and about
+# 70 MB.
+LIMIT = 2400
 
-# How far down the queue one insert will look for something it may drop.
-# Everything nearer the front than this is on screen, and a caller in the
-# middle of a 16 ms frame must not pay to walk the whole cache to learn it.
-# Standing a few images over the ceiling for a frame is the cheaper mistake.
-EVICT_SCAN = 32
+# Count alone does not bound the memory. A Korean or Japanese lyric has hundreds
+# of distinct characters and draws each of them larger, so the same number of
+# images is several times the bytes. Whichever bound is reached first evicts.
+BYTE_LIMIT = 72 * 1024 * 1024
 
-# Insertion-ordered, oldest first, and read as least-recently-used: a hit moves
-# its key to the back. A plain dict cannot move a key without a pop, and this
-# one is read on every character of every frame.
-_cache: OrderedDict = OrderedDict()
 
-# One PIL font per spec. Bounded already by the scale range the settings clamp
-# to, times the smaller sizes a long line gets fitted down to, so this is the
-# lesser worry — but unlike the images these never reach Tk, so dropping one
-# costs a reload and can never blank a letter.
-FONT_LIMIT = 64
+class _Images(OrderedDict):
+    """The kept images, bounded by count and by bytes, least recently used out.
 
-_fonts: OrderedDict = OrderedDict()
+    Eviction is by last use rather than by age or by song, and that is what
+    makes it safe. Tk keeps only a weak claim on an image, so dropping one a
+    canvas item is still showing blanks that letter — but a letter on screen is
+    by definition one that was just used, and it takes `LIMIT` other images
+    being used to age it out. One line on screen is at most about forty of them
+    against a bound of 2,400, and a song builds 800 in its entirety, so the
+    least recently used entry belongs to a song that stopped playing.
+
+    Dropping the reference is what frees the handle: `ImageTk.PhotoImage`
+    deletes the Tk image in `__del__`, and this cache holds the only strong
+    reference to it. So `del` here is not bookkeeping, it is the release.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._weight: dict = {}
+        self.total_bytes = 0
+
+    def take(self, key):
+        """What is held for `key`, counted as freshly used, or None."""
+        if key not in self:
+            return None
+        self.move_to_end(key)
+        return self[key]
+
+    def keep(self, key, value, image) -> None:
+        """Hold `value`, then drop the least recently used until it fits.
+
+        `image` is the PIL original rather than the Tk one because it is what
+        knows its own size in pixels; four bytes each is what both copies of it
+        cost, and the two are within a few per cent of the 29.6 KiB measured.
+        """
+        weight = image.width * image.height * 4
+        self[key] = value
+        self._weight[key] = weight
+        self.total_bytes += weight
+        # Never the entry just kept, however small the bounds are set: a caller
+        # that is handed an image expects it to still be there next frame.
+        while len(self) > 1 and (len(self) > LIMIT
+                                 or self.total_bytes > BYTE_LIMIT):
+            del self[next(iter(self))]
+
+    # `OrderedDict.popitem` is implemented in C and does not route through
+    # `__delitem__` on a subclass, so eviction spells the deletion out above
+    # rather than trusting it to keep the total honest.
+    def __delitem__(self, key) -> None:
+        self.total_bytes -= self._weight.pop(key, 0)
+        super().__delitem__(key)
+
+    def clear(self) -> None:
+        super().clear()
+        self._weight.clear()
+        self.total_bytes = 0
+
+
+_cache = _Images()
+_fonts: dict = {}
 _missing: set = set()
-
-
-def _in_use(entry) -> bool:
-    """Whether Tk still has this photo on a widget.
-
-    The whole of what makes eviction safe. Tk keeps only a weak claim on an
-    image, so dropping the last Python reference to one a canvas item is still
-    showing deletes it out from under the item, and the letter — whose text
-    item is hidden while its stand-in shows — goes blank. `image inuse` answers
-    that from Tk's own bookkeeping, and it stays true for an item that is
-    merely hidden, so the picture a word left behind when it settled back to
-    its own size is protected too, until the item is given another or deleted.
-    """
-    photo = entry[0] if isinstance(entry, tuple) else entry
-    try:
-        return bool(photo.tk.call("image", "inuse", str(photo)))
-    except Exception:
-        # No interpreter left to ask, or something that is not a photo. Either
-        # way the answer is not worth a blank letter: keep it.
-        logger.debug("could not ask Tk whether an image is in use", exc_info=True)
-        return True
-
-
-def _remember(key: tuple, made):
-    """Hold `made` under `key`, letting go of what nothing is showing."""
-    _cache[key] = made
-    for _ in range(EVICT_SCAN):
-        if len(_cache) <= CACHE_LIMIT:
-            break
-        oldest, entry = next(iter(_cache.items()))
-        if _in_use(entry):
-            # Not old at all, whatever the order says. Moved to the back so the
-            # next insert does not ask Tk about it again.
-            _cache.move_to_end(oldest)
-            continue
-        del _cache[oldest]
-    return made
-
-
-def _touch(key: tuple):
-    """What is cached under `key`, counted as a use, or None.
-
-    A caller that only asks whether an image exists is asking because it means
-    to show it this frame, so the question counts. Left uncounted, budgeting a
-    word could report an image ready and then evict it while building the rest
-    of the same word — correct, but paying twice for one picture.
-    """
-    hit = _cache.get(key)
-    if hit is not None:
-        _cache.move_to_end(key)
-    return hit
 
 
 def _font_file(family: str, weight: str, slant: str = "roman") -> Path | None:
@@ -204,8 +197,6 @@ def _pil_font(spec: tuple):
         _missing.add(spec)
         logger.info("no blurred bloom for %r; falling back to offset copies", spec)
     _fonts[spec] = loaded
-    while len(_fonts) > FONT_LIMIT:
-        _fonts.popitem(last=False)
     return loaded
 
 
@@ -249,8 +240,8 @@ def ready(char: str, spec: tuple, step: int, colour: tuple,
     already on screen and a step of a sixth of six per cent is not a thing
     anyone sees held for one frame longer.
     """
-    return _touch(("grown", char, spec, min(step, SCALES), colour,
-                   _growth_key(growth))) is not None
+    return ("grown", char, spec, min(step, SCALES), colour,
+            _growth_key(growth)) in _cache
 
 
 def grown(char: str, spec: tuple, step: int, colour: tuple,
@@ -277,7 +268,7 @@ def grown(char: str, spec: tuple, step: int, colour: tuple,
         return None
     amount = _growth_key(growth)
     key = ("grown", char, spec, min(step, SCALES), colour, amount)
-    hit = _touch(key)
+    hit = _cache.take(key)
     if hit is not None:
         return hit
     font = _pil_font(spec)
@@ -299,13 +290,14 @@ def grown(char: str, spec: tuple, step: int, colour: tuple,
     except Exception:
         logger.debug("could not grow %r", char, exc_info=True)
         return None
-    return _remember(key, made)
+    _cache.keep(key, made, img)
+    return made
 
 
 def blurred_ready(char: str, spec: tuple, level: int,
                   colour: tuple = (255, 255, 255)) -> bool:
     """Whether this halo already exists. Budgeted for the same reason sizes are."""
-    return _touch((char, spec, min(level, LEVELS), colour)) is not None
+    return (char, spec, min(level, LEVELS), colour) in _cache
 
 
 def _rendered_halo(char: str, font, level: int, colour: tuple):
@@ -341,7 +333,7 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     if level <= 0:
         return None
     key = (char, spec, min(level, LEVELS), colour)
-    hit = _touch(key)
+    hit = _cache.take(key)
     if hit is not None:
         return hit
     font = _pil_font(spec)
@@ -350,8 +342,10 @@ def glyph(char: str, spec: tuple, level: int, colour: tuple = (255, 255, 255)):
     try:
         from PIL import ImageTk
 
-        photo = ImageTk.PhotoImage(_rendered_halo(char, font, level, colour))
+        halo = _rendered_halo(char, font, level, colour)
+        photo = ImageTk.PhotoImage(halo)
     except Exception:
         logger.debug("could not build a bloom for %r", char, exc_info=True)
         return None
-    return _remember(key, photo)
+    _cache.keep(key, photo, halo)
+    return photo

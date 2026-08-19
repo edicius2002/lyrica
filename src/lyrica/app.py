@@ -30,6 +30,7 @@ from lyrica import (
     config,
     glass,
     hotkeys,
+    instance,
     motion,
     songcolour,
     sponsorblock,
@@ -619,8 +620,8 @@ class Overlay:
         # it with the centre of whichever size happened to be visible last.
         self._place_anchor = (
             self._start_x + self.width // 2, self._start_y)
-        self.root.geometry(chrome_mod.geometry(
-            self.width, self.height, self._start_x, self._start_y))
+        chrome_mod.place(self.root, self._start_x, self._start_y,
+                         self.width, self.height)
 
         self.canvas = tk.Canvas(self.root, width=self.width, height=self.height,
                                 bg=self.chrome.background,
@@ -1134,7 +1135,7 @@ class Overlay:
             self.root, *old_centre)
         x = max(edge, min(keep, edge + dwidth - width))
         top = max(dtop, min(top, dtop + dheight - height))
-        self.root.geometry(chrome_mod.geometry(width, height, x, top))
+        chrome_mod.place(self.root, x, top, width, height)
         self.canvas.configure(width=width, height=height)
         # The border is rebuilt every frame, because it is geometry and not
         # decoration: its segments are laid out for a particular width, so one
@@ -1270,9 +1271,20 @@ class Overlay:
 
         old_centre = (self.root.winfo_x() + self.width // 2,
                       self.root.winfo_y() + self.height // 2)
-        place = getattr(
-            self, "_place_anchor",
-            (self.root.winfo_x() + self.width // 2, self.root.winfo_y()))
+        # Where the panel *is*, not where it was last dragged to. Those are the
+        # same thing only until something moves it without a hand: a compact
+        # card expanding into a lyric panel takes its own anchor, and either can
+        # be pulled off its top by a monitor edge. Growing from the remembered
+        # drag instead moved the panel out from under the eye watching it — and
+        # made a press of `+` followed by a press of `-` land somewhere the
+        # panel had never been.
+        #
+        # The trade is that a clamp is no longer temporary: grow until the
+        # bottom edge stops it, shrink again, and the panel stays where the edge
+        # left it rather than springing back down. That is the half worth
+        # keeping — the panel is visibly against the edge, so staying there is
+        # what the screen already shows.
+        place = (self.root.winfo_x() + self.width // 2, self.root.winfo_y())
         self.wrap = self.chrome.px(WRAP)
         self.row_gap = self.chrome.px(ROW_GAP)
         self.f_title = _scaled_font(FONT_TITLE, scale)
@@ -1317,8 +1329,7 @@ class Overlay:
         else:
             self.width, self.height = target
             self.anchor_y = self.height * ANCHOR
-            self.root.geometry(
-                chrome_mod.geometry(self.width, self.height, x, y))
+            chrome_mod.place(self.root, x, y, self.width, self.height)
             self.canvas.configure(width=self.width, height=self.height)
             # After the geometry, never before: the clip region is in device
             # pixels and does not track the window, so applying it early clips
@@ -3033,21 +3044,33 @@ class Overlay:
         self._order_text_layers()
 
     def run(self):
+        """Draw until asked to stop, and put everything away whichever way it ends.
+
+        The teardown is in a `finally` because it used to sit on the far side of
+        `mainloop`, so any ending other than a quit skipped all of it — and one
+        of the things skipped is the `NIM_DELETE` for the notification-area icon,
+        which Windows then keeps drawing until something makes it ask the owning
+        window whether it is still there.
+        """
         self.reader.start()
         self.hotkeys.start()
         self.tray.start()
         chrome_mod.hold_timer_resolution(True)
-        self._tick()
-        self.root.mainloop()
-        # Every exit, not only the one that goes through `_close`: the loop can
-        # also end because the root was destroyed from under it, and a size
-        # still owed to the disk must not leave with it.
-        self._flush_size()
-        chrome_mod.hold_timer_resolution(False)
-        self.tray.stop()
-        self.hotkeys.stop()
-        self.reader.stop()
-        self.meter.close()
+        try:
+            self._tick()
+            self.root.mainloop()
+        finally:
+            # Every exit, not only the one that goes through `_close`: the loop
+            # can also end because the root was destroyed from under it, or
+            # because it raised, and a size still owed to the disk must not
+            # leave with it. First in the block because it is the only one that
+            # writes anything down.
+            self._flush_size()
+            chrome_mod.hold_timer_resolution(False)
+            self.tray.stop()
+            self.hotkeys.stop()
+            self.reader.stop()
+            self.meter.close()
 
 
 def setup_logging() -> Path:
@@ -3075,10 +3098,18 @@ def setup_logging() -> Path:
 
 def main():
     setup_logging()
-    # Before anything reads a token: the .env is the fallback for values that
-    # must not be committed, and an exported variable still wins over it.
-    config.load()
-    Overlay().run()
+    # Before the window, because a second overlay is a second always-on-top
+    # panel over the same lyrics and a second icon in the notification area.
+    if not instance.claim():
+        logger.info("Lyrica is already running; leaving the overlay to it")
+        return
+    try:
+        # Before anything reads a token: the .env is the fallback for values that
+        # must not be committed, and an exported variable still wins over it.
+        config.load()
+        Overlay().run()
+    finally:
+        instance.release()
 
 
 if __name__ == "__main__":

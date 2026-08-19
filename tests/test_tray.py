@@ -136,3 +136,84 @@ def test_every_module_imports_on_any_platform():
 
     for module in pkgutil.walk_packages(lyrica.__path__, "lyrica."):
         importlib.import_module(module.name)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only tray")
+def test_the_icon_is_removed_even_when_the_loop_ends_badly(monkeypatch):
+    """A dead icon is left in the notification area until something asks it.
+
+    Windows does not poll the icons it is showing: it drops one when a message
+    to the owning window goes unanswered, which is what opening the notification
+    area makes it do. So an instance that ends without `NIM_DELETE` leaves an
+    icon that looks live until it is looked at, and several such endings look
+    like several copies of the app.
+    """
+    icon = tray.WindowsTray()
+    removed = []
+    monkeypatch.setattr(icon, "_create", lambda user32: None)
+    monkeypatch.setattr(icon, "_remove", lambda user32: removed.append(True))
+
+    class Exploding:
+        def __getattr__(self, name):
+            def fail(*args):
+                raise OSError("the message loop fell over")
+            return fail
+
+    # GetMessageW is reached through the local `user32`, so failing the whole
+    # object covers however the loop is spelled.
+    import lyrica.tray as tray_mod
+    real = tray_mod.ctypes.windll.user32
+    try:
+        tray_mod.ctypes.windll.user32 = Exploding()
+        with pytest.raises(OSError):
+            icon._run()
+    finally:
+        tray_mod.ctypes.windll.user32 = real
+    assert removed, "the icon was left behind"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only tray")
+def test_stopping_waits_for_the_icon_to_actually_go(monkeypatch):
+    """`stop` posted a quit and returned, and the thread is a daemon.
+
+    So a clean quit raced the interpreter shutdown: the thread that owns the
+    icon was killed before it reached `NIM_DELETE` often enough to leave one
+    behind on an ordinary `Esc`.
+    """
+    import threading
+    icon = tray.WindowsTray()
+    joined = []
+
+    class Thread:
+        def join(self, timeout=None):
+            joined.append(timeout)
+
+    icon._thread = Thread()
+    icon._thread_id = threading.get_ident()
+    icon.stop()
+    assert joined, "stop returned without waiting for the icon to be removed"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the overlay is Windows-first")
+def test_the_overlay_puts_its_icon_away_even_when_the_loop_throws(overlay,
+                                                                 monkeypatch):
+    """`run` cleaned up on the far side of `mainloop` and nowhere else.
+
+    So anything that came out of the loop other than a quit — an unhandled
+    TclError from an `after` callback, most likely — skipped every `stop` below
+    it, and the notification-area icon was one of them.
+    """
+    stopped = []
+    monkeypatch.setattr(overlay.reader, "start", lambda: None)
+    monkeypatch.setattr(overlay.hotkeys, "start", lambda: None)
+    monkeypatch.setattr(overlay.tray, "start", lambda: None)
+    monkeypatch.setattr(overlay, "_tick", lambda: None)
+    monkeypatch.setattr(overlay.root, "mainloop",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(overlay.tray, "stop", lambda: stopped.append("tray"))
+    monkeypatch.setattr(overlay.hotkeys, "stop", lambda: stopped.append("keys"))
+    monkeypatch.setattr(overlay.reader, "stop", lambda: stopped.append("reader"))
+    monkeypatch.setattr(overlay.meter, "close", lambda: stopped.append("meter"))
+    with pytest.raises(RuntimeError):
+        overlay.run()
+    assert stopped == ["tray", "keys", "reader", "meter"]

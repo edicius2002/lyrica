@@ -660,71 +660,118 @@ def test_a_fully_faded_line_is_hidden_instead_of_painted_black(view):
                for entry in view._items)
 
 
-def test_the_cache_stops_growing_however_many_songs_are_played(canvas):
-    """It grew by two axes that multiply, and never let anything go.
+# --- what is kept, and what is let go ---------------------------------------
 
-    A grown glyph is keyed by the font spec and by a colour the palette derives
-    from the cover art, so every song brought a fresh pair of tints and every
-    Ctrl+Alt +/- a fresh spec, each generation retained whole while the next was
-    built. Measured with no ceiling: thirty songs at one size came to 14,152
-    images and 212 MB, and fifteen sizes across ten songs to 73,080 and 1.3 GB.
+def _fill_one_song(bloom_mod, spec, colours, chars):
+    """Every size a song of these characters and colours ever asks for."""
+    for colour in colours:
+        for char in chars:
+            for step in range(1, bloom_mod.SCALES + 1):
+                bloom_mod.grown(char, spec, step, colour, bloom_mod.GROWTH)
+
+
+def test_the_kept_images_stay_within_the_handles_a_process_gets(canvas):
+    """The cache is keyed by palette colour, and the palette follows the song.
+
+    Every image in it is a Windows GDI bitmap once drawn — measured at one
+    handle and 29.6 KiB each — and a process is given 10,000 handles. Unbounded,
+    the cache reached the quota after about fifteen songs and Tk aborted the
+    whole process from `Tk_GetPixmap` with "Fail to allocate bitmap". That is a
+    `Tcl_Panic`, so there is no exception to catch and no chance to log: the only
+    defence is never to hold that many.
     """
     from lyrica import bloom as bloom_mod
 
-    spec = ("Segoe UI", -20, "bold")
+    spec = ("Segoe UI", 20, "bold")
     if not bloom_mod.available(spec):
         pytest.skip("no TrueType file for this font on this machine")
     bloom_mod._cache.clear()
-    try:
-        for song in range(12):
-            tint = (song * 17 % 256, song * 29 % 256, song * 43 % 256)
-            for char in "abcdefgh":
-                for step in range(1, bloom_mod.SCALES + 1):
-                    bloom_mod.grown(char, spec, step, tint, 0.14)
-        # Nothing was ever put on the canvas, so nothing is pinned and the
-        # ceiling holds exactly.
-        assert len(bloom_mod._cache) == bloom_mod.CACHE_LIMIT
-    finally:
-        bloom_mod._cache.clear()
+    chars = "abcdefghijklmnopqrstuvwxyz"
+    per_song = len(chars) * bloom_mod.SCALES * 2
+    for song in range(bloom_mod.LIMIT // per_song + 3):
+        _fill_one_song(bloom_mod, spec, ((200, song * 7 % 256, 120),
+                                         (90, 110, song * 11 % 256)), chars)
+    assert len(bloom_mod._cache) <= bloom_mod.LIMIT
+    assert bloom_mod._cache.total_bytes <= bloom_mod.BYTE_LIMIT
 
 
-def test_an_image_a_canvas_is_showing_is_never_evicted(canvas):
-    """The one thing a ceiling on this cache can break.
+def test_a_song_keeps_every_size_it_built_while_it_is_playing(canvas):
+    """The bound has to be above one song's whole appetite, not near it.
 
-    Tk keeps only a weak claim on an image, so dropping the last Python
-    reference to one an item is still showing deletes it out from under the
-    item — and a grown letter hides its own text item while its stand-in is up,
-    so what is left is a hole in the word. The eviction asks Tk `image inuse`
-    and passes over anything a widget still has, which is why the picture on
-    the canvas here outlives ten times its own cache's worth of pressure while
-    its twin, built the same way and shown by nobody, does not.
+    Evicting inside a song would drop images a canvas item is still showing —
+    Tk keeps only a weak claim on an image, so the letter would go blank — and
+    would rebuild them at 0.33 ms each for the rest of the song. A Latin lyric
+    has about fifty distinct characters, which is two colours by fifty by
+    `SCALES`, so the whole of one is held with room to spare.
     """
     from lyrica import bloom as bloom_mod
 
-    spec = ("Segoe UI", -20, "bold")
+    spec = ("Segoe UI", 20, "bold")
     if not bloom_mod.available(spec):
         pytest.skip("no TrueType file for this font on this machine")
     bloom_mod._cache.clear()
-    try:
-        on_screen = bloom_mod.grown("a", spec, 4, (255, 0, 0), 0.14)[0]
-        off_screen = bloom_mod.grown("b", spec, 4, (255, 0, 0), 0.14)[0]
-        shown, hidden = str(on_screen), str(off_screen)
-        item = canvas.create_image(10, 10, image=on_screen, anchor="nw")
-        canvas.update_idletasks()
-        # Every reference of our own let go: from here only the cache can keep
-        # either alive, and only Tk can keep one in the cache.
-        del on_screen, off_screen
+    chars = "abcdefghijklmnopqrstuvwxyzáéíóúñABCDEFGHIJKLMNOPQ ,.'!¿?"
+    colours = ((240, 236, 228), (150, 150, 160))
+    _fill_one_song(bloom_mod, spec, colours, chars)
+    missing = [(char, step, colour)
+               for colour in colours for char in chars
+               for step in range(1, bloom_mod.SCALES + 1)
+               if not bloom_mod.ready(char, spec, step, colour,
+                                      bloom_mod.GROWTH)]
+    assert not missing, f"{len(missing)} sizes were evicted mid-song"
 
-        for song in range(12):
-            tint = (song * 17 % 256, song * 29 % 256, song * 43 % 256)
-            for char in "abcdefgh":
-                for step in range(1, bloom_mod.SCALES + 1):
-                    bloom_mod.grown(char, spec, step, tint, 0.14)
 
-        names = set(canvas.tk.call("image", "names"))
-        assert shown in names, "the image on the canvas was evicted"
-        assert canvas.itemcget(item, "image") == shown
-        assert hidden not in names, "an image nobody shows was kept anyway"
-    finally:
-        canvas.delete("all")
-        bloom_mod._cache.clear()
+def test_the_oldest_song_goes_first_and_the_newest_stays(canvas):
+    """Least recently used, because what is on screen is what was just used."""
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", 20, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    bloom_mod._cache.clear()
+    chars = "abcdefghijklmnopqrstuvwxyz"
+    per_song = len(chars) * bloom_mod.SCALES
+    songs = [((10 + song, 20, 30),) for song in
+             range(bloom_mod.LIMIT // per_song + 2)]
+    for colour in songs:
+        _fill_one_song(bloom_mod, spec, colour, chars)
+    newest = songs[-1][0]
+    assert all(bloom_mod.ready(char, spec, step, newest, bloom_mod.GROWTH)
+               for char in chars for step in range(1, bloom_mod.SCALES + 1)), \
+        "the song that is playing lost its sizes"
+    oldest = songs[0][0]
+    assert not bloom_mod.ready("a", spec, 1, oldest, bloom_mod.GROWTH), \
+        "the first song's sizes were still held after the cache overflowed"
+
+
+def test_an_evicted_size_can_be_built_again(canvas):
+    """Eviction drops the image, not the ability to make it."""
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", 20, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    bloom_mod._cache.clear()
+    chars = "abcdefghijklmnopqrstuvwxyz"
+    first = (10, 20, 30)
+    _fill_one_song(bloom_mod, spec, (first,), chars)
+    per_song = len(chars) * bloom_mod.SCALES
+    for song in range(bloom_mod.LIMIT // per_song + 2):
+        _fill_one_song(bloom_mod, spec, ((100 + song, 40, 50),), chars)
+    assert not bloom_mod.ready("a", spec, 1, first, bloom_mod.GROWTH)
+    again = bloom_mod.grown("a", spec, 1, first, bloom_mod.GROWTH)
+    assert again is not None and again[0].width() > 0
+
+
+def test_clearing_the_cache_forgets_what_it_was_holding(canvas):
+    """`total_bytes` and the keys are one fact; the fixtures clear the keys."""
+    from lyrica import bloom as bloom_mod
+
+    spec = ("Segoe UI", 20, "bold")
+    if not bloom_mod.available(spec):
+        pytest.skip("no TrueType file for this font on this machine")
+    _fill_one_song(bloom_mod, spec, ((70, 80, 90),), "abc")
+    assert bloom_mod._cache.total_bytes > 0
+    bloom_mod._cache.clear()
+    assert len(bloom_mod._cache) == 0
+    assert bloom_mod._cache.total_bytes == 0
