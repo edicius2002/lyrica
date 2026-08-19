@@ -1571,6 +1571,9 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
         def reshape(self, *a):
             done.append("beam")
 
+        def place(self, *a):
+            done.append("place")
+
     class Panel:
         chrome = chrome_mod.Chrome(chrome_mod.ChromeMode.PANEL, "#000",
                                    A.glass.PANEL)
@@ -1599,12 +1602,15 @@ def test_only_the_landing_frame_pays_for_the_region_and_the_flush(monkeypatch):
                         lambda _root, _x, _y: (0, 0, 3000, 2000))
     panel = Panel()
     A.Overlay._resize_window(panel, 880, 290, settling=False)
-    assert done == ["beam"], (
+    # `place` follows `beam` and never leads it: the half of the border that
+    # falls outside the window is sized by the reshape, so presenting it first
+    # puts the previous frame's light at this frame's position.
+    assert done == ["beam", "place"], (
         "the border is geometry: left behind it stays drawn around the outline "
         f"the panel is leaving. This did {done}")
     done.clear()
     A.Overlay._resize_window(panel, 860, 280, settling=True)
-    assert done == ["beam", "shape", "flush"]
+    assert done == ["beam", "place", "shape", "flush"]
 
 
 def test_expansion_stays_inside_the_current_monitor_bottom(monkeypatch):

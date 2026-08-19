@@ -287,6 +287,15 @@ def _hwnd_of(root) -> int:
     return int(parent) if parent else hwnd
 
 
+def handle(root) -> int:
+    """The real top-level handle for a Tk window.
+
+    The companion glow window needs it to place itself in the z-order, and that
+    caller is outside this module. See `_hwnd_of` for why it is not cached.
+    """
+    return _hwnd_of(root)
+
+
 def _set_accent(hwnd: int, state: int, tint: int) -> bool:
     try:
         fn = ctypes.windll.user32.SetWindowCompositionAttribute

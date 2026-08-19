@@ -1,29 +1,60 @@
 """A light that travels the panel's edge, brightened by what is playing.
 
-Segments laid once around the rounded rectangle and then only recoloured, for
-the same reason the lyric sweep keeps its glyphs: rebuilding canvas items every
-frame is what turns a smooth thing into a stuttering one.
-
 The head advances at a fixed rate and the *brightness* is what the music moves.
 That split is deliberate. Tying the speed to the beat needs a beat, and the
 endpoint meter this is driven by has no spectrum to find one in — it reports
 loudness and nothing else. A beam that always moves and breathes with the music
 says everything a loudness signal honestly can; one that tried to lurch on each
 kick would be guessing.
+
+There is no line in it. The border used to be laid as segments of `create_line`
+and recoloured in place — a crisp core with a wider, flatter halo under it — and
+what that looks like is plastic, for a reason no number could fix. Both strokes
+are solid and of fixed width, so the light's cross-section was bright, then a
+plateau at 42 % of the way to the backdrop, then nothing: one step, where real
+light has none. Thickening the strokes, adding ripples to the gradient,
+interpolating in linear light and rounding the ramp's corner all move where the
+step is and none of them removes it, because it is a property of the primitive
+and not of the parameters.
+
+So the ring is an image now, all of it, `halo.py` — no core, no arista, only a
+falloff. What that costs is a per-segment colour, which is what carried the
+rotation. `halo` buys it back by splitting the picture into a static field of
+*how much* light reaches each pixel and a static field of *where round the ring*
+each pixel is, leaving everything the music and the palette do as a lookup table
+between them. Rotating the gradient is then rotating the table.
+
+The one thing the module here still owns is that table: what colour the ring is
+at each point of its circumference, and how much of it there is.
 """
 import colorsys
 import math
 
-from lyrica.glass import delta_e, hex_of, rgb_of
+from lyrica import halo
+from lyrica.glass import delta_e, rgb_of
 
 # Spacing is deliberately uneven, and evenly spacing it is what looked wrong
 # first. The default panel's perimeter is about 2900 px while a corner arc is
-# 28, so at any segment count cheap enough to recolour at 30 Hz a corner gets
-# less than one segment and reads as a chamfer rather than a curve. The corners
-# are therefore given a fixed budget of their own and the straights share what
-# is left by length.
+# 28, so at any segment count cheap enough to walk at 30 Hz a corner gets less
+# than one segment and reads as a chamfer rather than a curve. The corners are
+# therefore given a fixed budget of their own and the straights share what is
+# left by length.
 CORNER_POINTS = 9
 STRAIGHT_SPACING = 16.0
+
+# How finely the light's own path is sampled, against that spacing. Half, and
+# free to be: nothing walks these points to draw with any more — `halo` solves
+# the rounded rectangle rather than rasterising it — so they are the *centreline*
+# and nothing else, handed out to whatever wants to know where the light is
+# brightest and built only when something asks.
+#
+# The quantisation the sampling used to carry has moved to where it belongs.
+# Colour is looked up through one byte, so the circumference is quantised to 255
+# positions whatever the path is sampled at — about nine pixels each round the
+# default panel — and that is now the only quantisation left along the border:
+# the colour steps every nine pixels by one or two levels of 255 at the
+# gradient's steepest. The line ring stepped every sixteen, by the same amount.
+LIGHT_SPACING = 0.5
 
 # Two ways to light the edge.
 #
@@ -65,12 +96,85 @@ SHINE_SWING_OPEN = 0.62
 # that is merely *more agitated* when the music is cannot be wrong that way.
 SHINE_SPEED_GAIN = 0.55
 
-# The old ring was a single two-pixel line. It moved, but against a textured
-# artwork wash it had no spatial presence. A crisp core carries the colour and
-# a quieter wide line underneath gives it a field without covering the words.
-CORE_WIDTH = 3.0
-HALO_WIDTH = 9.0
-HALO_KEEP = 0.42
+# Where the light is, in design pixels before the window scale. All six are
+# measured from the panel's own silhouette, because there is nothing else in
+# the picture left to measure from.
+#
+# The border has been rejected eleven times and every one of those versions was
+# an *outline*: a bright ring `EDGE_INSET` = 7 px inside the panel's edge, a
+# 22 px halo laid inward across the panel's face, and a 34 px lobe outside at
+# 55 % of the peak. Given six frames of a real resize the user picked the one
+# where three quarters of the border had simply failed to repaint. That frame
+# is a defect, but as a signal it is not ambiguous: there is far too much light,
+# and the part of it that is on the panel is the part that is wrong.
+#
+# So the light is behind the panel now, and the panel occludes it.
+#
+#   EDGE_INSET   0.5 puts the field's rectangle exactly on the panel's outline
+#                — `halo` solves `a = width / 2 - inset` and the outline is at
+#                `(width - 1) / 2`. The ring *is* the silhouette; there is no
+#                second rectangle to fall out of step with it, and the mask that
+#                divides the two halves lands on the same number the field does.
+#   CREST        how far outside the silhouette the brightest pixel sits. One
+#                and a half, which is far enough that the peak lives in the
+#                companion surface — the only place in this process with real
+#                per-pixel alpha — and near enough that what it draws is still
+#                plainly the panel's own shape. It is also what answers the
+#                seam: the Tk window is presented at 0.92 alpha, so everything
+#                on the canvas side is 8 % dimmer than it was built, and with
+#                the peak out here the largest value that scaling ever touches
+#                is the 58 % of peak the boundary pixel carries.
+#   CORE_WIDTH   how wide the crest's flat top is. One pixel, which is as near
+#                to none as the closed form allows. A plateau is a line, and a
+#                line is the thing being removed.
+#   BLEED_REACH  how far the light carries back onto the panel's face — the
+#                little a frosted rim picks up from what is behind it. Four,
+#                which measures 53 of 255 one pixel in, 11 two pixels in and
+#                nothing at all four. This is the number that used to be 22,
+#                and the 22 is the whole rejection: integrated across the
+#                cross-section, the old shape laid 11.6 pixel-peaks of light on
+#                the panel's own face and this one lays 0.51 — twenty-three
+#                times less — while putting 7.2 out on the desktop against 4.2.
+#
+#                It is also the one number here that was *raised* during
+#                tuning, from three, and the picture said why: at three the
+#                climb from a tenth of the peak to nine tenths took 1.8 px and
+#                the silhouette read as a drawn stroke again. Four takes 2.3,
+#                which is a lit edge. Anything past five starts laying light on
+#                the face and gives the whole design away — see
+#                `test_the_silhouette_is_a_ramp_and_not_a_cliff`, which guards
+#                the first of those and `test_the_panel_keeps_its_own_face_dark`
+#                the second.
+#   RIM_REACH    how far the concentrated part carries outward. Twelve, and it
+#                was five first. Five is "sharp, concentrated" read literally
+#                and it photographs as a three-pixel hairline — which is a
+#                stroke, which is the thing eleven versions were rejected for.
+#                Twelve is a pool of light hugging the panel: still concentrated
+#                against the twenty-two of inward halo it replaces, but with a
+#                falloff long enough to read as light landing on a desk.
+#   SPILL_REACH  how far the faint bloom carries. Twenty-six, at 14 % of the
+#                peak (`halo.BLOOM_KEEP`) rather than the 55 % it was — long,
+#                because light with nothing in its way does go a long way, and
+#                weak, because a bloom you can name is a lamp.
+EDGE_INSET = 0.5
+CREST = 1.5
+CORE_WIDTH = 1.0
+BLEED_REACH = 4.0
+RIM_REACH = 12.0
+SPILL_REACH = 26.0
+
+# What the music does to the light's presence. The line ring pulsed its stroke
+# *widths*, which an image cannot do without rebuilding its fields; scaling the
+# whole ring's opacity moves the same thing, because the distance at which a
+# falloff stops being visible moves with how bright it started. Quantised to
+# quarters, as the widths were, so the pulse is not a new reason to repaint.
+#
+# The floor is high because the border's quiet state is what it protects. The
+# line ring's silent core measured 93 of 255 against a backdrop of 38; the
+# ridge measures 84 at 0.86 and 87 at this, which is the same light — the
+# difference is that it is now four times as wide and correspondingly softer,
+# so the peak has nothing to spare.
+PRESENCE_FLOOR = 0.90
 
 # Palette roles guarantee text contrast, not border contrast. The beam gets its
 # own perceptual floor so a cover whose accent resembles its wash cannot make
@@ -96,6 +200,52 @@ GAIN = 0.38
 COLOUR_STOP = 0.55
 GRADIENT_STEPS = 96
 
+# How finely the state that decides the table is quantised. Nothing below a step
+# reaches the canvas, so between them these decide how often the ring is asked
+# to repaint — measured 42 strip repaints a second for the shine in silence and
+# 59 with a beat under it, against a ceiling of 60 that `halo.PER_CALL` sets
+# whatever these say.
+#
+# The phase counts differ by style because what a step *does* differs. The shine
+# rotates a smooth gradient, so a step moves every point on the ring by a
+# fraction of the swing — 128 of them puts each step under two entries of the
+# 96-step gradient, which is below what an eye finds in a soft glow. The comet
+# is a head with a place, and a step moves it: 256 puts it 11 px along the
+# default panel's perimeter, against the 8 px a frame it moves anyway.
+PHASE_STEPS = {COMET: 256, SHINE: 128, AURORA: 128}
+
+# And the same for what the music does. The level is the one that moves every
+# frame, so it is the one that decides whether an idle beam is idle: 24 bands
+# over the shine's own strength range is a shade under three of the gradient's
+# 96 entries a band, which is a step in a soft glow rather than a change.
+LEVEL_STEPS = 24
+DYNAMICS_STEPS = 16
+
+
+def shape_at(weight: float) -> halo.Shape:
+    """Where the light is on a display of this weight, in physical pixels.
+
+    `weight` is the window scale times the configured intensity. Public and in
+    one place because two things ask for it — a `Beam` on every scale change,
+    and anything wanting to know how much room outside the panel the light
+    needs before there is a panel to ask.
+
+    `inset` alone is **not** scaled, and that is the one line here worth
+    reading twice. It is not a width: it is the half pixel that puts the
+    field's rectangle exactly on the panel's outline, which `halo` solves as
+    `width / 2 - inset` against an outline at `(width - 1) / 2`. Scaled with
+    the rest, a 2.0 display would push the silhouette a pixel inside itself,
+    and the mask that hands the light from the canvas to the companion would
+    cut it somewhere the region clip does not — which is a notch round every
+    corner.
+    """
+    return halo.Shape(inset=EDGE_INSET,
+                      crest=max(1.0, CREST * weight),
+                      core=max(0.5, CORE_WIDTH * weight),
+                      bleed=max(1.0, BLEED_REACH * weight),
+                      rim=max(1.5, RIM_REACH * weight),
+                      spill=max(2.0, SPILL_REACH * weight))
+
 
 def _rounded_path(width: int, height: int, radius: int, inset: float,
                   spacing: float = STRAIGHT_SPACING) -> list[tuple[float, float]]:
@@ -107,19 +257,9 @@ def _rounded_path(width: int, height: int, radius: int, inset: float,
 
     `spacing` is in physical pixels and the caller scales it, so that the
     density is constant in design units rather than on the glass. Left at the
-    unscaled default a Ctrl+Alt+plus bought segments nobody asked for and paid
-    for them on every frame for the rest of the session: the default panel went
-    from 176 segments to 316 at 2.0, and `advance` walks every one of them at
-    60 Hz whether or not the window is moving — measured 5.3 ms a frame for the
-    comet against 3.3 once the spacing scales, on a 16 ms budget.
-
-    It cuts the other way at 0.6, and deliberately: that panel goes from 120
-    segments to the same 176, taking the comet from 2.0 ms a frame to 2.9 —
-    which is what the default panel already costs. Constant density is the
-    point of it rather than a smaller number in every direction. A
-    small window was drawing a *coarser* ring than the default one in the units
-    the design is written in, and the corners already worked this way — they
-    have a fixed point budget of their own and never read the spacing at all.
+    unscaled default a Ctrl+Alt+plus bought points nobody asked for: the default
+    panel went from 176 to 316 at 2.0, and every one of them is a line drawn
+    into the light's fields when the panel changes size.
     """
     left, top = inset, inset
     right, bottom = width - inset, height - inset
@@ -146,60 +286,105 @@ def _rounded_path(width: int, height: int, radius: int, inset: float,
             + arc(left + r, top + r, math.pi))
 
 
-def _gradient(palette, steps: int = GRADIENT_STEPS) -> list[str]:
-    """From invisible, through the song's colour, to the head.
-
-    The first entry is the *backdrop* rather than the palette's dimmest text
-    colour, and that distinction is the whole effect. Lit from the lyric ramp,
-    the unlit part of the ring was drawn at the unsung level — a pale border all
-    the way round, with the head barely brighter than it. A travelling light
-    needs somewhere dark to travel through.
-    """
-    dark = tuple(palette.backdrop)
-    # The beam's own mid, not the unsung line's. They were the same number until
-    # the unlit text was brightened for legibility, at which point the ring lost
-    # the dark ground the head needs to travel through.
-    head = rgb_of(palette.sung)
-    mid = rgb_of(palette.beam)
-    if delta_e(dark, mid) < MIN_BEAM_DE:
-        # Move only as far toward the already-safe sung role as visibility
-        # requires. The hue survives; only a disappearing accent is corrected.
-        for k in range(1, 21):
-            amount = k / 20
-            candidate = tuple(a + (b - a) * amount
-                              for a, b in zip(mid, head, strict=True))
-            if delta_e(dark, candidate) >= MIN_BEAM_DE:
-                mid = candidate
-                break
-    out = []
-    for i in range(steps):
-        t = i / (steps - 1)
-        if t < COLOUR_STOP:
-            k, src, dst = t / COLOUR_STOP, dark, mid
-        else:
-            k, src, dst = (t - COLOUR_STOP) / (1 - COLOUR_STOP), mid, head
-        out.append(hex_of(tuple(s + (d - s) * k
-                                for s, d in zip(src, dst, strict=True))))
-    return out
-
-
 def _lerp(a: tuple, b: tuple, amount: float) -> tuple:
     amount = max(0.0, min(1.0, amount))
     return tuple(x + (y - x) * amount for x, y in zip(a, b, strict=True))
 
 
-def _mix(a: tuple, b: tuple, amount: float) -> str:
-    return hex_of(_lerp(a, b, amount))
+def _beam_colour(palette) -> tuple:
+    """The song's colour, moved only as far as visibility against the wash needs.
+
+    Palette roles are solved for text contrast, so a cover whose accent sits
+    close to its own wash can hand the border a colour that vanishes into it.
+    The correction walks toward the already-safe sung role and stops at the
+    first step that clears the floor, so the hue survives and only a
+    disappearing accent is changed.
+    """
+    dark = tuple(palette.backdrop)
+    mid = rgb_of(palette.beam)
+    if delta_e(dark, mid) >= MIN_BEAM_DE:
+        return mid
+    head = rgb_of(palette.sung)
+    for k in range(1, 21):
+        candidate = _lerp(mid, head, k / 20)
+        if delta_e(dark, candidate) >= MIN_BEAM_DE:
+            return candidate
+    return head
+
+
+def _ramp(palette, steps: int = GRADIENT_STEPS) -> list[tuple[tuple, float]]:
+    """From invisible, through the song's colour, to the head — as light.
+
+    Each entry is a colour and how much of it there is, and the split matters.
+    The line ring had to say the same thing in one opaque colour, so "invisible"
+    was spelled as *the backdrop colour, painted*: a flat patch laid over a
+    textured cover wash, which is only invisible where the wash happens to agree
+    with the palette's idea of it. Here the dim end of the ramp is the song's
+    colour at no opacity, so the wash comes through it untouched.
+
+    The bright end stays at full opacity and moves in hue instead, up to the
+    sung colour, because that end is a light and not an absence of one.
+    """
+    mid = _beam_colour(palette)
+    head = rgb_of(palette.sung)
+    out = []
+    for i in range(steps):
+        t = i / (steps - 1)
+        if t < COLOUR_STOP:
+            out.append((mid, t / COLOUR_STOP))
+        else:
+            k = (t - COLOUR_STOP) / (1 - COLOUR_STOP)
+            out.append((_lerp(mid, head, k), 1.0))
+    return out
+
+
+def _along(ramp: list[tuple], t: float) -> tuple:
+    """The ramp at `t` in 0..1, read between its entries rather than at one.
+
+    The table has ends — it runs from invisible to the head and does not close —
+    so this is a plain interpolation with no wrap to worry about, unlike the
+    position field `halo` indexes it by.
+
+    Reading it by `int(t * (steps - 1))` was the second of the two staircases
+    the border had. Ninety-six entries over a swing the shine only uses a
+    fraction of leaves a handful of distinct colours round the whole ring: the
+    default panel in silence used five of them, so the edge stepped by two or
+    three levels every few hundred pixels. What the table describes between its
+    entries is two straight lines with one knee, so interpolating it is not an
+    approximation of the intended colour — it *is* the intended colour, to
+    within the one cell the knee falls in.
+    """
+    at = max(0.0, min(1.0, t)) * (len(ramp) - 1)
+    low = min(int(at), len(ramp) - 2)
+    (red, green, blue), amount = ramp[low]
+    (to_red, to_green, to_blue), to_amount = ramp[low + 1]
+    k = at - low
+    # Spelled out rather than handed to `_lerp`, which zips and rebuilds a
+    # tuple: this runs 255 times for every table and the table is rebuilt
+    # whenever the music moves a step, so it is one of the few places in this
+    # module where the shape of the arithmetic is worth more than its brevity.
+    return ((red + (to_red - red) * k, green + (to_green - green) * k,
+             blue + (to_blue - blue) * k),
+            amount + (to_amount - amount) * k)
+
+
+def _around(wheel: list[tuple], turn: float) -> tuple:
+    """The hue wheel at `turn` in 0..1, read between its entries.
+
+    Unlike `_along` this table *is* a ring — entry 0 follows the last one — so
+    the pair being interpolated wraps with it rather than clamping at the end.
+    """
+    at = (turn % 1.0) * len(wheel)
+    low = int(at)
+    red, green, blue = wheel[low % len(wheel)]
+    to_red, to_green, to_blue = wheel[(low + 1) % len(wheel)]
+    k = at - low
+    return (red + (to_red - red) * k, green + (to_green - green) * k,
+            blue + (to_blue - blue) * k)
 
 
 def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[tuple]:
-    """Neighbouring hues from the song colour, closed into a seamless ring.
-
-    Kept as RGB tuples rather than hex. These are never drawn as they stand —
-    every frame mixes them against the backdrop — so formatting them here only
-    bought a `rgb_of` per segment per frame to parse them straight back, which
-    is 210 round trips a frame on the default panel for no gain.
-    """
+    """Neighbouring hues from the song colour, closed into a seamless ring."""
     base = tuple(channel / 255 for channel in rgb_of(palette.beam))
     hue, saturation, value = colorsys.rgb_to_hsv(*base)
     saturation = max(0.28, saturation)
@@ -218,241 +403,203 @@ def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[tuple]:
 
 
 class Beam:
-    """The ring of segments, and the state to colour them."""
+    """The ring of light, and the state that decides what colour it is where."""
 
     def __init__(self, canvas, width: int, height: int, radius: int,
                  scale: float = 1.0, style: str = COMET,
-                 intensity: float = 1.0):
+                 intensity: float = 1.0, glow=None):
         self.canvas = canvas
         self.style = style
         self.intensity = max(0.5, min(2.0, intensity))
         self._phase = 0.0
-        self._items: list[int] = []
-        self._halo_items: list[int] = []
-        self._shades: list[str] = []
-        self._halo_shades: list[str] = []
-        self._core_tag = f"beam-core-{id(self)}"
-        self._halo_tag = f"beam-halo-{id(self)}"
-        self._gradient: list[str] = []
+        self._panel: tuple | None = None
+        self._ramp: list[tuple] = []
         self._aurora: list[tuple] = []
-        self._halos: dict[str, str] = {}
         self._palette = None
+        self._state = None
+        self._tables: tuple = ()
+        # `glow` is a surface for the half of the light that falls outside the
+        # window, or None where the platform has none to offer. It is handed
+        # through to `halo.Ring` rather than driven from here on purpose: the
+        # four tables a frame produces describe the whole circumference, and
+        # both halves have to be looked up through the same tables on the same
+        # strip in the same call or the border is one colour inside the panel
+        # and another outside it. Driving them from two places here would make
+        # that a matter of call order. See decision 9.6.
+        self.light = halo.Ring(canvas, glow)
         self.set_scale(scale)
         self.reshape(width, height, radius)
 
-    def set_scale(self, scale: float) -> None:
-        """Re-derive the line widths for a window whose scale changed.
+    @property
+    def pad(self) -> int:
+        """How far outside the panel the light reaches, in physical pixels."""
+        return halo.pad_of(self.shape)
 
-        Deliberately not folded into `reshape`, and not called from it: only
-        the caller knows whether the scale moved. `reshape` runs once a frame
+    def place(self, x: int, y: int) -> None:
+        """The panel's top-left corner moved or changed size. Follow it."""
+        self.light.place(x, y)
+
+    def follow(self, x: int, y: int) -> None:
+        """The same, under a hand: the cheaper half, with no bitmap handed over."""
+        self.light.follow(x, y)
+
+    def behind(self, hwnd: int | None) -> None:
+        """Keep the outward half directly under the panel in the z-order."""
+        if hwnd and self.light.spill is not None:
+            self.light.spill.behind(hwnd)
+
+    def visible(self, shown: bool) -> None:
+        """Go away with the panel, and come back with it."""
+        if self.light.spill is not None:
+            self.light.spill.visible(shown)
+
+    def set_scale(self, scale: float) -> None:
+        """Re-derive the light's shape for a window whose scale changed.
+
+        Deliberately not folded into `reshape`, and not called from it: only the
+        caller knows whether the scale moved. `reshape` runs once a frame
         through the collapse animation, where the geometry changes every frame
         and the scale never does.
 
         Until this existed the widths were fixed at construction, so after a
         Ctrl+Alt+plus the ring carried the new geometry at the old thickness —
         half as thick as it should be at 2.0, nearly twice at 0.6 — and since
-        `reshape` insets the path by `_halo_width / 2`, the ring also sat wrong
+        the path is inset by a share of the reach, the ring also sat wrong
         against a corner radius that had scaled properly.
         """
         self.scale = scale
-        self._core_width = max(1.0, CORE_WIDTH * scale * self.intensity)
-        self._halo_width = max(self._core_width, HALO_WIDTH * scale * self.intensity)
-        # The pulsed width only reaches the canvas when the level crosses a
-        # quartile, so without this the new base widths would wait for the
-        # music to happen to change band before showing up.
-        self._width_state = None
+        weight = scale * self.intensity
+        self.shape = shape_at(weight)
+
+    @property
+    def _points(self) -> list[tuple]:
+        """The path the light is centred on, clockwise from the top left.
+
+        Derived on demand rather than kept, because nothing in the drawing needs
+        it: `halo` is handed the rectangle and solves it. What still wants it is
+        anything asking *where* the border is — which, at an `inset` of half a
+        pixel, is the panel's own silhouette. The light does not sit on this
+        line. It sits `CREST` pixels outside it, which is the point.
+        """
+        if self._panel is None:
+            return []
+        width, height, radius = self._panel
+        return _rounded_path(width, height, radius, self.shape.inset,
+                             STRAIGHT_SPACING * self.scale * LIGHT_SPACING)
 
     def reshape(self, width: int, height: int, radius: int) -> None:
-        """Lay the ring out again, for a window that changed size.
+        """Lay the light out again, for a window that changed size.
 
-        A pool, not a rebuild. The geometry is a pure function of the size, but
-        the *number* of segments barely moves between consecutive frames of a
-        collapse — measured 176, 176, 174, 172, 172, 168 … 114 across the
-        twenty-one frames of the default panel folding to compact. Tearing the
-        ring down and laying it again spent 352 `delete` plus 352 `create_line`
-        on every one of those frames to end up with items in the same places;
-        moving the ones already there costs 352 `coords` and creates or deletes
-        only the handful the count actually moved by — four `create_line` on a
-        frame of the unfold, none at all on a frame of the collapse. Measured
-        704 canvas calls a frame down to 352, and 3.0 ms a frame down to 0.7 on
-        this machine, in both directions, against a resize budget of 16 ms that
-        the neighbouring work had already taken to 30.8.
+        The whole cost of the border lives here rather than in `advance`, which
+        is the trade `halo` is built on: the two fields and the four strips are
+        derived once per size and then only looked up.
+
+        That is the one place this variant is dearer than the line ring, and it
+        is paid on every frame of a collapse. Measured over the twenty-one
+        frames of the default panel folding to compact, reshape plus the frame's
+        own advance: 4.19 ms a frame against 1.78 for relaying and recolouring
+        352 line items. The unfold asks for the same twenty-one sizes in the
+        other order, so `halo`'s cache answers all of it and the same measurement
+        comes back 1.11 ms — cheaper than the ring it replaced, in the direction
+        that is asked for twice.
         """
-        points = _rounded_path(width, height, radius, self._halo_width / 2,
-                               STRAIGHT_SPACING * self.scale)
-        segments = [(start, points[(i + 1) % len(points)])
-                    for i, start in enumerate(points)]
-        kept = min(len(self._items), len(segments))
-        for index in range(kept):
-            (x0, y0), (x1, y1) = segments[index]
-            self.canvas.coords(self._halo_items[index], x0, y0, x1, y1)
-            self.canvas.coords(self._items[index], x0, y0, x1, y1)
-        # `_shades` and `_halo_shades` are deliberately left as they are for
-        # these. Since `f1d4928` they are `_paint`'s only proof of what the
-        # canvas is actually carrying, and a moved item keeps its fill — so the
-        # entry still describes it truthfully, which is the only property the
-        # early return needs. Reseeding them with the sentinel would not be
-        # wrong, just wasteful: it would force all 352 items to be rewritten on
-        # the very next frame, which is the cost this pool exists to avoid.
-        # Whether the colour is still *appropriate* is a different question and
-        # not this one's: `advance` recomputes every segment's shade from
-        # `i / count` regardless, and writes wherever the answer differs, so a
-        # ring whose count changed repaints exactly the segments that moved
-        # through the gradient.
-        for index in range(kept, len(self._items)):
-            self.canvas.delete(self._halo_items[index])
-            self.canvas.delete(self._items[index])
-        del self._halo_items[kept:], self._halo_shades[kept:]
-        del self._items[kept:], self._shades[kept:]
-
-        # Every halo first, then every core. Interleaving them lets the wide
-        # halo of segment N+1 cover the end of core N, turning a continuous
-        # gradient into a dashed line at every join.
-        for start, end in segments[kept:]:
-            halo = self.canvas.create_line(*start, *end, width=self._halo_width,
-                                           fill="#000000", capstyle="round",
-                                           tags=(self._halo_tag,))
-            self._halo_items.append(halo)
-            # The empty string, not the fill just given, because `_paint` now
-            # takes an unchanged core shade as proof the halo is unchanged too.
-            # Seeding both with "#000000" made that a lie for any backdrop that
-            # is not black: the core would match on the first frame and the
-            # halo would be left at the creation fill for good.
-            self._halo_shades.append("")
-        for start, end in segments[kept:]:
-            core = self.canvas.create_line(*start, *end, width=self._core_width,
-                                           fill="#000000", capstyle="round",
-                                           tags=(self._core_tag,))
-            self._items.append(core)
-            self._shades.append("")
-        if len(segments) > kept:
-            # New items land on top of the display list, so a ring that grew
-            # would have its fresh halos sitting over the cores that were
-            # already there — the dashed-join defect above, but only on the
-            # part of the ring that is new. One tag-wide lower puts the whole
-            # halo group back under the whole core group and preserves the
-            # order within each, so it is enough to say it once.
-            self.canvas.tag_lower(self._halo_tag, self._core_tag)
-            # Fresh segments are created at the base width, so the pulse has to
-            # be reasserted; otherwise a ring rebuilt mid-song stays unpulsed
-            # until the level next crosses a quartile. Only when there are
-            # fresh segments, though: the reused ones are still carrying the
-            # width the last frame gave them, and reasserting costs two
-            # tag-wide `itemconfigure`s that touch every item on the ring.
-            self._width_state = None
+        self._panel = (width, height, radius)
+        self.light.reshape(width, height, radius, self.shape)
 
     def destroy(self) -> None:
-        for item in (*self._items, *self._halo_items):
-            self.canvas.delete(item)
-        self._items.clear()
-        self._halo_items.clear()
-        self._shades.clear()
-        self._halo_shades.clear()
+        self.light.destroy()
+        self._panel = None
 
     def advance(self, dt: float, music, palette) -> None:
-        """Move the head and recolour the ring.
+        """Move the phase and, if anything visible moved with it, repaint.
 
         `music` carries the level and, for the shine, what the music has been
-        doing around it. The gradient is derived from the palette, so the beam
-        wears the cover's colour, and rebuilt only when the palette changes.
+        doing around it. The ramp is derived from the palette, so the beam wears
+        the cover's colour, and rebuilt only when the palette changes.
         """
-        if not self._items:
+        if not self.light.strips:
             return
         if palette is not self._palette:
             self._palette = palette
-            self._gradient = _gradient(palette)
+            self._ramp = _ramp(palette)
             self._aurora = _aurora_colours(palette)
-            # The halo memo is keyed on the core shade alone, so it is only
-            # valid for one backdrop. It dies with the gradient it was built
-            # against.
-            self._halos = {}
-            self._shades = [""] * len(self._items)   # force a full repaint
-            self._halo_shades = [""] * len(self._items)
+            self._state = None
 
         level = max(0.0, min(1.0, getattr(music, "level", music)))
         dynamics = max(0.0, min(1.0, getattr(music, "dynamics", 0.0)))
         rate = max(0.0, min(1.0, getattr(music, "rate", 0.0)))
-        top = len(self._gradient) - 1
-        count = len(self._items)
-
-        width_state = round((level * 0.7 + dynamics * 0.3) * 4)
-        if width_state != self._width_state:
-            self._width_state = width_state
-            pulse = width_state / 4
-            self.canvas.itemconfigure(
-                self._core_tag, width=self._core_width * (1.0 + 0.22 * pulse))
-            self.canvas.itemconfigure(
-                self._halo_tag, width=self._halo_width * (0.82 + 0.38 * pulse))
 
         if self.style == AURORA:
             period = AURORA_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-            self._phase = (self._phase + dt / period) % 1.0
-            strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
-            for i, item in enumerate(self._items):
-                turn = (i / count + self._phase) % 1.0
-                colour = self._aurora[int(turn * len(self._aurora))
-                                      % len(self._aurora)]
-                wave = 0.72 + 0.28 * math.cos(2 * math.pi * (turn - self._phase))
-                shade = _mix(tuple(palette.backdrop), colour, strength * wave)
-                self._paint(i, item, shade, palette)
-            return
-
-        if self.style == SHINE:
+        elif self.style == SHINE:
             # Busier music turns it faster; nothing here claims to know a beat.
             period = SHINE_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-            self._phase = (self._phase + dt / period) % 1.0
+        else:
+            period = PERIOD_S
+        self._phase = (self._phase + dt / period) % 1.0
+
+        # The phase keeps moving continuously and only the *table* is
+        # quantised, so the rate still reaches the rotation between two steps
+        # of it — a beam whose phase itself were rounded would stand still
+        # under any dt small enough.
+        steps = PHASE_STEPS.get(self.style, PHASE_STEPS[SHINE])
+        state = (int(self._phase * steps) % steps, round(level * LEVEL_STEPS),
+                 round(dynamics * DYNAMICS_STEPS))
+        if state != self._state:
+            self._state = state
+            self._tables = self._lit(state[0] / steps, level, dynamics)
+        self.light.paint(self._tables)
+
+    def _lit(self, phase: float, level: float, dynamics: float) -> tuple:
+        """Red, green, blue and opacity round the ring, as four byte tables.
+
+        Indexed by how far round the circumference a pixel is, which is what
+        `halo` stores per pixel and never has to store again. Entry 0 is the
+        byte that field keeps for "no ring near here", so it is left at no
+        opacity whatever the style decides — a pixel the band missed is
+        invisible rather than wrongly coloured.
+        """
+        size = halo.LUT_SIZE
+        red, green, blue = [0] * size, [0] * size, [0] * size
+        opacity = [0] * size
+        # Quantised to quarters, as the line ring's stroke widths were, so the
+        # pulse cannot be a reason to repaint that the phase was not already.
+        pulse = round((level * 0.7 + dynamics * 0.3) * 4) / 4
+        presence = PRESENCE_FLOOR + (1.0 - PRESENCE_FLOOR) * pulse
+        span = size - 1                       # positions 1 .. size - 1
+
+        if self.style == AURORA:
+            wheel = len(self._aurora)
+            strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
+        elif self.style == SHINE:
             strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
             swing = SHINE_SWING_FLAT + (SHINE_SWING_OPEN - SHINE_SWING_FLAT) * dynamics
             base = 1.0 - swing
-            for i, item in enumerate(self._items):
+        else:
+            strength = FLOOR + GAIN * level
+
+        for index in range(1, size):
+            turn = (index - 1) / span
+            if self.style == AURORA:
+                colour = self._aurora[int(((turn + phase) % 1.0) * wheel) % wheel]
+                # A cosine over the ring's own circumference, so the wave is
+                # carried round by the hue rather than standing still under it.
+                amount = strength * (0.72 + 0.28 * math.cos(2 * math.pi * turn))
+            elif self.style == SHINE:
                 # A cosine rather than a sawtooth: the ring closes on itself, so
                 # a gradient that ran end to end would show a seam where it
                 # wrapped. This one has no ends.
-                turn = (i / count) * SHINE_CYCLES + self._phase
-                wave = 0.5 + 0.5 * math.cos(2 * math.pi * turn)
-                shade = self._gradient[int(top * (base + swing * wave) * strength)]
-                self._paint(i, item, shade, palette)
-            return
-
-        self._phase = (self._phase + dt / PERIOD_S) % 1.0
-
-        strength = FLOOR + GAIN * level
-        for i, item in enumerate(self._items):
-            # Distance behind the head, once round the ring.
-            behind = (self._phase - i / count) % 1.0
-            glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
-            shade = self._gradient[int(top * glow * strength)]
-            self._paint(i, item, shade, palette)
-
-    def _paint(self, index: int, item: int, shade: str, palette) -> None:
-        """Paint the crisp ring and its quieter field only when either changed."""
-        if shade == self._shades[index]:
-            # The halo is a pure function of the core shade and the backdrop,
-            # and a backdrop only changes with the palette, which forces a full
-            # repaint above — so an unchanged shade cannot want a changed halo.
-            # The Tcl writes were already guarded; the *arithmetic* was not, and
-            # a comet leaves 86% of the ring alone (TAIL = 0.14). Those segments
-            # each paid rgb_of + a three-channel mix + a str.format every frame
-            # to arrive back at the string already on the canvas: about 10,500
-            # discarded formats a second at 60 Hz on the default panel, and it
-            # grows with the perimeter.
-            return
-        self.canvas.itemconfigure(item, fill=shade)
-        self._shades[index] = shade
-        halo = self._halos.get(shade)
-        if halo is None:
-            # Bounded by construction for the comet and the shine, which only
-            # ever hand over one of the gradient's 96 entries — measured 95 and
-            # 69 distinct shades across five minutes at 60 Hz. The aurora mixes
-            # its own shade per segment and per level and has no such ceiling:
-            # 13,307 over the same five minutes. So the memo is dropped whole
-            # rather than left to creep. A clear every couple of minutes costs
-            # the aurora a few hundred rebuilt entries and nothing else; the
-            # other two styles never reach it.
-            if len(self._halos) > 4096:
-                self._halos.clear()
-            halo = self._halos[shade] = _mix(tuple(palette.backdrop),
-                                             rgb_of(shade), HALO_KEEP)
-        if halo != self._halo_shades[index]:
-            self.canvas.itemconfigure(self._halo_items[index], fill=halo)
-            self._halo_shades[index] = halo
+                wave = 0.5 + 0.5 * math.cos(
+                    2 * math.pi * (turn * SHINE_CYCLES + phase))
+                colour, amount = _along(self._ramp,
+                                        (base + swing * wave) * strength)
+            else:
+                # Distance behind the head, once round the ring.
+                behind = (phase - turn) % 1.0
+                glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
+                colour, amount = _along(self._ramp, glow * strength)
+            red[index] = min(255, max(0, round(colour[0])))
+            green[index] = min(255, max(0, round(colour[1])))
+            blue[index] = min(255, max(0, round(colour[2])))
+            opacity[index] = min(255, max(0, round(255 * amount * presence)))
+        return (red, green, blue, opacity)

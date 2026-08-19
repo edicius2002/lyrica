@@ -288,6 +288,44 @@ def move(root: tk.Tk, x: int, y: int) -> None:
     root.geometry(f"+{max(0, int(x))}+{max(0, int(y))}")
 
 
+def window_handle(root: tk.Tk) -> int | None:
+    """The platform's own handle for a Tk window, or None where there is none."""
+    if sys.platform != "win32":
+        return None
+    from lyrica.chrome import windows as win
+    return win.handle(root)
+
+
+def glow_surface(root: tk.Tk):
+    """A companion window for the light that falls outside the panel, or None.
+
+    The overlay is clipped to a rounded rectangle by `SetWindowRgn`, which is
+    one bit per pixel, so nothing drawn on its canvas can reach a pixel outside
+    it — and a border whose light stops dead at the window's edge is the whole
+    reason the border read as plastic. Tk offers `-alpha` and
+    `-transparentcolor` and neither is per-pixel alpha, so this cannot come
+    from Tk at all; `chrome/layered.py` carries the reasoning and the
+    measurements.
+
+    **None is a working overlay, not a broken one.** Off Windows there is no
+    `UpdateLayeredWindow`, and on Windows the call can still be refused; either
+    way the border falls back to what it was — the inward half only, ending at
+    the window's edge. That is the shape the panel wore for its whole life
+    until now, so it is a smaller loss than an overlay that refuses to start.
+    """
+    if sys.platform != "win32":
+        return None
+    from lyrica.chrome import layered
+    from lyrica.chrome import windows as win
+    try:
+        made = layered.Layered(1, 1)
+        made.behind(win.handle(root))
+    except OSError:
+        logger.info("the companion glow window was refused", exc_info=True)
+        return None
+    return made
+
+
 def shape(root: tk.Tk, chrome: Chrome, width: int, height: int) -> bool:
     """Clip the window to rounded corners. **Call after the geometry is set.**
 

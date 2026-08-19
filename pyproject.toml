@@ -14,6 +14,12 @@ dependencies = [
     # Decoding and blurring the album art. tkinter reads neither JPEG nor a
     # blur, and the backdrop needs both.
     "pillow>=10",
+    # The border. Its field is an exact profile evaluated per pixel over a
+    # signed distance, which is a few million floats a rebuild — a Python loop
+    # is three orders of magnitude too slow for a frame. It was an optional
+    # accelerator while the light was a blurred mask; since the light became
+    # arithmetic it is the only way `halo` runs at all.
+    "numpy>=1.26",
     # Windows only: it has no wheels elsewhere, and installing it unconditionally
     # is what would stop the package installing on a Mac at all.
     "winsdk>=1.0.0b10; sys_platform == 'win32'",

@@ -14,9 +14,10 @@ import time
 import tkinter as tk
 from pathlib import Path
 
-from PIL import ImageGrab
+import numpy as np
+from PIL import ImageColor, ImageGrab
 
-from lyrica import bloom
+from lyrica import bloom, halo
 from lyrica.app import (
     ECHO_CORNER_INSET,
     ECHO_KEEP,
@@ -25,7 +26,7 @@ from lyrica.app import (
     ROW_GAP,
     VOICE_SAFE_MARGIN,
 )
-from lyrica.beam import SHINE, Beam
+from lyrica.beam import SHINE, Beam, shape_at
 from lyrica.chrome import prepare
 from lyrica.lineview import GROW_ATTACK_S, LineView
 from lyrica.meter import Character
@@ -35,6 +36,67 @@ WIDTH, HEIGHT = 900, 320
 BACKGROUND = "#10131a"
 FONT = ("Segoe UI", -30, "bold")
 SMALL = ("Segoe UI", -20, "italic")
+
+
+class _Surface:
+    """The companion window, in memory: the five calls `halo.Spill` makes on it.
+
+    Not a mock — it reproduces the one property the code leans on here, a
+    surface that survives between frames, so the composite can read back what
+    the outward strips actually wrote.
+    """
+
+    def __init__(self):
+        import numpy as np
+
+        self._np = np
+        self.capacity = (0, 0)
+        self._frame = None
+
+    def reserve(self, width, height):
+        if width <= self.capacity[0] and height <= self.capacity[1]:
+            return False
+        width, height = max(width, self.capacity[0]), max(height, self.capacity[1])
+        self._frame = self._np.zeros((height, width, 4), self._np.uint8)
+        self.capacity = (width, height)
+        return True
+
+    def frame(self):
+        return self._frame
+
+    def present(self, *_a): pass
+    def move(self, *_a): pass
+    def behind(self, *_a): pass
+    def visible(self, *_a): pass
+    def destroy(self): pass
+
+
+def _straight(surface):
+    """The surface's premultiplied BGRA as the straight RGBA PIL composites with.
+
+    `UpdateLayeredWindow` wants the colours already multiplied by their alpha
+    and `halo.Spill` folds that into the lookup table, where it is free. PIL
+    wants them unmultiplied, so this is the one place in the repository that
+    ever divides it back out.
+    """
+    from PIL import Image
+
+    alpha = surface[..., 3:4].astype(np.float32)
+    colour = np.where(alpha > 0,
+                      surface[..., 2::-1].astype(np.float32) * 255.0
+                      / np.maximum(alpha, 1e-6), 0.0)
+    out = np.concatenate([np.clip(colour, 0, 255), alpha], axis=2)
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
+def _rounded(width: int, height: int, radius: int):
+    """The panel's own footprint, the way `SetWindowRgn` cuts it."""
+    from PIL import Image, ImageDraw
+
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1),
+                                           radius=radius, fill=255)
+    return mask
 
 
 def words(text: str, start: float = 0.0) -> list:
@@ -139,10 +201,47 @@ class Renderer:
         following.destroy()
 
     def beam(self, name: str, character: Character) -> None:
+        """Composed in PIL rather than grabbed off the glass.
+
+        The border is images now, so its frame can be assembled from the exact
+        pixels both windows would be handed — which is both more faithful than a
+        screen capture and free of the two things a capture costs: a visible
+        window that something else can land on top of, and a dependence on
+        whatever the compositor did to the panel on the way to the screen.
+
+        **Both** windows. The panel no longer carries the light: it occludes it,
+        and what a reviewer has to see is what escapes round the outside. So the
+        panel is drawn inset by the light's own reach inside a frame of the
+        committed size, with a companion surface underneath it, rather than
+        filling the frame with the canvas half alone — which since the light
+        went behind the panel would be a picture of four dark edges.
+        """
+        from PIL import Image
+
         self.clear()
-        ring = Beam(self.canvas, WIDTH, HEIGHT, 18, 1.0, SHINE)
+        surface = _Surface()
+        pad = halo.pad_of(shape_at(1.0))
+        inner = (WIDTH - 2 * pad, HEIGHT - 2 * pad)
+        ring = Beam(self.canvas, inner[0], inner[1], 18, 1.0, SHINE,
+                    glow=surface)
         ring.advance(0.7, character, DEFAULT)
-        self.capture(name)
+        # Every strip. `halo.PER_CALL` bounds what a *frame* may repaint; a
+        # still of one strip's worth of border is a still of the animation's
+        # worst moment rather than of the border.
+        for _ in range(len(ring.light.strips) * 2):
+            ring.light.paint(ring._tables)
+
+        ground = (*ImageColor.getrgb(BACKGROUND), 255)
+        frame = Image.new("RGBA", (WIDTH, HEIGHT), ground)
+        frame.alpha_composite(_straight(surface.frame()[:HEIGHT, :WIDTH]))
+        plate = Image.new("RGBA", inner, ground)
+        for strip in ring.light.strips:
+            if strip.box is not None:
+                plate.alpha_composite(ring.light.image(strip, ring._tables),
+                                      (strip.box[0], strip.box[1]))
+        plate.putalpha(_rounded(*inner, 18))
+        frame.alpha_composite(plate, (pad, pad))
+        frame.convert("RGB").save(self.output / f"{name}.png")
         ring.destroy()
 
     def close(self) -> None:
