@@ -32,3 +32,9 @@ desktop.ini
 # eye, not source, and they are re-takeable by running the probe beside them —
 # which is the half that is versioned (decision 5.3).
 research/shots/
+
+# Pages fetched by hand while working on a provider. Two of them reached a
+# commit and sat in the repository root for eleven days, one of which was a
+# Cloudflare interstitial and the other 1.7 MB of scraped HTML.
+*.html
+!docs/**/*.html
