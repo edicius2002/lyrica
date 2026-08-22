@@ -106,7 +106,23 @@ INCOMING_FADE_S = 0.22
 # Its two other bounds are satisfied with room to spare: the departing line
 # still reaches zero visibility before the clamp (needs <= 190), and the active
 # line's own halo still clears the card (needs >= 99).
+#
+# Taken to a whole pixel where it is applied. `move_to` shifts by a rounded
+# delta, so a row can only ever stand on one, and a fraction here put every
+# resting target somewhere no row could be — two representations of the same
+# pixel, disagreeing. It did not show before only because the band was short
+# enough that the clamp caught the upcoming row and handed back an integer.
 ANCHOR = 0.45
+
+
+def _anchor_y(height: int) -> int:
+    """Where the line being sung rests, in whole pixels, for a given height.
+
+    One place rather than three. `move_to` shifts by a rounded delta, so a row
+    only ever stands on a whole pixel; taking the fraction here is what keeps
+    every resting target stacked off this one somewhere a row can actually be.
+    """
+    return round(height * ANCHOR)
 
 FONT_TITLE = ("Segoe UI Semibold", -20)
 FONT_ARTIST = ("Segoe UI", -16)
@@ -625,7 +641,7 @@ class Overlay:
         # being rebuilt on every tick just to measure a string.
         self._title_font = tkfont.Font(font=self.f_title)
         self._artist_font = tkfont.Font(font=self.f_artist)
-        self.anchor_y = self.height * ANCHOR
+        self.anchor_y = _anchor_y(self.height)
 
         # Clamped rather than computed and trusted: screen metrics and window
         # size can disagree about whether they are logical or device pixels, and
@@ -1205,7 +1221,7 @@ class Overlay:
         else:
             keep, top = anchor
         self.width, self.height = width, height
-        self.anchor_y = self.height * ANCHOR
+        self.anchor_y = _anchor_y(self.height)
         # Clamp against the monitor that already owns the panel, including its
         # lower edge.  The old code guarded only the top and horizontal virtual
         # desktop: a compact card parked near the taskbar expanded downward off
@@ -1425,7 +1441,7 @@ class Overlay:
             self._scale_gliding = True
         else:
             self.width, self.height = target
-            self.anchor_y = self.height * ANCHOR
+            self.anchor_y = _anchor_y(self.height)
             chrome_mod.place(self.root, x, y, self.width, self.height)
             self.canvas.configure(width=self.width, height=self.height)
             # After the geometry, never before: the clip region is in device
