@@ -84,9 +84,45 @@ INCOMING_VISIBILITY_FLOOR = 0.80
 INCOMING_FADE_S = 0.22
 
 # Where the line being sung sits, as a fraction of the window height. Derived
-# rather than chosen: low enough that the line above clears the card and its
-# fade band, high enough that the line below clears the bottom one.
-ANCHOR = 0.55
+# rather than chosen, and derived from the band below rather than from the band
+# above: what has to fit under the line being sung is a backing vocal *and* the
+# upcoming line, and what has to fit over it is a departure.
+#
+# The old 0.55 was derived from the wrong end. It reserved 88 px above for the
+# preceding line, which at rest never has any: its resting slot puts its halo
+# past `_content_top`, so `_visibility` returns zero for it in every layout —
+# measured, not reasoned. That row is only ever seen mid-glide, on its way out.
+# Meanwhile the band below was short, and `_safe_view_y` paid for it by lifting
+# a wrapped upcoming row into the gap the ad-lib had been promised.
+#
+# So the fraction is what leaves the lower band whole, at the nominal size and
+# for the worst layout that has to hold all three: a one-row lead, a response,
+# and an upcoming line that wrapped to two rows and is therefore already at its
+# lowest safe position. Walking that up — its glyph box, the response's, the
+# gap either side, the lead — lands on 144 of 320. The symmetric case, a
+# two-row lead over a one-row preview, has the same total height and lands on
+# the same number.
+#
+# Its two other bounds are satisfied with room to spare: the departing line
+# still reaches zero visibility before the clamp (needs <= 190), and the active
+# line's own halo still clears the card (needs >= 99).
+#
+# Taken to a whole pixel where it is applied. `move_to` shifts by a rounded
+# delta, so a row can only ever stand on one, and a fraction here put every
+# resting target somewhere no row could be — two representations of the same
+# pixel, disagreeing. It did not show before only because the band was short
+# enough that the clamp caught the upcoming row and handed back an integer.
+ANCHOR = 0.45
+
+
+def _anchor_y(height: int) -> int:
+    """Where the line being sung rests, in whole pixels, for a given height.
+
+    One place rather than three. `move_to` shifts by a rounded delta, so a row
+    only ever stands on a whole pixel; taking the fraction here is what keeps
+    every resting target stacked off this one somewhere a row can actually be.
+    """
+    return round(height * ANCHOR)
 
 FONT_TITLE = ("Segoe UI Semibold", -20)
 FONT_ARTIST = ("Segoe UI", -16)
@@ -107,6 +143,12 @@ FONT_ECHO = ("Segoe UI", -20, "italic")
 # the same baseline it reads as part of the main lyric; with the lead's exact
 # colour it reads as its unsung half.
 ECHO_KEEP = 0.72
+# Clear canvas between the response's box and its neighbour's, on top of what
+# the ink either side already claims. It used to be the whole separation, which
+# is why there was none: two is less than the three pixels a grown lead glyph
+# reaches plus the two the response reaches, so the two boxes overlapped by
+# construction in every frame the ad-lib was ever drawn in. The padding is now
+# added by `_place_backing_y`, and this is only the gap you can see.
 ECHO_VERTICAL_GAP = 2
 
 # How long a backing line takes to arrive and to leave, in seconds. It has its
@@ -599,7 +641,7 @@ class Overlay:
         # being rebuilt on every tick just to measure a string.
         self._title_font = tkfont.Font(font=self.f_title)
         self._artist_font = tkfont.Font(font=self.f_artist)
-        self.anchor_y = self.height * ANCHOR
+        self.anchor_y = _anchor_y(self.height)
 
         # Clamped rather than computed and trusted: screen metrics and window
         # size can disagree about whether they are logical or device pixels, and
@@ -1179,7 +1221,7 @@ class Overlay:
         else:
             keep, top = anchor
         self.width, self.height = width, height
-        self.anchor_y = self.height * ANCHOR
+        self.anchor_y = _anchor_y(self.height)
         # Clamp against the monitor that already owns the panel, including its
         # lower edge.  The old code guarded only the top and horizontal virtual
         # desktop: a compact card parked near the taskbar expanded downward off
@@ -1399,7 +1441,7 @@ class Overlay:
             self._scale_gliding = True
         else:
             self.width, self.height = target
-            self.anchor_y = self.height * ANCHOR
+            self.anchor_y = _anchor_y(self.height)
             chrome_mod.place(self.root, x, y, self.width, self.height)
             self.canvas.configure(width=self.width, height=self.height)
             # After the geometry, never before: the clip region is in device
@@ -2142,15 +2184,40 @@ class Overlay:
         self._order_text_layers()
 
     def _place_backing_y(self, anchor: LineView) -> bool:
-        """Centre the echo in the reserved row gap below the lead.
+        """Hang the echo off the lead, inside the band actually left below it.
 
-        Return false when canvas clipping or an unusually tall glyph leaves no
-        non-overlapping position. The caller then suppresses this response
-        instead of allowing the edge clamp to push it over the lead.
+        The band was the nominal `row_gap`, which is where the following row
+        *asks* to sit and not where it ends up. A row that wrapped is lifted by
+        `_safe_view_y` into that same band — it has nowhere else to go — and
+        the response was then drawn straight through it, because nothing here
+        ever looked. Measure the row's real glyph box instead, so a band that
+        has been eaten is a band this can decline.
+
+        Both clearances are taken from the two boxes either side rather than
+        from one constant. `glyph_padding` is what a row's own ink may claim as
+        it grows, so a separation smaller than the pair's is an overlap however
+        the constant is written; `ECHO_VERTICAL_GAP` is only what is left over
+        to see. It hangs from the top of the band rather than sitting in the
+        middle of it: the response belongs to the line it answers, and the
+        clearance below is a floor it must not cross, not a slot it shares.
+
+        Return false when no non-overlapping position remains. The caller then
+        suppresses this response instead of allowing the edge clamp to push it
+        over the lead — and suppressing it is the honest answer where the two
+        lyric rows have genuinely taken the whole band between them.
         """
         gap = self.chrome.px(ECHO_VERTICAL_GAP)
-        lane_top = anchor.y + anchor.height + gap
+        lane_top = (anchor.y + anchor.height + gap
+                    + anchor.glyph_padding + self._echo.glyph_padding)
         lane_bottom = anchor.y + anchor.height + self.row_gap - gap
+        # The row it must not cross is the one after the line it answers, which
+        # is not always the one after the active line: a response outlives its
+        # own line, and by then the row below it is the line now being sung.
+        below = self._views.get(self._echo_line + 1)
+        if below is not None:
+            lane_bottom = min(lane_bottom,
+                              below.glyph_vertical_span()[0] - gap
+                              - self._echo.glyph_padding)
         if self._echo.height > lane_bottom - lane_top + 0.5:
             return False
         wanted = lane_top

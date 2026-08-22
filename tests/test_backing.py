@@ -324,6 +324,58 @@ def test_the_row_gap_contains_the_complete_adlib_and_next_line(panel):
         "the ad-lib still shares pixels with the line below")
 
 
+# Long enough to wrap at the nominal wrap width, so the row below is where
+# `_safe_view_y` leaves it rather than where `_row_targets` asked for it.
+WRAPS = ("I need you all night long and every single morning after when the "
+         "city is still asleep and nothing else")
+FITS = "Stay with me"
+
+
+def _timed(text, start, span=2.0):
+    parts = text.split()
+    step = span / max(1, len(parts))
+    return [(start + i * step, start + (i + 1) * step, word)
+            for i, word in enumerate(parts)]
+
+
+@pytest.mark.parametrize("lead", [FITS, WRAPS], ids=["lead-1row", "lead-2rows"])
+@pytest.mark.parametrize("below", [FITS, WRAPS], ids=["next-1row", "next-2rows"])
+def test_no_row_count_lets_an_adlib_share_ink_with_a_lyric(panel, lead, below):
+    """The clearance the ad-lib is drawn with, at every row count.
+
+    The older test above measures nominal boxes on two short lines, which is
+    the one layout that was already correct. What was actually on screen was a
+    response laid over the upcoming row in eight of the nine row-count
+    combinations, because `y` and `height` say nothing about the ink a grown
+    glyph puts outside them, and because a wrapped upcoming row is not where
+    the nominal layout puts it.
+    """
+    from lyrica import app as A
+
+    panel.lyrics = Lyrics(
+        lines=[(0.0, lead), (3.0, below)],
+        words=[_timed(lead, 0.0), _timed(below, 3.0)],
+        synced=True, backing=["(You)", ""],
+        backing_words=[[(1.0, 1.7, "(You)")], []])
+    panel._lyrics_state = A.LYRICS_PRESENT
+    panel._go_to_line(0, panel.lyrics)
+    for glide in panel._glides.values():
+        glide.started -= glide.duration + 1.0
+    panel._advance_glides()
+    panel._show_backing(panel.lyrics, 1.3, effects=False)
+    panel.root.update()
+
+    if panel._echo is None:
+        return          # declined for want of room, which is the honest answer
+    lead_view, next_view = panel._views[0], panel._views[1]
+    assert (panel._echo.glyph_vertical_span()[0]
+            >= lead_view.glyph_vertical_span()[1]), (
+        "the ad-lib is drawn through the line it answers")
+    assert (panel._echo.glyph_vertical_span()[1]
+            <= next_view.glyph_vertical_span()[0]), (
+        "the ad-lib is drawn through the upcoming line")
+
+
 def test_an_ordinary_adlib_keeps_the_designed_echo_size(panel):
     panel._show_backing(panel.lyrics, 1.3)
 
@@ -331,13 +383,17 @@ def test_an_ordinary_adlib_keeps_the_designed_echo_size(panel):
 
 
 def test_the_adlib_sits_at_the_safe_edge_below_the_lead(panel):
+    # The visible gap is on top of the ink either side, not instead of it: at
+    # `ECHO_VERTICAL_GAP` alone the two grown glyph boxes overlapped in every
+    # frame the ad-lib was ever drawn in.
     from lyrica.app import ECHO_VERTICAL_GAP
 
     panel._show_backing(panel.lyrics, 1.3)
     lead = panel._views[0]
 
     assert panel._echo.y == pytest.approx(
-        lead.y + lead.height + panel.chrome.px(ECHO_VERTICAL_GAP), abs=0.5)
+        lead.y + lead.height + panel.chrome.px(ECHO_VERTICAL_GAP)
+        + lead.glyph_padding + panel._echo.glyph_padding, abs=0.5)
 
 
 def test_canvas_clipping_never_pushes_an_adlib_back_over_its_lead():
@@ -347,6 +403,7 @@ def test_canvas_clipping_never_pushes_an_adlib_back_over_its_lead():
         y = 0.0
         height = 10
         effect_padding = 2
+        glyph_padding = 1
 
         def visual_vertical_span(self):
             return self.y - self.effect_padding, self.y + self.height + self.effect_padding
@@ -361,10 +418,54 @@ def test_canvas_clipping_never_pushes_an_adlib_back_over_its_lead():
     panel._echo = Echo()
     panel._echo_line = 0
     panel._views = {}
-    anchor = SimpleNamespace(y=85, height=20, effect_padding=2)
+    anchor = SimpleNamespace(y=85, height=20, effect_padding=2, glyph_padding=1)
 
     assert not panel._place_backing_y(anchor)
     assert panel._echo.y == 0.0, "the edge clamp moved it through the lead"
+
+
+def test_the_row_below_is_a_floor_the_adlib_will_not_cross():
+    """The band is what the next row leaves, not what `row_gap` promises."""
+    from lyrica.app import Overlay
+
+    class Row:
+        def __init__(self, y, height):
+            self.y, self.height = y, height
+            self.effect_padding, self.glyph_padding = 2, 1
+
+        def visual_vertical_span(self):
+            return (self.y - self.effect_padding,
+                    self.y + self.height + self.effect_padding)
+
+        def glyph_vertical_span(self):
+            return (self.y - self.glyph_padding,
+                    self.y + self.height + self.glyph_padding)
+
+        def move_to(self, y):
+            self.y = y
+
+    def panel_with(next_y):
+        panel = Overlay.__new__(Overlay)
+        panel.height = 300
+        panel.row_gap = 50
+        panel.chrome = SimpleNamespace(px=lambda value: value)
+        panel._echo = Row(0.0, 20)
+        panel._echo_line = 0
+        panel._views = {1: Row(next_y, 20)} if next_y is not None else {}
+        return panel
+
+    anchor = Row(100, 20)
+    # Nominally there is a whole `row_gap` under the lead. The upcoming row is
+    # sitting in it, which is what `_safe_view_y` does to a row that wrapped.
+    lifted = panel_with(140)
+    assert not lifted._place_backing_y(anchor)
+    assert lifted._echo.y == 0.0, "it was placed over the row below anyway"
+
+    # The same lead, with the row below where the nominal layout puts it.
+    clear = panel_with(170)
+    assert clear._place_backing_y(anchor)
+    assert (clear._echo.glyph_vertical_span()[1]
+            < clear._views[1].glyph_vertical_span()[0])
 
 
 def test_an_adlib_retries_after_its_incoming_line_gains_room(panel):

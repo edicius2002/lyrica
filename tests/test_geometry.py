@@ -1135,6 +1135,41 @@ def test_both_collision_repairs_seat_the_preview_in_the_same_place(overlay):
     assert seated_by_the_guard == seated_by_the_contract == target
 
 
+@pytest.mark.parametrize("nudge", [0, 2, 4, 6, 8])
+def test_a_resting_target_is_a_pixel_a_row_can_stand_on(overlay, nudge):
+    """Every row settles exactly on the target it was given, at any height.
+
+    `move_to` shifts by a rounded delta, so a row only ever stands on a whole
+    pixel. An anchor taken as a raw fraction of the height puts every resting
+    target somewhere no row can be: the two collision repairs then agree with
+    each other and disagree with the target they were both aiming at, and which
+    of the two the frame ends on decides a pixel of the layout.
+
+    Nudged over several heights because the fraction is what decides it. A
+    height that divides cleanly hides this entirely — and the height the panel
+    actually takes comes from the monitor's scale, not from `HEIGHT`.
+    """
+    from lyrica import app as A
+    from lyrica.lyrics import Lyrics
+
+    overlay.height += nudge
+    overlay.anchor_y = A._anchor_y(overlay.height)
+    overlay._clear_views()
+    overlay.line_index = -1
+
+    lyrics = Lyrics(
+        lines=[(0.0, "first row here"), (3.0, "second row here"),
+               (6.0, "third row waits below as the preview")],
+        words=[[], [], []], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(1, lyrics, animate=False)
+    overlay._glides.clear()
+
+    for index, view in overlay._views.items():
+        assert view.y == overlay._targets[index], (
+            f"row {index} cannot stand on its own resting target")
+
+
 def test_a_rising_active_row_keeps_its_full_glide_instead_of_being_jumped(
         monkeypatch):
     from lyrica import motion
