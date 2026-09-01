@@ -208,32 +208,39 @@ def voice_step() -> float:
     return max(VOICE_STEP_MIN, min(VOICE_STEP_MAX, value))
 
 
-BEAM_STYLES = ("shine", "aurora")
+# Values that used to name a style. There is one border now, so they mean
+# nothing except "on" — kept because a `.env` written against three of them
+# should go on working rather than putting the border out.
+BEAM_LEGACY_STYLES = ("shine", "aurora", "comet")
+BEAM_OFF = ("0", "off", "no", "false")
+BEAM_ON = ("1", "on", "yes", "true")
 BEAM_INTENSITY_MIN, BEAM_INTENSITY_MAX = 0.5, 2.0
 BEAM_INTENSITY_DEFAULT = 1.0
 
 
-def beam_style() -> str:
-    """How the border reacts to what is playing: `shine`, `aurora` or `off`.
+def beam_on() -> bool:
+    """Whether the border reacts to what is playing at all.
 
-    `shine` lights the whole border and rotates a luminance gradient through it.
-    `aurora` rotates neighbouring hues derived from the cover for a more
-    expressive signature. Both light every edge at once; the `comet` that sent a
-    bright head round an otherwise dark ring was dropped, because a moving spot
-    beside the words is a thing to look at instead of them.
+    It used to name one of three styles. There is one border now — a luminance
+    gradient rotating through the whole of it, wearing the cover's colour — so
+    the only question left is on or off.
 
-    Either keeps the render loop awake for as long as the overlay is visible,
-    which is the one running cost the overlay has that nothing else asks for.
+    An unrecognised value turns it *on*. It is far likelier to be a typo or a
+    style name that outlived its style than an instruction to go dark, and the
+    failure modes are not symmetric: a border nobody asked for is a thing to
+    notice and turn off, where a border silently missing looks like a bug in
+    the overlay.
+
+    On keeps the render loop awake for as long as the overlay is visible, which
+    is the one running cost the overlay has that nothing else asks for.
     """
     raw = os.environ.get("LYRICA_BEAM", "").strip().lower()
-    if raw in ("0", "off", "no", "false"):
-        return "off"
-    if raw in BEAM_STYLES:
-        return raw
-    if raw:
-        logger.warning("LYRICA_BEAM=%r is not one of %s or off; using shine",
-                       raw, ", ".join(BEAM_STYLES))
-    return "shine"
+    if raw in BEAM_OFF:
+        return False
+    if raw and raw not in BEAM_ON and raw not in BEAM_LEGACY_STYLES:
+        logger.warning("LYRICA_BEAM=%r is not on or off; leaving the border on",
+                       raw)
+    return True
 
 
 def beam_intensity() -> float:

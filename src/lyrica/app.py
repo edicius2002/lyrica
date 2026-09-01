@@ -842,7 +842,7 @@ class Overlay:
 
         # Laid before the card and the lines so it can never sit on top of a
         # word; it lives at the very edge, where nothing else is drawn.
-        if config.beam_style() != "off" and self.chrome.washed:
+        if config.beam_on() and self.chrome.washed:
             # The half of the border that falls outside the window needs a
             # window of its own to fall onto, because this one is clipped to a
             # one-bit rounded rectangle and light does not have edges. None is

@@ -15,7 +15,7 @@ import tkinter as tk
 from pathlib import Path
 
 import numpy as np
-from PIL import ImageColor, ImageGrab
+from PIL import ImageGrab
 
 from lyrica import bloom, halo
 from lyrica.app import (
@@ -200,7 +200,7 @@ class Renderer:
         echo.destroy()
         following.destroy()
 
-    def beam(self, name: str, character: Character) -> None:
+    def beam(self, name: str, character: Character, palette=None) -> None:
         """Composed in PIL rather than grabbed off the glass.
 
         The border is images now, so its frame can be assembled from the exact
@@ -224,14 +224,20 @@ class Renderer:
         inner = (WIDTH - 2 * pad, HEIGHT - 2 * pad)
         ring = Beam(self.canvas, inner[0], inner[1], 18, 1.0,
                     glow=surface)
-        ring.advance(0.7, character, DEFAULT)
+        # A *cover's* palette, not `DEFAULT`. These two frames were rendered
+        # against the neutral default for as long as they existed, which made
+        # them blind to the one thing the border was worst at: it climbed to
+        # white with the level, and against a grey palette a white border is
+        # what a correct one looks like too.
+        palette = palette if palette is not None else DEFAULT
+        ring.advance(0.7, character, palette)
         # Every strip. One `advance` already paints every strip. A
         # still of one strip's worth of border is a still of the animation's
         # worst moment rather than of the border.
         for _ in range(len(ring.light.strips) * 2):
             ring.light.paint(ring._tables)
 
-        ground = (*ImageColor.getrgb(BACKGROUND), 255)
+        ground = (*(int(channel) for channel in palette.backdrop), 255)
         frame = Image.new("RGBA", (WIDTH, HEIGHT), ground)
         frame.alpha_composite(_straight(surface.frame()[:HEIGHT, :WIDTH]))
         plate = Image.new("RGBA", inner, ground)
@@ -248,6 +254,18 @@ class Renderer:
         self.root.destroy()
 
 
+def _cover_palette():
+    """A saturated cover, because a neutral one hides what the border does."""
+    from lyrica.chrome import Chrome, ChromeMode
+    from lyrica.glass import PANEL
+    from lyrica.palette import for_song
+    from lyrica.songcolour import SongColour
+
+    return for_song(Chrome(ChromeMode.PANEL, "#000", PANEL),
+                    SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)),
+                    (29, 24, 14))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path,
@@ -258,8 +276,11 @@ def main() -> None:
         renderer.word_strike()
         renderer.duet_lanes()
         renderer.backing_vocal()
-        renderer.beam("beam-quiet", Character(level=0.0, dynamics=0.0, rate=0.0))
-        renderer.beam("beam-loud", Character(level=1.0, dynamics=1.0, rate=0.8))
+        cover = _cover_palette()
+        renderer.beam("beam-quiet",
+                      Character(level=0.0, dynamics=0.0, rate=0.0), cover)
+        renderer.beam("beam-loud",
+                      Character(level=1.0, dynamics=1.0, rate=0.8), cover)
     finally:
         renderer.close()
 

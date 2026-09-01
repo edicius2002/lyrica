@@ -330,17 +330,28 @@ def test_the_beam_colour_has_a_contrast_floor():
     assert delta_e(back, _beam_colour(palette)) >= MIN_BEAM_DE
 
 
-def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
+def test_the_border_is_on_unless_it_is_turned_off(monkeypatch):
     from lyrica import config
 
-    monkeypatch.setenv("LYRICA_BEAM", "sparkles")
-    assert config.beam_style() == "shine"
-    monkeypatch.setenv("LYRICA_BEAM", "shine")
-    assert config.beam_style() == "shine"
-    monkeypatch.setenv("LYRICA_BEAM", "aurora")
-    assert config.beam_style() == "aurora"
-    monkeypatch.setenv("LYRICA_BEAM", "off")
-    assert config.beam_style() == "off"
+    monkeypatch.delenv("LYRICA_BEAM", raising=False)
+    assert config.beam_on() is True
+    for off in ("off", "0", "no", "false", "OFF", " off "):
+        monkeypatch.setenv("LYRICA_BEAM", off)
+        assert config.beam_on() is False, f"{off!r} did not turn it off"
+    for on in ("on", "1", "yes", "true"):
+        monkeypatch.setenv("LYRICA_BEAM", on)
+        assert config.beam_on() is True, f"{on!r} did not turn it on"
+
+
+def test_the_style_names_that_are_gone_still_turn_it_on(monkeypatch):
+    # There is one border now. A `.env` written against three of them should
+    # keep working rather than turning the border off or refusing to start,
+    # and an unknown value is a typo rather than an instruction to go dark.
+    from lyrica import config
+
+    for legacy in ("shine", "aurora", "comet", "sparkles"):
+        monkeypatch.setenv("LYRICA_BEAM", legacy)
+        assert config.beam_on() is True, f"{legacy!r} put the border out"
 
 
 # --- the music's character drives the shine ---------------------------------
