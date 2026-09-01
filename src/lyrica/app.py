@@ -842,8 +842,7 @@ class Overlay:
 
         # Laid before the card and the lines so it can never sit on top of a
         # word; it lives at the very edge, where nothing else is drawn.
-        style = config.beam_style()
-        if style != "off" and self.chrome.washed:
+        if config.beam_on() and self.chrome.washed:
             # The half of the border that falls outside the window needs a
             # window of its own to fall onto, because this one is clipped to a
             # one-bit rounded rectangle and light does not have edges. None is
@@ -851,7 +850,7 @@ class Overlay:
             # always used to.
             self.beam = beam_mod.Beam(self.canvas, self.width, self.height,
                                       self.chrome.px(chrome_mod.CORNER_RADIUS),
-                                      self.chrome.scale, style,
+                                      self.chrome.scale,
                                       config.beam_intensity(),
                                       glow=chrome_mod.glow_surface(self.root))
             self.beam.place(self.root.winfo_x(), self.root.winfo_y())

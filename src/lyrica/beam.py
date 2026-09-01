@@ -27,7 +27,6 @@ between them. Rotating the gradient is then rotating the table.
 The one thing the module here still owns is that table: what colour the ring is
 at each point of its circumference, and how much of it there is.
 """
-import colorsys
 import math
 
 from lyrica import halo
@@ -56,20 +55,27 @@ STRAIGHT_SPACING = 16.0
 # gradient's steepest. The line ring stepped every sixteen, by the same amount.
 LIGHT_SPACING = 0.5
 
-# Two ways to light the edge.
+# One way to light the edge, and it lights all of it: a luminance gradient
+# rotating through the whole border, so every edge is lit all the time and what
+# moves is the light rather than a spot.
 #
-# COMET is a short bright head travelling a dark ring — movement you follow.
-# SHINE lights the whole border at once and rotates a gradient through it, so
-# every edge is lit all the time and what moves is the colour rather than a
-# spot. The second is the quieter of the two to sit beside while reading.
-COMET, SHINE, AURORA = "comet", "shine", "aurora"
+# There were three. COMET sent a bright head round an otherwise dark ring;
+# AURORA rotated neighbouring cover hues through the border instead of a
+# luminance. Both are gone, and in the end for the same reason. A head is a
+# place, and aurora's brightest point turned out to be a place too: its
+# amplitude cosine carried no phase, so whatever the phase, the top-left corner
+# was the brightest pixel of the border and only the hue travelled through it.
+# A border that frames words being read must not offer a spot to look at
+# instead of them.
+#
+# What aurora had that this keeps is a colour that survives a loud passage.
+# What it had that this drops is a hue that moves: the cover gives one colour
+# now, and only the light on it changes.
+SHINE = "shine"
 
-# How long a circuit takes. The shine turns more slowly: a gradient sweeping the
-# whole border at the comet's rate reads as a wash sloshing about, where the
-# comet at the shine's rate barely appears to move at all.
-PERIOD_S = 6.0
+# How long a circuit takes. Slow on purpose: a gradient sweeping the whole
+# border in the six seconds the comet used reads as a wash sloshing about.
 SHINE_PERIOD_S = 11.0
-AURORA_PERIOD_S = 8.0
 
 # How far apart the two ends of the shine's gradient sit, in whole cycles round
 # the ring. One, so opposite edges are opposite colours and the seam where the
@@ -176,48 +182,40 @@ SPILL_REACH = 26.0
 # so the peak has nothing to spare.
 PRESENCE_FLOOR = 0.90
 
+# How much of the fringe's chroma is burnt out of the core, where the light is
+# at its brightest. Nothing real keeps one chroma from its crest to the last
+# trace of its spill; a source bright enough to blaze at the centre is white
+# there. This is a property of the cross-section and not of the level — the
+# border does not lose its colour when the music gets loud, which was the old
+# ramp's defect and is the thing being removed.
+CORE_HEAT = 0.45
+
 # Palette roles guarantee text contrast, not border contrast. The beam gets its
 # own perceptual floor so a cover whose accent resembles its wash cannot make
 # the ring disappear.
 MIN_BEAM_DE = 18.0
 
-# How much of the ring trails behind the head, as a fraction of the whole. Short
-# on purpose: a comet with a tail a quarter of the way round is a lit border
-# with a bright patch, which is not the same thing to look at.
-TAIL = 0.14
+# The floor that keeps the border lit in silence is `SHINE_FLOOR`, and it is
+# there because there is often no audio to read at all. Measured on this
+# machine — Spotify was controlling playback over Connect, so the track advanced
+# while every render endpoint on the box read silence, and a beam that needed
+# sound to be visible was invisible. The level flares the border; it does not
+# switch it on.
 
-# What the level does to the beam. The floor is high on purpose: the beam has to
-# be plainly there with no audio at all, because there often is none to read.
-# Measured on this machine — Spotify was controlling playback over Connect, so
-# the track advanced while every render endpoint on the box read silence, and a
-# beam that needed sound to be visible was invisible. The level flares it; it
-# does not switch it on.
-FLOOR = 0.62
-GAIN = 0.38
-
-# Where the tail stops being the song's colour and starts becoming the head.
-# Below this the beam fades out to nothing; above it, up to white.
-COLOUR_STOP = 0.55
-GRADIENT_STEPS = 96
-
-# How finely the state that decides the table is quantised. Nothing below a step
-# reaches the canvas, so between them these decide how often the ring is asked
-# to repaint — measured 42 strip repaints a second for the shine in silence and
-# 59 with a beat under it, against a ceiling of 60 that `halo.PER_CALL` sets
-# whatever these say.
+# How finely the state that decides the table is quantised. Nothing below a
+# step reaches the canvas, so between them these decide how often the ring is
+# asked to repaint.
 #
-# The phase counts differ by style because what a step *does* differs. The shine
-# rotates a smooth gradient, so a step moves every point on the ring by a
-# fraction of the swing — 128 of them puts each step under two entries of the
-# 96-step gradient, which is below what an eye finds in a soft glow. The comet
-# is a head with a place, and a step moves it: 256 puts it 11 px along the
-# default panel's perimeter, against the 8 px a frame it moves anyway.
-PHASE_STEPS = {COMET: 256, SHINE: 128, AURORA: 128}
+# The border rotates a smooth field rather than moving a spot, so a step moves
+# every point of the ring by a fraction of the swing rather than moving a thing
+# from one place to another. 128 of them is well below what an eye finds in a
+# soft glow.
+PHASE_STEPS = 128
 
 # And the same for what the music does. The level is the one that moves every
 # frame, so it is the one that decides whether an idle beam is idle: 24 bands
-# over the shine's own strength range is a shade under three of the gradient's
-# 96 entries a band, which is a step in a soft glow rather than a change.
+# over the border's own strength range is a step in a soft glow rather than a
+# change.
 LEVEL_STEPS = 24
 DYNAMICS_STEPS = 16
 
@@ -312,109 +310,42 @@ def _beam_colour(palette) -> tuple:
     return head
 
 
-def _ramp(palette, steps: int = GRADIENT_STEPS) -> list[tuple[tuple, float]]:
-    """From invisible, through the song's colour, to the head — as light.
+def _lit_colour(palette) -> tuple[tuple, tuple]:
+    """The two colours the light is made of: its fringe and its core.
 
-    Each entry is a colour and how much of it there is, and the split matters.
-    The line ring had to say the same thing in one opaque colour, so "invisible"
-    was spelled as *the backdrop colour, painted*: a flat patch laid over a
-    textured cover wash, which is only invisible where the wash happens to agree
-    with the palette's idea of it. Here the dim end of the ramp is the song's
-    colour at no opacity, so the wash comes through it untouched.
+    The fringe is the cover's colour. The core is the same colour with some of
+    its chroma burnt out of it, and the split is what stops the border reading
+    as a decal.
 
-    The bright end stays at full opacity and moves in hue instead, up to the
-    sung colour, because that end is a light and not an absence of one.
+    A glow used to be one colour with a falloff applied to its *opacity* alone,
+    so every pixel of it — the blazing crest and the last trace of spill
+    twenty-six pixels out — carried exactly the same hue and the same
+    saturation. Nothing real does that. A source hot enough to be bright at its
+    centre is hot enough to be white there, and the colour survives out at the
+    edges where there is less of it. A single chroma scaled only in alpha is a
+    sheet of tinted plastic held over a lamp, which is what it looked like.
+
+    `halo` mixes between the two by how much light reaches each pixel, so this
+    is a property of the cross-section and *not* of the level. The border does
+    not lose its colour when the music gets loud — that was the old ramp
+    climbing to `palette.sung`, and it is the defect this replaces, not the
+    behaviour it keeps.
     """
-    mid = _beam_colour(palette)
-    head = rgb_of(palette.sung)
-    out = []
-    for i in range(steps):
-        t = i / (steps - 1)
-        if t < COLOUR_STOP:
-            out.append((mid, t / COLOUR_STOP))
-        else:
-            k = (t - COLOUR_STOP) / (1 - COLOUR_STOP)
-            out.append((_lerp(mid, head, k), 1.0))
-    return out
-
-
-def _along(ramp: list[tuple], t: float) -> tuple:
-    """The ramp at `t` in 0..1, read between its entries rather than at one.
-
-    The table has ends — it runs from invisible to the head and does not close —
-    so this is a plain interpolation with no wrap to worry about, unlike the
-    position field `halo` indexes it by.
-
-    Reading it by `int(t * (steps - 1))` was the second of the two staircases
-    the border had. Ninety-six entries over a swing the shine only uses a
-    fraction of leaves a handful of distinct colours round the whole ring: the
-    default panel in silence used five of them, so the edge stepped by two or
-    three levels every few hundred pixels. What the table describes between its
-    entries is two straight lines with one knee, so interpolating it is not an
-    approximation of the intended colour — it *is* the intended colour, to
-    within the one cell the knee falls in.
-    """
-    at = max(0.0, min(1.0, t)) * (len(ramp) - 1)
-    low = min(int(at), len(ramp) - 2)
-    (red, green, blue), amount = ramp[low]
-    (to_red, to_green, to_blue), to_amount = ramp[low + 1]
-    k = at - low
-    # Spelled out rather than handed to `_lerp`, which zips and rebuilds a
-    # tuple: this runs 255 times for every table and the table is rebuilt
-    # whenever the music moves a step, so it is one of the few places in this
-    # module where the shape of the arithmetic is worth more than its brevity.
-    return ((red + (to_red - red) * k, green + (to_green - green) * k,
-             blue + (to_blue - blue) * k),
-            amount + (to_amount - amount) * k)
-
-
-def _around(wheel: list[tuple], turn: float) -> tuple:
-    """The hue wheel at `turn` in 0..1, read between its entries.
-
-    Unlike `_along` this table *is* a ring — entry 0 follows the last one — so
-    the pair being interpolated wraps with it rather than clamping at the end.
-    """
-    at = (turn % 1.0) * len(wheel)
-    low = int(at)
-    red, green, blue = wheel[low % len(wheel)]
-    to_red, to_green, to_blue = wheel[(low + 1) % len(wheel)]
-    k = at - low
-    return (red + (to_red - red) * k, green + (to_green - green) * k,
-            blue + (to_blue - blue) * k)
-
-
-def _aurora_colours(palette, steps: int = GRADIENT_STEPS) -> list[tuple]:
-    """Neighbouring hues from the song colour, closed into a seamless ring."""
-    base = tuple(channel / 255 for channel in rgb_of(palette.beam))
-    hue, saturation, value = colorsys.rgb_to_hsv(*base)
-    saturation = max(0.28, saturation)
-    value = max(0.60, value)
-    anchors = [colorsys.hsv_to_rgb((hue + shift) % 1.0, saturation, value)
-               for shift in (-0.12, 0.0, 0.12)]
-    anchors = [tuple(channel * 255 for channel in colour) for colour in anchors]
-    out = []
-    for index in range(steps):
-        turn = index / steps * len(anchors)
-        left = int(turn) % len(anchors)
-        amount = turn - int(turn)
-        out.append(_lerp(anchors[left], anchors[(left + 1) % len(anchors)],
-                         amount))
-    return out
+    fringe = _beam_colour(palette)
+    core = _lerp(fringe, (255.0, 255.0, 255.0), CORE_HEAT)
+    return fringe, core
 
 
 class Beam:
     """The ring of light, and the state that decides what colour it is where."""
 
     def __init__(self, canvas, width: int, height: int, radius: int,
-                 scale: float = 1.0, style: str = COMET,
-                 intensity: float = 1.0, glow=None):
+                 scale: float = 1.0, intensity: float = 1.0, glow=None):
         self.canvas = canvas
-        self.style = style
         self.intensity = max(0.5, min(2.0, intensity))
         self._phase = 0.0
         self._panel: tuple | None = None
-        self._ramp: list[tuple] = []
-        self._aurora: list[tuple] = []
+        self._colour: tuple = ()
         self._palette = None
         self._state = None
         self._tables: tuple = ()
@@ -513,54 +444,56 @@ class Beam:
     def advance(self, dt: float, music, palette) -> None:
         """Move the phase and, if anything visible moved with it, repaint.
 
-        `music` carries the level and, for the shine, what the music has been
-        doing around it. The ramp is derived from the palette, so the beam wears
-        the cover's colour, and rebuilt only when the palette changes.
+        `music` carries the level and what the music has been doing around it.
+        The colour is derived from the palette, so the border wears the cover's,
+        and it is re-derived only when the palette changes.
         """
         if not self.light.strips:
             return
         if palette is not self._palette:
             self._palette = palette
-            self._ramp = _ramp(palette)
-            self._aurora = _aurora_colours(palette)
+            self._colour = _lit_colour(palette)
             self._state = None
 
         level = max(0.0, min(1.0, getattr(music, "level", music)))
         dynamics = max(0.0, min(1.0, getattr(music, "dynamics", 0.0)))
         rate = max(0.0, min(1.0, getattr(music, "rate", 0.0)))
 
-        if self.style == AURORA:
-            period = AURORA_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-        elif self.style == SHINE:
-            # Busier music turns it faster; nothing here claims to know a beat.
-            period = SHINE_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-        else:
-            period = PERIOD_S
+        # Busier music turns it faster; nothing here claims to know a beat.
+        period = SHINE_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
         self._phase = (self._phase + dt / period) % 1.0
 
         # The phase keeps moving continuously and only the *table* is
         # quantised, so the rate still reaches the rotation between two steps
         # of it — a beam whose phase itself were rounded would stand still
         # under any dt small enough.
-        steps = PHASE_STEPS.get(self.style, PHASE_STEPS[SHINE])
-        state = (int(self._phase * steps) % steps, round(level * LEVEL_STEPS),
-                 round(dynamics * DYNAMICS_STEPS))
+        state = (int(self._phase * PHASE_STEPS) % PHASE_STEPS,
+                 round(level * LEVEL_STEPS), round(dynamics * DYNAMICS_STEPS))
         if state != self._state:
             self._state = state
-            self._tables = self._lit(state[0] / steps, level, dynamics)
+            self._tables = self._lit(state[0] / PHASE_STEPS, level, dynamics)
         self.light.paint(self._tables)
 
     def _lit(self, phase: float, level: float, dynamics: float) -> tuple:
-        """Red, green, blue and opacity round the ring, as four byte tables.
+        """The light round the ring, as byte tables `halo` looks up per pixel.
 
         Indexed by how far round the circumference a pixel is, which is what
         `halo` stores per pixel and never has to store again. Entry 0 is the
         byte that field keeps for "no ring near here", so it is left at no
-        opacity whatever the style decides — a pixel the band missed is
-        invisible rather than wrongly coloured.
+        opacity whatever else is decided — a pixel the band missed is invisible
+        rather than wrongly coloured.
+
+        Seven tables: the fringe colour, the core colour, and how much light
+        there is. The two colours are the same at every position — the cover
+        gives one colour and only the light on it moves — and they are carried
+        per position anyway so that `halo` goes on knowing nothing about
+        whether the colour varies round the ring. That is 768 bytes a frame
+        against an interface this module would otherwise have to reach through.
         """
         size = halo.LUT_SIZE
-        red, green, blue = [0] * size, [0] * size, [0] * size
+        fringe, core = self._colour
+        fringe_red, fringe_green, fringe_blue = ([0] * size for _ in range(3))
+        core_red, core_green, core_blue = ([0] * size for _ in range(3))
         opacity = [0] * size
         # Quantised to quarters, as the line ring's stroke widths were, so the
         # pulse cannot be a reason to repaint that the phase was not already.
@@ -568,38 +501,27 @@ class Beam:
         presence = PRESENCE_FLOOR + (1.0 - PRESENCE_FLOOR) * pulse
         span = size - 1                       # positions 1 .. size - 1
 
-        if self.style == AURORA:
-            wheel = len(self._aurora)
-            strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
-        elif self.style == SHINE:
-            strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
-            swing = SHINE_SWING_FLAT + (SHINE_SWING_OPEN - SHINE_SWING_FLAT) * dynamics
-            base = 1.0 - swing
-        else:
-            strength = FLOOR + GAIN * level
+        strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
+        swing = SHINE_SWING_FLAT + (SHINE_SWING_OPEN - SHINE_SWING_FLAT) * dynamics
+        base = 1.0 - swing
+        colours = ((fringe_red, fringe_green, fringe_blue, fringe),
+                   (core_red, core_green, core_blue, core))
 
         for index in range(1, size):
             turn = (index - 1) / span
-            if self.style == AURORA:
-                colour = self._aurora[int(((turn + phase) % 1.0) * wheel) % wheel]
-                # A cosine over the ring's own circumference, so the wave is
-                # carried round by the hue rather than standing still under it.
-                amount = strength * (0.72 + 0.28 * math.cos(2 * math.pi * turn))
-            elif self.style == SHINE:
-                # A cosine rather than a sawtooth: the ring closes on itself, so
-                # a gradient that ran end to end would show a seam where it
-                # wrapped. This one has no ends.
-                wave = 0.5 + 0.5 * math.cos(
-                    2 * math.pi * (turn * SHINE_CYCLES + phase))
-                colour, amount = _along(self._ramp,
-                                        (base + swing * wave) * strength)
-            else:
-                # Distance behind the head, once round the ring.
-                behind = (phase - turn) % 1.0
-                glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
-                colour, amount = _along(self._ramp, glow * strength)
-            red[index] = min(255, max(0, round(colour[0])))
-            green[index] = min(255, max(0, round(colour[1])))
-            blue[index] = min(255, max(0, round(colour[2])))
+            # A cosine rather than a sawtooth: the ring closes on itself, so a
+            # gradient that ran end to end would show a seam where it wrapped.
+            # This one has no ends, and its phase sits *inside* the cosine, so
+            # what travels is the light itself. Aurora put the phase in the
+            # colour lookup and left the amplitude cosine bare, which nailed
+            # its brightest point to the top-left corner for ever.
+            wave = 0.5 + 0.5 * math.cos(
+                2 * math.pi * (turn * SHINE_CYCLES + phase))
+            amount = (base + swing * wave) * strength
+            for red, green, blue, source in colours:
+                red[index] = min(255, max(0, round(source[0])))
+                green[index] = min(255, max(0, round(source[1])))
+                blue[index] = min(255, max(0, round(source[2])))
             opacity[index] = min(255, max(0, round(255 * amount * presence)))
-        return (red, green, blue, opacity)
+        return (fringe_red, fringe_green, fringe_blue,
+                core_red, core_green, core_blue, opacity)

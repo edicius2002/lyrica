@@ -116,7 +116,7 @@ def dress(overlay) -> list:
 
 def shoot(overlay, name: str, character: Character, seconds: float = 1.2) -> None:
     """Let the border settle on this state, then grab the panel and its light."""
-    # `halo.PER_CALL` repaints one strip a frame, so a state the border has just
+    # Paint twice over, so a state the border has just
     # been given is a border three quarters of which still shows the last one.
     # That is the rendering defect the whole brief turns on; a still of it would
     # be a still of the bug.

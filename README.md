@@ -151,18 +151,34 @@ would show them.
 The panel's edge carries a slow light that brightens with what is playing. It
 reads the output level from Windows' own endpoint meter — no audio is captured,
 no samples reach this process, and there is no extra dependency. A reading costs
-0.21 ms and the loop it keeps awake runs at 30 Hz, measured at 1.1 % of a
+0.21 ms and the loop it keeps awake runs at 60 Hz, measured at 1.1 % of a
 twelve-core machine.
 
-Three styles. `LYRICA_BEAM=shine` (the default) lights the whole border and rotates
-a gradient through it; `LYRICA_BEAM=comet` sends a bright head round a dark
-ring; and `LYRICA_BEAM=aurora` rotates neighbouring hues derived from the cover.
-Every style has a crisp core over a wider, quieter halo, with a perceptual
-contrast floor against the artwork wash. `LYRICA_BEAM_INTENSITY` adjusts their
-visual weight from 0.5 to 2.0. With the shine, every edge stays lit and what moves is the colour — measured, the comet
-runs 19 to 132 in brightness and leaves the top edge dark once it has passed,
-where the shine holds 36 to 83 everywhere, always. `LYRICA_BEAM=off` turns it
-off.
+One border, and it lights every edge at once: a luminance gradient rotating
+through the whole of it, wearing the cover's colour. It draws no line — the
+light is a falloff sitting behind the panel, which occludes it, so what you see
+is the rim that escapes past the silhouette. `LYRICA_BEAM_INTENSITY` adjusts its
+visual weight from 0.5 to 2.0, and `LYRICA_BEAM=off` turns it off.
+
+Loud means more light, never less colour. The level moves how much light there
+is and nothing else; the cover's hue and its saturation do not move with it. An
+earlier version climbed to white at the top of the level range — saturation fell
+from 0.29 to 0.07, and since most music sits above 0.6 the border was white
+nearly all the time.
+
+Across its own cross-section the light does change colour, and that is what
+keeps it from reading as a decal. The fringe carries the cover's colour and the
+core burns 45 % of that chroma out, because a source bright enough to blaze at
+its centre is white there. Measured at full level: saturation 0.48 out in the
+tail, 0.28 seven pixels out, 0.13 at the crest — where a glow whose falloff
+lives only in its opacity is one number all the way, which is a sheet of tinted
+plastic held over a lamp.
+
+Two styles were removed. `comet` sent a bright head round an otherwise dark ring
+and `aurora` rotated neighbouring cover hues; measured, aurora's brightest pixel
+was the top-left corner at every phase it was ever asked for, because only its
+hue travelled. A spot to look at beside the words is the one thing this light
+must not offer.
 
 The shine also reads what the music is *doing*, not only how loud it is. How
 much the level moves sets how far the gradient swings — a compressed wall of

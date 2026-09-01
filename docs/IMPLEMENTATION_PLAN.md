@@ -571,6 +571,7 @@ The frame budget these are weighed against is 16 ms: the reactive border keeps t
 | S.18 | Apple leading the cover sources → Discogs leads, on measurement: 5 of 5 tracks against 3 of 5, same resolution. | 2026-08-07 |
 | S.19 | Translated lyrics planned → dropped by agreement, never started.                        | 2026-08-07 |
 | S.20 | Decision 8.8's second clause — the fast tick applies only while a word is lit — no longer holds. The reactive border asks for 60 Hz unconditionally while anything is playing, so the overlay runs at the fast tick all day, which is the cost 8.8 set out to avoid. Whether the border is worth it is open. Its first clause, canvas items built per line and afterwards only recoloured, still stands. | 2026-08-19 |
+| S.21 | Three border styles -> two. `comet` is removed: a bright head travelling an otherwise dark ring. Measured, it ran 19 to 132 in brightness and left each edge dark once it had passed, where the shine holds 36 to 83 everywhere always. It was dropped rather than tuned, because a moving spot beside the words is a thing to look at instead of them — the one job this light must not do — and every number that made it read as a comet (a tail of a seventh of the ring, a phase quantised twice as finely as the others) was a number spent making it more distracting. `PERIOD_S`, `TAIL`, `FLOOR` and `GAIN` went with it; `COLOUR_STOP` stayed, because the shine's ramp uses it. | 2026-09-01 |
 
 ---
 

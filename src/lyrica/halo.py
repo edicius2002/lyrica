@@ -158,12 +158,6 @@ SAMPLE = 0.02
 # to be inside a strip rather than cut off by one.
 BAND_SLACK = 4
 
-# How many strips may be repainted in one call. This is the cap that turns "as
-# often as the music changes" into a bounded per-frame cost, and one is enough:
-# the ring closes on a new colour within four frames, and four frames is 67 ms
-# against a gradient that takes eleven seconds to go round.
-PER_CALL = 1
-
 # Fields are cached because a collapse animation asks for the same twenty-one
 # sizes on the way back out that it asked for on the way in. Bounded by bytes
 # rather than by count: a panel at 2.0 scale has four times the pixels of one at
@@ -714,24 +708,34 @@ class Spill:
     def _draw(self, strip: _Strip, channels: tuple) -> None:
         import numpy as np
 
-        red, green, blue, opacity = (
+        (red, green, blue, core_red, core_green, core_blue, opacity) = (
             np.asarray(table, dtype=np.float32) for table in channels)
-        # The premultiply, folded into the table where it is free. Alpha is
-        # last, and the three colours can never exceed it because no entry of
-        # `red` exceeds 255 — including after the dither, which is added to all
-        # four equally.
-        tables = (blue * opacity * (1.0 / 255.0), green * opacity * (1.0 / 255.0),
-                  red * opacity * (1.0 / 255.0), opacity)
+        # BGRA, and premultiplied: `UpdateLayeredWindow` demands it, and a
+        # colour above its own alpha brightens what is behind it instead of
+        # covering it. The premultiply can no longer be folded into the table,
+        # because the colour a pixel gets now depends on that pixel's own place
+        # in the cross-section rather than on its place round the ring alone.
+        # It can still never exceed the alpha: the mix lies between two
+        # colours neither of which exceeds 255, and both are then scaled by
+        # exactly the factor the alpha is.
         x0, y0, x1, y1 = strip.box
         pad = self.pad
         out = self.glow.frame()[y0 + pad:y1 + pad, x0 + pad:x1 + pad]
-        for band, table in enumerate(tables):
-            value = strip.profile * table[strip.where]
+        lit = opacity[strip.where]
+        mix = np.clip(strip.profile, 0.0, 1.0)
+        bands = ((blue, core_blue), (green, core_green), (red, core_red))
+        for band, (edge, hot) in enumerate(bands):
+            colour = edge[strip.where]
+            colour = colour + (hot[strip.where] - colour) * mix
+            value = strip.profile * colour * lit * (1.0 / 255.0)
             value += strip.dither
             np.clip(value, 0.0, 255.0, out=value)
             # Truncated rather than rounded, because the dither already carries
             # the half. See `_dither`.
             out[..., band] = value.astype(np.uint8)
+        value = strip.profile * lit + strip.dither
+        np.clip(value, 0.0, 255.0, out=value)
+        out[..., 3] = value.astype(np.uint8)
 
     def destroy(self) -> None:
         self.strips.clear()
@@ -760,8 +764,6 @@ class Ring:
                                                   state="hidden"))
                        for _ in range(4)]
         self.spill = Spill(glow) if glow is not None else None
-        self._next = 0
-        self._whole = False
 
     def reshape(self, width: int, height: int, radius: float,
                 shape: Shape) -> None:
@@ -780,21 +782,6 @@ class Ring:
         """
         import numpy as np
 
-        # Everything about the border changed, so `PER_CALL` does not apply to
-        # the frame that follows. It is a cap on how much *recolouring* a frame
-        # may do, and recolouring is what it is safe to spread over four frames:
-        # the ring closes on a new colour within 67 ms against a gradient that
-        # takes eleven seconds to go round, so nobody sees the lag.
-        #
-        # A resize is not recolouring. Every strip has moved and the companion's
-        # whole surface has been cleared, so a capped frame shows one lit edge
-        # and three blank ones — photographed, and it is what a panel folding to
-        # its card looked like for the whole animation. It has always been that
-        # way and it used to be survivable, because a soft wash three-quarters
-        # missing reads as a dim border; a bright rim three-quarters missing
-        # reads as a bar down one side of the panel. Concentrating the light is
-        # what made the old defect unmissable, so the fix belongs with it.
-        self._whole = True
         # How far into the panel the canvas half has to be evaluated. It is
         # `bleed` now rather than the twenty-two pixels of inward halo the
         # border used to lay across the panel's face, so the strips are eleven
@@ -837,30 +824,35 @@ class Ring:
             self.spill.reshape(outward, pad, width, height)
 
     def paint(self, channels: tuple) -> int:
-        """Show the ring lit by `channels`, at most `PER_CALL` strips a call.
+        """Show the ring lit by `channels`, every strip of it, in this call.
 
         `channels` is four tables of `LUT_SIZE` bytes — red, green, blue and
         opacity — indexed by the byte `where` holds. Rotating the gradient round
         the ring is a rotation of those tables and costs nothing here at all.
 
-        A strip is repainted only when the tables have actually changed over the
-        positions that strip contains, which is what makes a travelling head
-        affordable: a comet lights a seventh of the ring, so the other strips
-        are told most frames that nothing happened to them. Returns how many
-        were repainted, which is the unit a frame's cost is measured in.
+        A strip is repainted only when the tables have actually changed over
+        the positions that strip contains, so a level that has not moved a band
+        leaves every strip alone and the call costs nothing. What is *not* done
+        any more is spreading a repaint that is needed over several frames.
 
-        `PER_CALL` is lifted for exactly one call after a `reshape`, because
-        what it bounds is recolouring and a reshape is not that. See there.
+        There was a cap here — one strip a call, round-robin — meant to keep
+        recolouring off the frame budget. The gradient rotates every frame, so
+        in practice three of the four edges were always at least a frame behind,
+        and on a level that jumped it was plain: measured 139 of 255 between the
+        brightest strip and the dimmest for three frames running, against 57 for
+        the gradient's own swing. A bright bar chasing its way round the panel
+        on every beat, which is the same artefact decision 9.10 had already
+        found in a resize and answered by lifting the cap for that one case.
+
+        It also bought almost nothing. Measured against one strip a call over a
+        kick, at four panel scales: +0.4 ms a frame at 1.25, +2.5 at 1.5, +2.0
+        at 2.0. The frame's real cost is handing bitmaps to Tk and drawing the
+        companion surface, and both of those are paid per pixel of edge band
+        rather than per strip. Returns how many were repainted, which is the
+        unit a frame's cost is measured in.
         """
         painted = 0
-        cap = len(self.strips) if self._whole else PER_CALL
-        self._whole = False
-        for _ in range(len(self.strips)):
-            if painted >= cap:
-                break
-            index = self._next % len(self.strips)
-            strip = self.strips[index]
-            self._next += 1
+        for index, strip in enumerate(self.strips):
             if strip.box is None:
                 continue
             want = bytes(table[key] for key in strip.keys for table in channels)
@@ -908,16 +900,26 @@ class Ring:
         import numpy as np
         from PIL import Image
 
-        red, green, blue, opacity = (
+        (red, green, blue, core_red, core_green, core_blue, opacity) = (
             np.asarray(table, dtype=np.uint8) for table in channels)
         where = strip.where
         alpha = strip.profile * opacity[where].astype(np.float32)
         alpha += strip.dither
         np.clip(alpha, 0.0, 255.0, out=alpha)
         out = np.empty((*where.shape, 4), dtype=np.uint8)
-        out[..., 0] = red[where]
-        out[..., 1] = green[where]
-        out[..., 2] = blue[where]
+        # Fringe towards core by how much light reaches the pixel, so the light
+        # is whiter where it is brightest and keeps its colour out in the tail.
+        # By the *profile* and not by the finished alpha: the profile is the
+        # cross-section alone, so how white the core runs is a property of the
+        # shape of the light and not of how loud the music is. Mixing by alpha
+        # would put the old defect back — a border that loses its colour on
+        # every chorus — wearing different arithmetic.
+        mix = np.clip(strip.profile, 0.0, 1.0)
+        for band, (edge, hot) in enumerate(
+                ((red, core_red), (green, core_green), (blue, core_blue))):
+            value = edge[where].astype(np.float32)
+            value += (hot[where].astype(np.float32) - value) * mix
+            out[..., band] = value.astype(np.uint8)
         # Truncated rather than rounded, because the dither above already
         # carries the half: `floor(v + u)` for `u` uniform on the unit interval
         # is the round with the remainder spread over neighbouring pixels

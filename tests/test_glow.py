@@ -272,8 +272,8 @@ def test_what_a_strip_writes_is_premultiplied():
     surface = Surface()
     spill = halo.Spill(surface)
     spill.reshape(outward, pad, 600, 200)
-    tables = ([255] * halo.LUT_SIZE, [200] * halo.LUT_SIZE,
-              [120] * halo.LUT_SIZE, list(range(halo.LUT_SIZE)))
+    tables = (([255] * halo.LUT_SIZE, [200] * halo.LUT_SIZE,
+               [120] * halo.LUT_SIZE) * 2 + (list(range(halo.LUT_SIZE)),))
     for index in range(len(spill.strips)):
         spill.paint(index, tables)
     frame = surface.frame().astype(int)
@@ -292,7 +292,7 @@ def test_a_strip_writes_where_the_panel_says_it_should():
     surface = Surface()
     spill = halo.Spill(surface)
     spill.reshape(outward, pad, 600, 200)
-    tables = ([255] * halo.LUT_SIZE,) * 3 + ([255] * halo.LUT_SIZE,)
+    tables = ([255] * halo.LUT_SIZE,) * 7
     for index in range(len(spill.strips)):
         spill.paint(index, tables)
     frame = surface.frame()
@@ -307,7 +307,7 @@ def test_a_strip_is_not_rewritten_when_nothing_about_it_moved():
     _made, pad, _inward, outward = halves()
     spill = halo.Spill(Surface())
     spill.reshape(outward, pad, 600, 200)
-    tables = ([255] * halo.LUT_SIZE,) * 4
+    tables = ([255] * halo.LUT_SIZE,) * 7
     assert spill.paint(0, tables) is True
     assert spill.paint(0, tables) is False
 
@@ -333,10 +333,10 @@ def test_a_border_with_no_surface_is_still_a_border(canvas):
     # Off Windows, and on a Windows that refuses the companion, the border
     # falls back to what it was: the inward half, ending at the window's edge.
     # That is a smaller loss than an overlay that will not start.
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import Beam
     from lyrica.meter import Character
 
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE, glow=None)
+    ring = Beam(canvas, 600, 200, 18, 1.0, glow=None)
     assert ring.light.spill is None
     ring.advance(0.0, Character(level=0.6, dynamics=0.4), _palette())
     assert any(strip.shown for strip in ring.light.strips)
@@ -347,11 +347,11 @@ def test_both_halves_are_painted_from_one_loop_and_one_strip(canvas):
     # They are one stretch of edge cut by a window boundary. Painted from two
     # loops they could be lit to two different colours either side of the line
     # the split runs down.
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import Beam
     from lyrica.meter import Character
 
     surface = Surface()
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE, glow=surface)
+    ring = Beam(canvas, 600, 200, 18, 1.0, glow=surface)
     assert surface.capacity[0] > 600, "the surface is not wider than the panel"
     ring.advance(0.0, Character(level=0.6, dynamics=0.4), _palette())
     assert surface.presented, "the surface was never handed over"
@@ -362,18 +362,20 @@ def test_both_halves_are_painted_from_one_loop_and_one_strip(canvas):
 
 
 def test_a_resize_lights_the_whole_border_and_not_one_edge_of_it(canvas):
-    # `halo.PER_CALL` lets a frame repaint one strip, which is right for
-    # recolouring and wrong for a resize: every strip has moved and the
-    # companion's surface has been cleared, so a capped frame leaves three
-    # quarters of the border blank. Photographed mid-fold, that is a bright bar
-    # down one side of an otherwise unlit panel — and it is the frame the user
-    # was shown six of and picked, which makes it the single most expensive bug
-    # in this effort's history.
-    from lyrica.beam import SHINE, Beam
+    # A resize moves every strip and clears the companion's surface, so a frame
+    # that repainted only some of them leaves the rest of the border blank.
+    # Photographed mid-fold, that is a bright bar down one side of an otherwise
+    # unlit panel — and it is the frame the user was shown six of and picked,
+    # which makes it the single most expensive bug in this effort's history.
+    #
+    # A cap used to make that the ordinary case and a lift made the resize an
+    # exception to it. There is no cap now, so this guards the property rather
+    # than the exception: a resized border is whole on the next frame.
+    from lyrica.beam import Beam
     from lyrica.meter import Character
 
     surface = Surface()
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE, glow=surface)
+    ring = Beam(canvas, 600, 200, 18, 1.0, glow=surface)
     music, palette = Character(level=0.6, dynamics=0.4), _palette()
     ring.advance(0.0, music, palette)
     assert all(strip.shown is not None for strip in ring.light.strips), (
@@ -395,10 +397,10 @@ def test_a_resize_lights_the_whole_border_and_not_one_edge_of_it(canvas):
 
 
 def test_the_border_takes_its_companion_with_it_wherever_it_goes(canvas):
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import Beam
 
     surface = Surface()
-    ring = Beam(canvas, 600, 200, 18, 1.0, SHINE, glow=surface)
+    ring = Beam(canvas, 600, 200, 18, 1.0, glow=surface)
     ring.place(120, 80)
     assert surface.presented[-1][2] == (120 - ring.pad, 80 - ring.pad)
     ring.follow(130, 80)

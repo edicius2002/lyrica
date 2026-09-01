@@ -132,17 +132,16 @@ def _panel(width=600, height=200):
         SongColour(38.0, 0.8, 0.45, 38.0, False, (0, 0, 0)), (29, 24, 14))
 
 
-def lit(canvas, style, width, height, character, radius=18, scale=1.0):
+def lit(canvas, width, height, character, radius=18, scale=1.0):
     """A ring of both halves, and the surface the outward one landed on."""
     from lyrica.beam import Beam
 
     palette = _panel()
     surface = Surface()
-    ring = Beam(canvas, width, height, radius, scale, style, glow=surface)
+    ring = Beam(canvas, width, height, radius, scale, glow=surface)
     ring.advance(0.0, character, palette)
-    # Every strip. `halo.PER_CALL` bounds what a *frame* is allowed to repaint;
-    # a border read one strip at a time is a reading of the animation rather
-    # than of the border.
+    # Twice over. One `advance` already paints every strip, so this is belt and
+    # braces against a strip that needed a second look — and it costs nothing.
     for _ in range(len(ring.light.strips) * 2):
         ring.light.paint(ring._tables)
     return ring, palette, surface
@@ -197,7 +196,7 @@ def ridge(ring, palette, surface, width, height, span=5):
     return levels
 
 
-def _lit(style, level, canvas, width=600, height=200):
+def _lit(level, canvas, width=600, height=200):
     """What the border is lit to all the way round it, as brightness 0..255.
 
     Sampled on the ring's own path, which is where the light is brightest, and
@@ -208,29 +207,28 @@ def _lit(style, level, canvas, width=600, height=200):
 
     if not isinstance(level, Character):
         level = Character(level=level)
-    ring, palette, surface = lit(canvas, style, width, height, level)
+    ring, palette, surface = lit(canvas, width, height, level)
     levels = ridge(ring, palette, surface, width, height)
     ring.destroy()
     return levels
 
 
-def test_the_comet_leaves_most_of_the_ring_dark(canvas):
-    # A travelling light needs somewhere dark to travel through; that is the
-    # whole difference between a comet and a lit border.
-    from lyrica.beam import COMET
-
-    levels = _lit(COMET, 1.0, canvas)
-    dark = sum(1 for v in levels if v < 40)
-    assert dark > len(levels) * 0.7, "too much of the ring is lit to read as a comet"
-    assert max(levels) > 200, "the head is not bright"
-
-
 def test_the_shine_lights_every_edge_at_once(canvas):
     # Asked for as the quieter alternative: constant across all the borders,
-    # with the colour moving rather than a bright spot.
-    from lyrica.beam import SHINE
+    # with the light moving rather than a bright spot.
+    #
+    # Read at a dynamics the music might actually have. It used to be read at
+    # `Character`'s default of zero, which is a master compressed until it
+    # barely moves — and the border over one of those is *meant* to be even,
+    # which is what `test_a_flat_master_gets_an_even_border` asserts two
+    # screens down. The two only agreed while the ramp climbed to white, so a
+    # flat master got its swing from the colour whatever `dynamics` said. With
+    # the colour held still the premise had to be honest: at dynamics 0 the
+    # range is 22 and belongs to the other test; at 0.3 it is 36 and at 0.9,
+    # 65.
+    from lyrica.meter import Character
 
-    levels = _lit(SHINE, 1.0, canvas)
+    levels = _lit(Character(level=1.0, dynamics=0.5), canvas)
     assert min(levels) > 50, "part of the border went dark"
     assert max(levels) - min(levels) > 30, "nothing moves through it"
 
@@ -238,9 +236,7 @@ def test_the_shine_lights_every_edge_at_once(canvas):
 def test_the_shine_stays_lit_with_no_audio_at_all(canvas):
     # There often is none — playback can be rendered on another device
     # entirely — so silence must not put the border out.
-    from lyrica.beam import SHINE
-
-    assert min(_lit(SHINE, 0.0, canvas)) > 20
+    assert min(_lit(0.0, canvas)) > 20
 
 
 def _section(ring, surface, width, height):
@@ -268,10 +264,9 @@ def test_the_border_is_a_falloff_and_not_a_step(canvas):
     #
     # Measured outward from the silhouette now rather than across the panel's
     # own edge, because that is where the light went.
-    from lyrica.beam import SHINE
     from lyrica.meter import Character
 
-    ring, _palette, surface = lit(canvas, SHINE, 600, 200,
+    ring, _palette, surface = lit(canvas, 600, 200,
                                   Character(level=0.8, dynamics=0.5))
     section = _section(ring, surface, 600, 200)
     peak = section.index(max(section))
@@ -304,13 +299,12 @@ def test_music_energy_changes_the_beams_spatial_weight(canvas):
     # width to pulse even in principle — the panel decides where it stops — so
     # brightness is the only channel reactivity has left. If it did not carry,
     # this design would be a still life.
-    from lyrica.beam import SHINE
     from lyrica.meter import Character
 
     weights = []
     for character in (Character(level=0.0, dynamics=0.0),
                       Character(level=1.0, dynamics=1.0)):
-        ring, _palette, surface = lit(canvas, SHINE, 600, 200, character)
+        ring, _palette, surface = lit(canvas, 600, 200, character)
         section = _section(ring, surface, 600, 200)
         weights.append((sum(section), sum(1 for v in section if v > 8)))
         ring.destroy()
@@ -320,66 +314,51 @@ def test_music_energy_changes_the_beams_spatial_weight(canvas):
 
 
 def test_the_beam_colour_has_a_contrast_floor():
+    # Asserted where the floor is actually applied. It used to be read off an
+    # entry of the ramp, which meant reading it through whatever opacity that
+    # entry carried; the ramp's dim end is *meant* to be transparent, so which
+    # entry to ask was a judgement the test should not have been making. That
+    # the lit border clears its backdrop is guarded separately, by
+    # `test_the_shine_stays_lit_with_no_audio_at_all`.
     from types import SimpleNamespace
 
-    from lyrica.beam import COLOUR_STOP, MIN_BEAM_DE, _lerp, _ramp
+    from lyrica.beam import MIN_BEAM_DE, _beam_colour
     from lyrica.glass import delta_e
 
     back = (40, 40, 40)
     palette = SimpleNamespace(backdrop=back, beam="#282828", sung="#ffffff")
-    ramp = _ramp(palette)
-    # The same entry as before, but composed onto the backdrop the way the
-    # canvas composes it — the ramp carries a colour *and* an opacity now, and
-    # a floor that only held for the colour would be no floor at all.
-    colour, opacity = ramp[round((len(ramp) - 1) * COLOUR_STOP)]
-    assert delta_e(back, _lerp(back, colour, opacity)) >= MIN_BEAM_DE - 1
+    assert delta_e(back, _beam_colour(palette)) >= MIN_BEAM_DE
 
 
-def test_aurora_uses_several_neighbouring_hues(canvas):
-    # Counted on the pixels the ring is actually painted in rather than on a
-    # list of fills, which is where the distinct shades used to be countable.
-    from lyrica.beam import AURORA
-    from lyrica.meter import Character
-
-    ring, palette, surface = lit(canvas, AURORA, 600, 200,
-                                 Character(level=0.7, dynamics=0.7, rate=0.5))
-    picture, pad = frame(ring, palette, surface, 600, 200)
-    pixels = picture.load()
-    # The brightest pixel *near* each point of the path rather than the one on
-    # it, and for the same reason `ridge` does the same: the path is the panel's
-    # silhouette and the light peaks outside it, so a sample taken on the line
-    # reads the frosted rim. Which way is "outside" depends on which edge the
-    # point is on, so the neighbourhood answers it instead of the caller.
-    shades = set()
-    for x, y in ring._points:
-        near = [pixels[min(picture.width - 1, max(0, round(x) + pad + dx)),
-                       min(picture.height - 1, max(0, round(y) + pad + dy))]
-                for dx in range(-5, 6) for dy in range(-5, 6)]
-        shades.add(max(near, key=max))
-    assert len(shades) > 8
-    ring.destroy()
-
-
-def test_an_unknown_style_falls_back_rather_than_failing(monkeypatch):
+def test_the_border_is_on_unless_it_is_turned_off(monkeypatch):
     from lyrica import config
 
-    monkeypatch.setenv("LYRICA_BEAM", "sparkles")
-    assert config.beam_style() == "shine"
-    monkeypatch.setenv("LYRICA_BEAM", "shine")
-    assert config.beam_style() == "shine"
-    monkeypatch.setenv("LYRICA_BEAM", "aurora")
-    assert config.beam_style() == "aurora"
-    monkeypatch.setenv("LYRICA_BEAM", "off")
-    assert config.beam_style() == "off"
+    monkeypatch.delenv("LYRICA_BEAM", raising=False)
+    assert config.beam_on() is True
+    for off in ("off", "0", "no", "false", "OFF", " off "):
+        monkeypatch.setenv("LYRICA_BEAM", off)
+        assert config.beam_on() is False, f"{off!r} did not turn it off"
+    for on in ("on", "1", "yes", "true"):
+        monkeypatch.setenv("LYRICA_BEAM", on)
+        assert config.beam_on() is True, f"{on!r} did not turn it on"
+
+
+def test_the_style_names_that_are_gone_still_turn_it_on(monkeypatch):
+    # There is one border now. A `.env` written against three of them should
+    # keep working rather than turning the border off or refusing to start,
+    # and an unknown value is a typo rather than an instruction to go dark.
+    from lyrica import config
+
+    for legacy in ("shine", "aurora", "comet", "sparkles"):
+        monkeypatch.setenv("LYRICA_BEAM", legacy)
+        assert config.beam_on() is True, f"{legacy!r} put the border out"
 
 
 # --- the music's character drives the shine ---------------------------------
 
 def _shine(character, canvas):
     """How far the border swings between its lightest and darkest part."""
-    from lyrica.beam import SHINE
-
-    ring, palette, surface = lit(canvas, SHINE, 1125, 375, character, scale=1.25)
+    ring, palette, surface = lit(canvas, 1125, 375, character, scale=1.25)
     levels = ridge(ring, palette, surface, 1125, 375)
     ring.destroy()
     return max(levels) - min(levels)
@@ -402,6 +381,141 @@ def test_silence_leaves_it_lit_but_still(canvas):
     assert _shine(Character(), canvas) < 20
 
 
+def _crest(canvas, level, width=900, height=320):
+    """The pixel at the top edge's crest, as the screen will show it.
+
+    A fixed point rather than the brightest one, so two readings are of the
+    same pixel and not of two different ones that each happened to be a peak.
+    """
+    import colorsys
+
+    from lyrica.meter import Character
+
+    ring, palette, surface = lit(canvas, width, height,
+                                 Character(level=level, dynamics=0.5))
+    picture, pad = frame(ring, palette, surface, width, height)
+    ring.destroy()
+    red, green, blue = picture.load()[pad + width // 2, pad - 1]
+    return colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
+
+
+def _light(canvas, level, width=900, height=320):
+    """One strip's own pixels, before anything composes them over a backdrop.
+
+    The composite is the wrong place to ask what colour the light is. Over a
+    backdrop with a tint of its own — and the cover wash always has one — a
+    faint part of the glow reads as mostly backdrop, so a reading taken there
+    measures the wash rather than the border. These are the emitted pixels.
+    """
+    import numpy as np
+
+    from lyrica.meter import Character
+
+    ring, _palette, _surface = lit(canvas, width, height,
+                                   Character(level=level, dynamics=0.5))
+    picture = next(np.asarray(ring.light.image(strip, ring._tables))
+                   for strip in ring.light.strips if strip.box is not None)
+    ring.destroy()
+    return picture
+
+
+def _saturation(picture, mask):
+    import colorsys
+
+    red, green, blue = (picture[..., band][mask].mean() for band in range(3))
+    return colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)[1]
+
+
+def test_the_border_keeps_the_cover_s_colour_however_loud_it_gets(canvas):
+    # The ramp climbed to `palette.sung`, which is white by design — chroma 8 —
+    # so the louder the music the less of the cover was left in the border.
+    # Measured over the whole ring: saturation 0.29 in silence against 0.07 at
+    # the top of the level range, and since most music sits above 0.6 the
+    # border was white nearly all the time. Loud is meant to mean more light,
+    # not less colour.
+    #
+    # Read in the fringe, which is where the colour is kept. The core is whiter
+    # on purpose and by a fixed amount — that is the cross-section's shape and
+    # `test_the_light_is_whiter_at_its_core_than_at_its_fringe` guards it — so
+    # a reading taken at the crest would be measuring that decision instead of
+    # this one.
+    import colorsys
+
+    from lyrica.beam import _beam_colour
+
+    red, green, blue = _beam_colour(_panel())
+    _hue, cover, _value = colorsys.rgb_to_hsv(red / 255, green / 255,
+                                              blue / 255)
+    for level in (0.1, 1.0):
+        picture = _light(canvas, level)
+        alpha = picture[..., 3]
+        peak = int(alpha.max())
+        fringe = (alpha > peak * 0.05) & (alpha < peak * 0.25)
+        assert fringe.any(), "the strip has no fringe to read"
+        got = _saturation(picture, fringe)
+        assert abs(got - cover) < 0.03, (
+            f"at level {level} the fringe reads {got:.3f} against the cover's "
+            f"{cover:.3f}")
+
+
+def test_the_border_still_gets_brighter_when_the_music_does(canvas):
+    # The guard on the test above: holding saturation still must not be done by
+    # holding the whole border still.
+    *_, value_quiet = _crest(canvas, 0.1)
+    *_, value_loud = _crest(canvas, 1.0)
+    assert value_loud > value_quiet * 1.15, (
+        f"brightness went {value_quiet:.3f} -> {value_loud:.3f}")
+
+
+def test_the_light_is_whiter_at_its_core_than_at_its_fringe(canvas):
+    # A glow used to be one colour with the falloff applied to its opacity
+    # alone, so the blazing crest and the last trace of spill twenty-six pixels
+    # out carried the same hue and the same saturation to the digit. Nothing
+    # real does that: a source bright enough to blaze at its centre is white
+    # there, and its colour survives at the edges where there is less of it.
+    # One chroma scaled only in alpha is tinted plastic over a lamp.
+    picture = _light(canvas, 0.7)
+    alpha = picture[..., 3]
+    peak = int(alpha.max())
+    core = alpha >= peak * 0.9
+    fringe = (alpha > peak * 0.05) & (alpha < peak * 0.25)
+    assert core.any() and fringe.any(), "the strip has no falloff to read"
+    assert _saturation(picture, core) < _saturation(picture, fringe) - 0.02, (
+        f"core {_saturation(picture, core):.3f} against fringe "
+        f"{_saturation(picture, fringe):.3f} — the light is one flat chroma "
+        "at every distance")
+
+
+def test_no_frame_leaves_an_edge_showing_the_frame_before(canvas):
+    # The one test in this file that paints the way the app does. Every other
+    # one goes through `lit`, which paints the ring whole before measuring it —
+    # so none of them can see the border the running overlay actually shows.
+    #
+    # The cap repainted one strip a frame in round-robin while the gradient
+    # rotates every frame, so three of the four edges were always a frame or
+    # more behind. On a level that jumped it showed: measured 139 of 255
+    # between the brightest strip and the dimmest for three frames running,
+    # against 57 for the gradient's own swing. A bright bar chasing its way
+    # round the panel on every beat.
+    from lyrica.beam import Beam
+    from lyrica.meter import Character
+
+    palette = _panel()
+    ring = Beam(canvas, 900, 320, 18, 1.0, glow=Surface())
+    kick = [0.10] * 4 + [0.95] + [0.95 - 0.08 * k for k in range(1, 8)]
+    stale = []
+    for level in kick:
+        ring.advance(1 / 60, Character(level=level, dynamics=0.5, rate=0.4),
+                     palette)
+        # Nothing advanced in between, so anything this repaints is something
+        # the frame itself should already have shown.
+        stale.append(ring.light.paint(ring._tables))
+    ring.destroy()
+    assert stale == [0] * len(kick), (
+        f"strips left carrying an older frame: {stale} — the border lights up "
+        "a quadrant at a time")
+
+
 def test_busier_music_turns_it_faster(tk_root):
     # Driven by the onset rate rather than a tempo. Which multiple of the beat
     # that rate counts is not recoverable from loudness, so a ring spinning once
@@ -409,7 +523,7 @@ def test_busier_music_turns_it_faster(tk_root):
     import tkinter as tk
 
     from lyrica import palette as pal_mod
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import Beam
     from lyrica.chrome import Chrome, ChromeMode
     from lyrica.glass import PANEL
     from lyrica.meter import Character
@@ -423,39 +537,16 @@ def test_busier_music_turns_it_faster(tk_root):
         # state; a root that is never torn down mid-session settles that too,
         # and without it Tcl runs out of interpreters on the CI runner.
         ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
-                    1.0, SHINE)
+                    1.0)
         ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
         moved.append(ring._phase)
         ring.destroy()
     assert moved[1] > moved[0], "the rate did not reach the rotation"
 
 
-def test_the_comet_ignores_the_character(tk_root):
-    # Only the shine reads it. The comet's whole shape is a travelling head, and
-    # varying its speed with the music would fight the thing you follow.
-    import tkinter as tk
-
-    from lyrica import palette as pal_mod
-    from lyrica.beam import COMET, Beam
-    from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL
-    from lyrica.meter import Character
-    from lyrica.songcolour import NEUTRAL
-
-    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
-    phases = []
-    for rate in (0.0, 1.0):
-        ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
-                    1.0, COMET)
-        ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
-        phases.append(ring._phase)
-        ring.destroy()
-    assert phases[0] == phases[1]
-
-
 # --- relaying the ring ------------------------------------------------------
 
-def _ring(canvas, style, width=900, height=320, scale=1.0, radius=18):
+def _ring(canvas, width=900, height=320, scale=1.0, radius=18):
     from lyrica import palette as pal_mod
     from lyrica.beam import Beam
     from lyrica.chrome import Chrome, ChromeMode
@@ -463,7 +554,7 @@ def _ring(canvas, style, width=900, height=320, scale=1.0, radius=18):
     from lyrica.songcolour import NEUTRAL
 
     palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
-    return Beam(canvas, width, height, radius, scale, style), palette
+    return Beam(canvas, width, height, radius, scale), palette
 
 
 def test_reshaping_reuses_the_items_it_already_has(canvas):
@@ -475,9 +566,7 @@ def test_reshaping_reuses_the_items_it_already_has(canvas):
     # An item created later lands on top of the display list, and the overlay
     # lays the beam *before* the card and the lyrics precisely so it can never
     # cover a word.
-    from lyrica.beam import SHINE
-
-    ring, _palette = _ring(canvas, SHINE)
+    ring, _palette = _ring(canvas)
     before = [strip.item for strip in ring.light.strips]
     seen = set(canvas.find_all())
     for width, height in ((760, 217), (620, 114), (1100, 380), (900, 320)):
@@ -496,9 +585,7 @@ def test_the_ring_tiles_the_edge_without_overlapping_itself(canvas):
     # each other compose twice and the overlap reads as a bright band straight
     # across the glow — the same defect as the dashed joins the line ring got
     # when a halo climbed over its neighbour's core, and just as visible.
-    from lyrica.beam import SHINE
-
-    ring, _palette = _ring(canvas, SHINE, 620, 114)
+    ring, _palette = _ring(canvas, 620, 114)
     for width, height in ((900, 320), (620, 114), (1100, 380), (240, 90)):
         ring.reshape(width, height, 18)
         boxes = [strip.box for strip in ring.light.strips if strip.box]
@@ -525,13 +612,10 @@ def test_a_relaid_ring_never_lies_about_what_it_painted(canvas):
     # previous panel size for as long as the music happened not to move.
     #
     # So a reshape must reset it, and the ring must then paint its way back to
-    # the truth — which takes as many calls as there are strips, since only
-    # `PER_CALL` of them are repainted at a time.
-    from lyrica import halo
-    from lyrica.beam import SHINE
+    # the truth.
     from lyrica.meter import Character
 
-    ring, palette = _ring(canvas, SHINE)
+    ring, palette = _ring(canvas)
     for step, (width, height) in enumerate(
             ((900, 320), (760, 217), (620, 114), (900, 320), (1100, 380))):
         ring.reshape(width, height, 18)
@@ -547,7 +631,6 @@ def test_a_relaid_ring_never_lies_about_what_it_painted(canvas):
                          for table in ring._tables)
             assert strip.shown == want, "a strip was left behind by the table"
             assert canvas.itemcget(strip.item, "state") == "normal"
-        assert halo.PER_CALL >= 1
     ring.destroy()
 
 
@@ -559,10 +642,9 @@ def test_a_relaid_ring_wears_the_presence_the_rest_of_it_wears(canvas):
     # can have it per *strip*, since only one is repainted a call. The property
     # is the same: once the ring has settled, no part of it is still wearing
     # the weight the music had before the reshape.
-    from lyrica.beam import SHINE
     from lyrica.meter import Character
 
-    ring, palette = _ring(canvas, SHINE, 620, 114)
+    ring, palette = _ring(canvas, 620, 114)
     quiet = Character(level=0.0, dynamics=0.0, rate=0.0)
     loud = Character(level=1.0, dynamics=1.0, rate=0.3)
     for _ in range(8):
@@ -570,9 +652,8 @@ def test_a_relaid_ring_wears_the_presence_the_rest_of_it_wears(canvas):
     ring.reshape(900, 320, 18)
     for _ in range(8):
         ring.advance(1 / 60, loud, palette)
-    # Then held still, so the ring has a fixed thing to settle on: with the
-    # phase moving there is always a strip a frame or two behind, which is the
-    # trade `PER_CALL` makes and not a strip left wearing the old weight.
+    # Then held still, so the ring has a fixed thing to settle on rather than a
+    # phase that has moved under it between one reading and the next.
     #
     # One pass over the strips is now all settling takes. It used to be that
     # plus `halo.FINE_AFTER`, because the fields were blurred at a third of the
@@ -599,13 +680,13 @@ def test_a_bigger_window_does_not_buy_points_it_pays_for_every_resize(canvas):
     # only looked up. Either way the density has to be constant in the units
     # the design is written in. The corners never depended on the spacing, since
     # they have a fixed point budget of their own.
-    from lyrica.beam import CORNER_POINTS, SHINE
+    from lyrica.beam import CORNER_POINTS
 
     counts, items = {}, {}
     for scale in (0.6, 1.0, 2.0):
         # The same three things the window scales together: the panel, the
         # corner radius and the light's own shape.
-        ring, _palette = _ring(canvas, SHINE, round(900 * scale),
+        ring, _palette = _ring(canvas, round(900 * scale),
                                round(320 * scale), scale, round(18 * scale))
         counts[scale] = len(ring._points)
         items[scale] = len(ring.light.strips)
