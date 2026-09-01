@@ -56,18 +56,23 @@ STRAIGHT_SPACING = 16.0
 # gradient's steepest. The line ring stepped every sixteen, by the same amount.
 LIGHT_SPACING = 0.5
 
-# Two ways to light the edge.
+# Two ways to light the edge, and both light all of it.
 #
-# COMET is a short bright head travelling a dark ring — movement you follow.
-# SHINE lights the whole border at once and rotates a gradient through it, so
-# every edge is lit all the time and what moves is the colour rather than a
-# spot. The second is the quieter of the two to sit beside while reading.
-COMET, SHINE, AURORA = "comet", "shine", "aurora"
+# SHINE rotates a luminance gradient through the whole border, so every edge is
+# lit all the time and what moves is the colour rather than a spot. AURORA
+# rotates neighbouring cover hues through it instead, keeping the song's colour
+# where the shine climbs towards white.
+#
+# There was a third, COMET: a short bright head travelling an otherwise dark
+# ring. It was dropped rather than tuned. A head is a place, and a place on the
+# border is a thing to look at while reading the words that border frames —
+# which is the one job the light must not do. Every number that made it read as
+# a comet (a tail of a seventh of the ring, a phase quantised twice as finely as
+# the others) was a number spent making it more distracting.
+SHINE, AURORA = "shine", "aurora"
 
-# How long a circuit takes. The shine turns more slowly: a gradient sweeping the
-# whole border at the comet's rate reads as a wash sloshing about, where the
-# comet at the shine's rate barely appears to move at all.
-PERIOD_S = 6.0
+# How long a circuit takes. Slow on purpose: a gradient sweeping the whole
+# border in the six seconds the comet used reads as a wash sloshing about.
 SHINE_PERIOD_S = 11.0
 AURORA_PERIOD_S = 8.0
 
@@ -181,22 +186,16 @@ PRESENCE_FLOOR = 0.90
 # the ring disappear.
 MIN_BEAM_DE = 18.0
 
-# How much of the ring trails behind the head, as a fraction of the whole. Short
-# on purpose: a comet with a tail a quarter of the way round is a lit border
-# with a bright patch, which is not the same thing to look at.
-TAIL = 0.14
-
-# What the level does to the beam. The floor is high on purpose: the beam has to
-# be plainly there with no audio at all, because there often is none to read.
-# Measured on this machine — Spotify was controlling playback over Connect, so
-# the track advanced while every render endpoint on the box read silence, and a
-# beam that needed sound to be visible was invisible. The level flares it; it
-# does not switch it on.
-FLOOR = 0.62
-GAIN = 0.38
-
-# Where the tail stops being the song's colour and starts becoming the head.
+# Where the ramp stops being the song's colour and starts becoming the head.
 # Below this the beam fades out to nothing; above it, up to white.
+#
+# The floors that keep the border visible in silence live per style now
+# (`SHINE_FLOOR`, and aurora's own inside `_lit`), because the reason for them
+# is shared even though the numbers are not: there is often no audio to read at
+# all. Measured on this machine — Spotify was controlling playback over Connect,
+# so the track advanced while every render endpoint on the box read silence, and
+# a beam that needed sound to be visible was invisible. The level flares the
+# border; it does not switch it on.
 COLOUR_STOP = 0.55
 GRADIENT_STEPS = 96
 
@@ -206,13 +205,12 @@ GRADIENT_STEPS = 96
 # 59 with a beat under it, against a ceiling of 60 that `halo.PER_CALL` sets
 # whatever these say.
 #
-# The phase counts differ by style because what a step *does* differs. The shine
-# rotates a smooth gradient, so a step moves every point on the ring by a
-# fraction of the swing — 128 of them puts each step under two entries of the
-# 96-step gradient, which is below what an eye finds in a soft glow. The comet
-# is a head with a place, and a step moves it: 256 puts it 11 px along the
-# default panel's perimeter, against the 8 px a frame it moves anyway.
-PHASE_STEPS = {COMET: 256, SHINE: 128, AURORA: 128}
+# Both surviving styles rotate a smooth field rather than moving a spot, so a
+# step moves every point on the ring by a fraction of the swing rather than
+# moving a thing from one place to another: 128 of them puts each step under two
+# entries of the 96-step gradient, which is below what an eye finds in a soft
+# glow. The comet needed 256 because a head has a place and a step moved it.
+PHASE_STEPS = {SHINE: 128, AURORA: 128}
 
 # And the same for what the music does. The level is the one that moves every
 # frame, so it is the one that decides whether an idle beam is idle: 24 bands
@@ -406,7 +404,7 @@ class Beam:
     """The ring of light, and the state that decides what colour it is where."""
 
     def __init__(self, canvas, width: int, height: int, radius: int,
-                 scale: float = 1.0, style: str = COMET,
+                 scale: float = 1.0, style: str = SHINE,
                  intensity: float = 1.0, glow=None):
         self.canvas = canvas
         self.style = style
@@ -529,13 +527,11 @@ class Beam:
         dynamics = max(0.0, min(1.0, getattr(music, "dynamics", 0.0)))
         rate = max(0.0, min(1.0, getattr(music, "rate", 0.0)))
 
-        if self.style == AURORA:
-            period = AURORA_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-        elif self.style == SHINE:
-            # Busier music turns it faster; nothing here claims to know a beat.
-            period = SHINE_PERIOD_S / (1.0 + SHINE_SPEED_GAIN * rate)
-        else:
-            period = PERIOD_S
+        # Busier music turns it faster; nothing here claims to know a beat.
+        # The shine is the fallback for a style this does not recognise, which
+        # is the same answer `config.beam_style` gives.
+        turn = AURORA_PERIOD_S if self.style == AURORA else SHINE_PERIOD_S
+        period = turn / (1.0 + SHINE_SPEED_GAIN * rate)
         self._phase = (self._phase + dt / period) % 1.0
 
         # The phase keeps moving continuously and only the *table* is
@@ -571,12 +567,10 @@ class Beam:
         if self.style == AURORA:
             wheel = len(self._aurora)
             strength = min(1.0, (0.56 + 0.44 * level) * self.intensity)
-        elif self.style == SHINE:
+        else:
             strength = SHINE_FLOOR + (1.0 - SHINE_FLOOR) * level
             swing = SHINE_SWING_FLAT + (SHINE_SWING_OPEN - SHINE_SWING_FLAT) * dynamics
             base = 1.0 - swing
-        else:
-            strength = FLOOR + GAIN * level
 
         for index in range(1, size):
             turn = (index - 1) / span
@@ -585,7 +579,7 @@ class Beam:
                 # A cosine over the ring's own circumference, so the wave is
                 # carried round by the hue rather than standing still under it.
                 amount = strength * (0.72 + 0.28 * math.cos(2 * math.pi * turn))
-            elif self.style == SHINE:
+            else:
                 # A cosine rather than a sawtooth: the ring closes on itself, so
                 # a gradient that ran end to end would show a seam where it
                 # wrapped. This one has no ends.
@@ -593,11 +587,6 @@ class Beam:
                     2 * math.pi * (turn * SHINE_CYCLES + phase))
                 colour, amount = _along(self._ramp,
                                         (base + swing * wave) * strength)
-            else:
-                # Distance behind the head, once round the ring.
-                behind = (phase - turn) % 1.0
-                glow = 0.0 if behind > TAIL else (1.0 - behind / TAIL) ** 2
-                colour, amount = _along(self._ramp, glow * strength)
             red[index] = min(255, max(0, round(colour[0])))
             green[index] = min(255, max(0, round(colour[1])))
             blue[index] = min(255, max(0, round(colour[2])))

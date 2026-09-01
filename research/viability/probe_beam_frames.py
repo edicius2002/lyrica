@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from lyrica import palette as pal_mod
-from lyrica.beam import COMET, SHINE, Beam, _rounded_path
+from lyrica.beam import AURORA, SHINE, Beam, _rounded_path
 from lyrica.chrome import Chrome, ChromeMode
 from lyrica.glass import PANEL
 from lyrica.meter import create_meter
@@ -47,7 +47,7 @@ def main() -> int:
         root.update()
 
         segments = len(_rounded_path(width, height, 18, 2.5))
-        for style in (COMET, SHINE):
+        for style in (SHINE, AURORA):
             beam.destroy()
             beam = Beam(canvas, width, height, 18, 1.25, style)
             root.update_idletasks()

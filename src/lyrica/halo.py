@@ -844,10 +844,13 @@ class Ring:
         the ring is a rotation of those tables and costs nothing here at all.
 
         A strip is repainted only when the tables have actually changed over the
-        positions that strip contains, which is what makes a travelling head
-        affordable: a comet lights a seventh of the ring, so the other strips
-        are told most frames that nothing happened to them. Returns how many
-        were repainted, which is the unit a frame's cost is measured in.
+        positions that strip contains. Both surviving styles rotate a field over
+        the whole ring, so most steps of the phase do touch every strip and the
+        cap is what keeps that bounded — one strip a frame, closing on the new
+        colour within four. The check still earns its place at the quiet end,
+        where a level that has not moved a band leaves the tables identical and
+        no strip is repainted at all. Returns how many were repainted, which is
+        the unit a frame's cost is measured in.
 
         `PER_CALL` is lifted for exactly one call after a `reshape`, because
         what it bounds is recolouring and a reshape is not that. See there.

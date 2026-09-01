@@ -208,17 +208,19 @@ def voice_step() -> float:
     return max(VOICE_STEP_MIN, min(VOICE_STEP_MAX, value))
 
 
-BEAM_STYLES = ("comet", "shine", "aurora")
+BEAM_STYLES = ("shine", "aurora")
 BEAM_INTENSITY_MIN, BEAM_INTENSITY_MAX = 0.5, 2.0
 BEAM_INTENSITY_DEFAULT = 1.0
 
 
 def beam_style() -> str:
-    """How the border reacts to what is playing: `comet`, `shine` or `off`.
+    """How the border reacts to what is playing: `shine`, `aurora` or `off`.
 
-    `comet` is a bright head travelling a dark ring. `shine` lights the whole
-    border and rotates a luminance gradient. `aurora` rotates neighbouring hues
-    derived from the cover for a more expressive signature.
+    `shine` lights the whole border and rotates a luminance gradient through it.
+    `aurora` rotates neighbouring hues derived from the cover for a more
+    expressive signature. Both light every edge at once; the `comet` that sent a
+    bright head round an otherwise dark ring was dropped, because a moving spot
+    beside the words is a thing to look at instead of them.
 
     Either keeps the render loop awake for as long as the overlay is visible,
     which is the one running cost the overlay has that nothing else asks for.

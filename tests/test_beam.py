@@ -214,17 +214,6 @@ def _lit(style, level, canvas, width=600, height=200):
     return levels
 
 
-def test_the_comet_leaves_most_of_the_ring_dark(canvas):
-    # A travelling light needs somewhere dark to travel through; that is the
-    # whole difference between a comet and a lit border.
-    from lyrica.beam import COMET
-
-    levels = _lit(COMET, 1.0, canvas)
-    dark = sum(1 for v in levels if v < 40)
-    assert dark > len(levels) * 0.7, "too much of the ring is lit to read as a comet"
-    assert max(levels) > 200, "the head is not bright"
-
-
 def test_the_shine_lights_every_edge_at_once(canvas):
     # Asked for as the quieter alternative: constant across all the borders,
     # with the colour moving rather than a bright spot.
@@ -402,14 +391,15 @@ def test_silence_leaves_it_lit_but_still(canvas):
     assert _shine(Character(), canvas) < 20
 
 
-def test_busier_music_turns_it_faster(tk_root):
+@pytest.mark.parametrize("style", ["shine", "aurora"])
+def test_busier_music_turns_it_faster(tk_root, style):
     # Driven by the onset rate rather than a tempo. Which multiple of the beat
     # that rate counts is not recoverable from loudness, so a ring spinning once
     # per beat would spin at half or double speed about half the time.
     import tkinter as tk
 
     from lyrica import palette as pal_mod
-    from lyrica.beam import SHINE, Beam
+    from lyrica.beam import Beam
     from lyrica.chrome import Chrome, ChromeMode
     from lyrica.glass import PANEL
     from lyrica.meter import Character
@@ -423,34 +413,11 @@ def test_busier_music_turns_it_faster(tk_root):
         # state; a root that is never torn down mid-session settles that too,
         # and without it Tcl runs out of interpreters on the CI runner.
         ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
-                    1.0, SHINE)
+                    1.0, style)
         ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
         moved.append(ring._phase)
         ring.destroy()
     assert moved[1] > moved[0], "the rate did not reach the rotation"
-
-
-def test_the_comet_ignores_the_character(tk_root):
-    # Only the shine reads it. The comet's whole shape is a travelling head, and
-    # varying its speed with the music would fight the thing you follow.
-    import tkinter as tk
-
-    from lyrica import palette as pal_mod
-    from lyrica.beam import COMET, Beam
-    from lyrica.chrome import Chrome, ChromeMode
-    from lyrica.glass import PANEL
-    from lyrica.meter import Character
-    from lyrica.songcolour import NEUTRAL
-
-    palette = pal_mod.for_song(Chrome(ChromeMode.PANEL, "#000", PANEL), NEUTRAL)
-    phases = []
-    for rate in (0.0, 1.0):
-        ring = Beam(tk.Canvas(tk_root, width=600, height=200), 600, 200, 18,
-                    1.0, COMET)
-        ring.advance(1.0, Character(level=0.5, dynamics=0.5, rate=rate), palette)
-        phases.append(ring._phase)
-        ring.destroy()
-    assert phases[0] == phases[1]
 
 
 # --- relaying the ring ------------------------------------------------------

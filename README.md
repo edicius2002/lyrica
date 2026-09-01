@@ -154,15 +154,18 @@ no samples reach this process, and there is no extra dependency. A reading costs
 0.21 ms and the loop it keeps awake runs at 30 Hz, measured at 1.1 % of a
 twelve-core machine.
 
-Three styles. `LYRICA_BEAM=shine` (the default) lights the whole border and rotates
-a gradient through it; `LYRICA_BEAM=comet` sends a bright head round a dark
-ring; and `LYRICA_BEAM=aurora` rotates neighbouring hues derived from the cover.
-Every style has a crisp core over a wider, quieter halo, with a perceptual
-contrast floor against the artwork wash. `LYRICA_BEAM_INTENSITY` adjusts their
-visual weight from 0.5 to 2.0. With the shine, every edge stays lit and what moves is the colour — measured, the comet
-runs 19 to 132 in brightness and leaves the top edge dark once it has passed,
-where the shine holds 36 to 83 everywhere, always. `LYRICA_BEAM=off` turns it
-off.
+Two styles, and both light every edge at once. `LYRICA_BEAM=shine` (the default)
+rotates a luminance gradient through the whole border; `LYRICA_BEAM=aurora`
+rotates neighbouring hues derived from the cover instead. Neither draws a line:
+the light is a falloff sitting behind the panel, which occludes it, so what you
+see is the rim that escapes past the silhouette. `LYRICA_BEAM_INTENSITY` adjusts
+its visual weight from 0.5 to 2.0, and `LYRICA_BEAM=off` turns it off.
+
+A third style, `comet`, sent a bright head round an otherwise dark ring. It was
+removed: measured, it ran 19 to 132 in brightness and left the top edge dark
+once it had passed, where the shine holds 36 to 83 everywhere, always. A moving
+spot beside the words is a thing to look at instead of them, which is the one
+job this light must not do.
 
 The shine also reads what the music is *doing*, not only how loud it is. How
 much the level moves sets how far the gradient swings — a compressed wall of
