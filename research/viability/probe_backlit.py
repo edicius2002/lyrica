@@ -29,7 +29,7 @@ sys.path.insert(0, __file__.rsplit("research", 1)[0] + "src")
 
 from PIL import Image, ImageDraw, ImageFont
 
-from lyrica.beam import SHINE, Beam
+from lyrica.beam import Beam
 from lyrica.meter import Character
 
 WIDTH, HEIGHT = 900, 320
@@ -106,10 +106,10 @@ def compose(character: Character) -> Image.Image:
     root.withdraw()
     canvas = tk.Canvas(root, width=WIDTH, height=HEIGHT)
     surface = _Surface()
-    ring = Beam(canvas, WIDTH, HEIGHT, RADIUS, 1.0, SHINE, glow=surface)
+    ring = Beam(canvas, WIDTH, HEIGHT, RADIUS, 1.0, glow=surface)
     ring.advance(0.0, character, palette())
     # Every strip, rather than the one a frame is allowed: this is a still, and
-    # `halo.PER_CALL` exists to bound a frame's cost, not to describe the border.
+    # One `advance` paints every strip; this is belt and braces.
     for _ in range(len(ring.light.strips) * 2):
         ring.light.paint(ring._tables)
 

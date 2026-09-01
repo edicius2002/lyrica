@@ -26,7 +26,7 @@ from lyrica.app import (
     ROW_GAP,
     VOICE_SAFE_MARGIN,
 )
-from lyrica.beam import SHINE, Beam, shape_at
+from lyrica.beam import Beam, shape_at
 from lyrica.chrome import prepare
 from lyrica.lineview import GROW_ATTACK_S, LineView
 from lyrica.meter import Character
@@ -222,10 +222,10 @@ class Renderer:
         surface = _Surface()
         pad = halo.pad_of(shape_at(1.0))
         inner = (WIDTH - 2 * pad, HEIGHT - 2 * pad)
-        ring = Beam(self.canvas, inner[0], inner[1], 18, 1.0, SHINE,
+        ring = Beam(self.canvas, inner[0], inner[1], 18, 1.0,
                     glow=surface)
         ring.advance(0.7, character, DEFAULT)
-        # Every strip. `halo.PER_CALL` bounds what a *frame* may repaint; a
+        # Every strip. One `advance` already paints every strip. A
         # still of one strip's worth of border is a still of the animation's
         # worst moment rather than of the border.
         for _ in range(len(ring.light.strips) * 2):
