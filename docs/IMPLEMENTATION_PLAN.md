@@ -1,16 +1,17 @@
 # Implementation Plan and Decision Log
 
 > **Status:** Word-by-word lyrics, four ranked sources behind one cascade. The overlay resolves
-> tracks from Spotify, YouTube, YouTube Music and SoundCloud, and every pull request is linted and
-> tested.
-> **Last updated:** 2026-08-19
-> **Review status:** Phase 7 merged across [#19](https://github.com/edicius2002/lyrica/pull/19),
-> [#21](https://github.com/edicius2002/lyrica/pull/21), [#23](https://github.com/edicius2002/lyrica/pull/23),
-> [#25](https://github.com/edicius2002/lyrica/pull/25) and [#27](https://github.com/edicius2002/lyrica/pull/27).
-> **Phase closure:** Steps 0–7 complete. Deferred by agreement: the overlay outline has not been
-> eyeballed over a genuinely bright background, configurable provider ordering waits for step 8,
-> and the visual treatment is being researched separately.
-> **Next delivery:** Step 8, packaging. One issue per slice, written before its work.
+> tracks from Spotify, YouTube, YouTube Music and SoundCloud, is packaged as a single executable
+> with a tray icon, and every pull request is linted and tested on Windows and macOS.
+> **Last updated:** 2026-09-01
+> **Review status:** Phase 9's border reworked in
+> [#144](https://github.com/edicius2002/lyrica/pull/144).
+> **Phase closure:** Steps 0–8 complete. Step 9 is demand-driven and has no end state; what is
+> currently open in it is listed under **Open** in the Decision Log, and the border's inner flank
+> is the live question there.
+> **Next delivery:** Nothing is scheduled. The next work is whichever open question is answered
+> first — the inner flank needs a judgement, and the frame budget above scale 1.25 needs a fix
+> nobody has designed.
 
 ---
 
@@ -72,19 +73,54 @@ lyrica/
 |       |-- __init__.py              # version
 |       |-- __main__.py              # python -m lyrica
 |       |-- app.py                   # tkinter overlay, render loop
-|       |-- smtc.py                  # Windows media session reader
+|       |-- config.py                # environment and .env, one reader per setting
+|       |-- instance.py              # single-instance claim
 |       |-- lyrics.py                # Lyrics model + LRC parser
+|       |-- ttml.py                  # word-level TTML, agents and backing lines
+|       |-- textmatch.py             # title/artist matching for the cascade
+|       |-- youtube.py               # browser title readings
+|       |-- sponsorblock.py          # non-music segments
+|       |-- artwork.py               # cover fetch and cache
+|       |-- songcolour.py            # the cover reduced to hue, chroma and weight
+|       |-- palette.py               # roles solved for contrast against the wash
+|       |-- glass.py                 # the window's composition law; delta-E
+|       |-- meter.py                 # the endpoint's loudness, as level/dynamics/rate
+|       |-- beam.py                  # what colour the border is where
+|       |-- halo.py                  # the border as fields and strips; both halves
+|       |-- bloom.py                 # pre-rasterised glyph growth
+|       |-- lineview.py              # one lyric line as canvas items
+|       |-- overlay_text.py          # text measurement and layout
+|       |-- motion.py                # easing shared by the animations
+|       |-- tray.py                  # tray icon and menu
+|       |-- hotkeys.py               # global shortcuts
+|       |-- autostart.py             # optional run-at-login
+|       |-- chrome/
+|       |   |-- __init__.py          # window mode, scale, composition
+|       |   |-- windows.py           # DWM, clip region, monitor scale
+|       |   `-- layered.py           # the WS_EX_LAYERED companion surface
+|       |-- sessions/
+|       |   |-- __init__.py          # picks the platform's reader
+|       |   |-- base.py              # what a session reader must answer
+|       |   |-- windows.py           # SMTC
+|       |   `-- macos.py             # MediaRemote
 |       `-- providers/
 |           |-- __init__.py          # cascade + on-disk cache
 |           |-- base.py              # LyricsProvider interface
-|           `-- lrclib.py            # LRCLIB implementation
+|           |-- lrclib.py            # LRCLIB implementation
+|           |-- community.py         # community TTML
+|           |-- musixmatch.py        # richsync
+|           `-- netease.py           # NetEase, including yrc
 |-- tests/                           # offline unit tests, no network
 |-- research/
 |   |-- VIABILITY.md                 # measured source conditions
-|   `-- viability/                   # probe scripts (network, run by hand)
+|   |-- viability/                   # probe scripts (network or a screen, run by hand)
+|   `-- shots/                       # gitignored — photographs of the running overlay
 |-- docs/
-|   `-- IMPLEMENTATION_PLAN.md       # THIS FILE
+|   |-- IMPLEMENTATION_PLAN.md       # THIS FILE
+|   `-- visual-baselines/            # synthetic frames for human review; contract in tests/
 |-- repos/                           # gitignored — third-party reference clones
+|-- lyrica.spec                      # PyInstaller
+|-- CHANGELOG.md
 |-- pyproject.toml
 |-- README.md
 |-- .gitattributes
@@ -93,12 +129,17 @@ lyrica/
 
 ### Dependency rules
 
-- `providers/*` may import `lyrics` and `providers.base`; it must **not** import `app` or `smtc`.
-  A provider knows nothing about who is playing or how anything is drawn.
-- `smtc` must not import `providers` or `lyrics`. It reports what the operating system says and
-  nothing else.
-- `app` is the only module allowed to depend on both sides, and the only one that touches tkinter.
+- `providers/*` may import `lyrics` and `providers.base`; it must **not** import `app` or
+  `sessions`. A provider knows nothing about who is playing or how anything is drawn.
+- `sessions/*` must not import `providers` or `lyrics`. They report what the operating system says
+  and nothing else.
+- `app` is the only module allowed to depend on both sides, and the only one that touches tkinter
+  directly for layout. The drawing modules are handed a canvas rather than finding one.
 - No module reaches a lyrics API directly; every network call lives behind a `LyricsProvider`.
+- `beam` decides what colour the border is at each point of its circumference; `halo` decides which
+  pixels that reaches and how strongly. `halo` knows nothing about music or palettes, and `beam`
+  knows nothing about strips, fields or window handles. The interface between them is the table
+  tuple described in decision 9.12.
 
 ---
 
@@ -408,6 +449,17 @@ not be made inside a data-layer phase.
 - [x] Even frame scheduling, which turned out to be why the existing lyric
       animation stuttered as much as why the new border did
       ([#79](https://github.com/edicius2002/lyrica/pull/79)).
+- [x] The light leaves the panel: a companion layered window carries the half
+      that falls outside the clip region, and the term that used to delete it
+      is gone (decisions 9.5-9.9).
+- [x] Three border styles become one, and its light carries colour across its
+      own cross-section rather than one flat chroma at every distance
+      ([#144](https://github.com/edicius2002/lyrica/pull/144), decisions
+      9.11-9.14).
+
+**Still open in this phase:** the border's inner flank is a hard edge, the
+border misses the frame budget above scale 1.25, and over a light desktop there
+is effectively no border. See **Open** in the Decision Log.
 
 ---
 
@@ -524,6 +576,8 @@ Measurements in [`research/VIABILITY.md`](../research/VIABILITY.md) and the prob
 
 The frame budget these are weighed against is 16 ms: the reactive border keeps the loop at 60 Hz for as long as anything is playing, so work done per frame is paid tens of thousands of times an hour.
 
+That budget is currently met at the default scale and missed above it — measured 4 ms a frame at scale 1.0, 6 at 1.25, 9 at 1.5 and 28 at 2.0. See open question O.6; the decisions below were taken against the budget as stated, and the overrun is not caused by any of them.
+
 | ID  | Decision                                                                        | Rationale                                                                                                                                                                                                                                                     |
 | --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 9.1 | A cache whose answer depends on the scale carries the scale in its key, rather than being cleared from the resize path. | The card had three measurement caches and the resize path cleared two of them. The third kept a width measured at the previous font and the card was centred on it at every size. A cache that only one caller knows to clear is one that will eventually be missed, and this one already had been — under a comment claiming the fault was fixed. |
@@ -535,16 +589,22 @@ The frame budget these are weighed against is 16 ms: the reactive border keeps t
 | 9.7 | The companion's bitmap only ever grows, and a smaller panel is presented as a sub-rectangle of it. | The open risk the probe could not close: a collapse changes the panel's size on every one of its twenty-one frames, and `CreateDIBSection` per frame is a GDI allocation and free on the path `bloom.py` documents the consequences of. Measured instead (`probe_glow_in_app.py collapse`): with a grow-only surface the bitmap was rebuilt **0 times across a fold and an unfold**, because the panel starts at its largest and everything after is smaller. Worth recording that the rebuild itself turned out cheap — 0.02 ms median for a 1334×536 section, 0.43 ms to touch every byte of it once — so the decision is not "a rebuild was too dear" but "there is no rebuild to pay for". The cost of the slack is address space nobody touches; `present` is given the size actually wanted and reads the top-left corner. |
 | 9.8 | Only the outward half is masked at the panel's outline. The canvas half is left whole and the clip region cuts it. | The clip is one bit and rasterised by GDI, and no mask computed in `halo.py` is guaranteed to agree with it to the pixel. Masking both would make a disagreement a *gap* — a dark notch a pixel wide round each corner, which is precisely the artefact this replaces. Leaving the canvas half whole makes a disagreement an overlap instead, and an overlap is one pixel of light composed twice. Photographed at seven times on the running app: the ridge covers the staircase and neither shows. |
 | 9.9 | The field cache is bounded at 48 MiB rather than 24.                              | An entry now carries the outward band as well as the inward one and measured 2.4 MiB against 0.7 MiB. At the old bound a collapse of the default panel kept fourteen of its twenty-one sizes, so the unfold — which asks for exactly the same twenty-one — started paying for a third of them again: a warm re-fold went from 4.7 ms a frame to 9.8. The bound exists to hold one whole animation; 48 MiB is what that now costs. |
-
-| 9.10 | `PER_CALL` is lifted for exactly one call after a `reshape`, so a resize lights the whole border rather than one edge of it. | The cap repaints one strip a frame, and a resize invalidates all four every frame, so during a collapse or a scale glide three of the four were blank at any moment. This was pre-existing — photographed at `97204e4` and after, side by side, identical — and it survived because a wide soft wash had little to give away. Concentrating the light into a rim ended that: what had been a dim unevenness became a bright bar down one side of an otherwise dark panel. The cap exists to keep a *colour* change off the frame budget, and a reshape is not a colour change; every strip's field is already being rebuilt, so spreading that across four frames buys nothing and shows the seam of its own scheduling. It costs three more strip paints on the frame after a reshape, which is the frame that was already the most expensive, and gives back a border that is whole throughout an animation. Guarded by `test_a_resize_lights_the_whole_border_and_not_one_edge_of_it`, verified to fail without it. |
+| 9.10 | *(Superseded by 9.14 — see S.23.)* `PER_CALL` is lifted for exactly one call after a `reshape`, so a resize lights the whole border rather than one edge of it. | The cap repaints one strip a frame, and a resize invalidates all four every frame, so during a collapse or a scale glide three of the four were blank at any moment. This was pre-existing — photographed at `97204e4` and after, side by side, identical — and it survived because a wide soft wash had little to give away. Concentrating the light into a rim ended that: what had been a dim unevenness became a bright bar down one side of an otherwise dark panel. The cap exists to keep a *colour* change off the frame budget, and a reshape is not a colour change; every strip's field is already being rebuilt, so spreading that across four frames buys nothing and shows the seam of its own scheduling. It costs three more strip paints on the frame after a reshape, which is the frame that was already the most expensive, and gives back a border that is whole throughout an animation. Guarded by `test_a_resize_lights_the_whole_border_and_not_one_edge_of_it`, verified to fail without it. |
+| 9.11 | There is one border, not a menu of them. `LYRICA_BEAM` is on or off. | Three styles were three answers to a question nobody had settled, and two of them were wrong in the same way. `comet` sent a bright head round a dark ring (S.21); `aurora` rotated cover hues, and measured, its brightest pixel was the top-left corner at every phase it was ever asked for, because its amplitude cosine carried no phase and only the hue travelled (S.22). A border that frames words being read must not offer a spot to look at instead of them, and that rules out both. Unrecognised values turn the border *on* rather than off: far likelier a typo or a style name that outlived its style, and the failure modes are not symmetric — a border nobody asked for is a thing to notice and turn off, where a border silently missing looks like a bug in the overlay. |
+| 9.12 | The light is a fringe colour and a core colour, and `halo` mixes between them by how much light reaches each pixel. | Every pixel of the glow used to carry the same hue and the same saturation, from the crest to the last trace of spill twenty-six pixels out, because the falloff was applied to the alpha alone. Nothing real does that: a source bright enough to blaze at its centre is white there, and its colour survives at the edges where there is less of it. One chroma scaled only in alpha is a sheet of tinted plastic held over a lamp, and that — not the cross-section's step, which `halo` had already removed — is what "it looks painted" turned out to mean. Measured across the section at level 1.0: saturation 0.48 out in the tail, 0.28 seven pixels out, 0.13 at the crest, against one number all the way before. Mixed by the *profile* and not by the finished alpha, deliberately: how white the core runs is a property of the shape of the light and not of how loud the music is, and mixing by alpha would reinstate 9.13's defect wearing different arithmetic. The alternative considered was having `halo` derive the core itself from the profile, which is one fewer table and puts the colour policy in the module that is supposed to know only geometry. |
+| 9.13 | The level moves how much light there is and nothing else. Hue and saturation do not move with it. | The ramp climbed to `palette.sung`, which is white by design at chroma 8, so saturation fell from 0.29 to 0.07 across the level range — and since most music sits above 0.6, the border was white nearly all the time. The cover's colour was being spent exactly when the music asked for it. Loud now means more light. This collapses `_ramp`, `_along`, `COLOUR_STOP` and `GRADIENT_STEPS` into one colour and a number, and it costs the border its old top end: the brightest the light can be is the cover colour's own luminance rather than white, which is part of why 9.12's core exists. |
+| 9.14 | Every strip is repainted in the frame that needs it. There is no cap. | `PER_CALL` allowed one strip a call, round-robin, while the gradient rotates every frame — so three of the four edges were always at least a frame behind. On a level that jumped it was plain: measured 139 of 255 between the brightest strip and the dimmest for three frames running, against 57 for the gradient's own swing. A bright bar chasing its way round the panel on every beat, which is the same artefact 9.10 had already found in a resize and answered by making that one case an exception. The cap also bought almost nothing — measured against one strip a call over a kick: +0.4 ms a frame at scale 1.25, +2.5 at 1.5, +2.0 at 2.0 — because a frame's real cost is handing bitmaps to Tk and drawing the companion, and both are paid per pixel of edge band rather than per strip. The change detection stays: a level that has not moved a band leaves every strip alone and the call costs nothing. Guarded by `test_no_frame_leaves_an_edge_showing_the_frame_before`, which is the only test in the suite that paints the way the app does. |
 
 ### Open
 
 | ID  | Question                                                                        | What is known                                                                                                                                                                                                                                                    |
 | --- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| O.2 | Over a light desktop there is effectively no border.                              | The light is additive over whatever is behind it (`glass.py` records the composition law), so on white there is nothing to add to: the rim measures 215 of 255 against black and 119 against a 240 backdrop, where the surroundings are brighter than the line. This is the honest cost of decision 9.5's commitment to *only what escapes the silhouette* — an outline drawn on the panel's own face would not have it, and an outline is what was rejected eleven times. It is not known whether the answer is a dark counter-rim outside the light, a palette that darkens rather than brightens over a bright backdrop, or accepting it. Nothing has been measured. |
+| O.2 | Over a light desktop there is effectively no border.                              | The light is additive over whatever is behind it (`glass.py` records the composition law), so on white there is nothing to add to: the rim measures 215 of 255 against black and 119 against a 240 backdrop, where the surroundings are brighter than the line. This is the honest cost of decision 9.5's commitment to *only what escapes the silhouette* — an outline drawn on the panel's own face would not have it, and an outline is what was rejected eleven times. It is not known whether the answer is a dark counter-rim outside the light, a palette that darkens rather than brightens over a bright backdrop, or accepting it. Nothing has been measured. Photographed on 2026-09-01 (`shoot_backlit.py`, whose backdrop carries a white strip for exactly this): over the white the border is not merely dim, it is absent. |
 | O.3 | Without the companion window the border is a hairline.                            | Off Windows there is no layered surface, so what remains is the inward half, which under decision 9.5 is four pixels of rim. `test_a_border_with_no_surface_is_still_a_border` passes, but what it now guards is much less than it used to. Widening the bleed when there is no surface would be a second design of the border rather than a fallback of this one, so it was not done. Windows always has the companion, so nothing ships against this today. |
-| O.4 | The rim saturates above roughly level 0.8.                                        | The ramp is at white and 255 by then, so the top of the loudness range compresses and the border stops getting brighter, only spreading slightly. The ramp was not touched when the light was concentrated from a fifty-pixel band into about eight, and it probably wants a shallower top now that the same swing lands on a twentieth of the area. Untested. |
+| O.4 | *(Answered by decision 9.13 — see S.24.)* The rim saturates above roughly level 0.8. | The ramp reached white and full opacity by then, so the top of the loudness range compressed. Measured while answering it, the fault was worse than "saturates": the compression was spent turning the cover's colour white. The ramp is gone. |
+| O.6 | The border's inner flank is a hard edge.                                          | The light climbs from nothing to the crest in 1.5 px on the inward side against roughly fourteen outward, so photographed at six times life size one side is a falloff and the other stops dead at the silhouette. It is what remains of "it looks painted" after decision 9.12 answered the chroma half of it. The lever is `BLEED_REACH`, and it points straight at what eleven versions were rejected for: 6 buys a 3.0 px climb at 1.26 pixel-peaks of light on the panel's face against the present 0.51, and 7 buys 3.7 px at 1.66 — where the rejected version laid 11.6. Both break `test_the_panel_keeps_its_own_face_dark`, which asserts point samples rather than that integral. A test for the flank was written, watched failing at 1.5 px, and withdrawn rather than loosen that guard unilaterally. Rendered at 4, 5, 6 and 7 through the real overlay; the judgement is a human's and has not been made. |
+| O.7 | The border misses the frame budget above scale 1.25.                              | Measured over a kick at four scales: 4 ms a frame at 1.0, 6 at 1.25, 9 at 1.5, 28 at 2.0, against 16. Profiled at 2.0: 12.8 ms handing bitmaps to Tk (`strip.photo.paste`) and 8.4 ms drawing the companion, with `halo.image` at 0.7 and `beam._lit` at 0.4 — so it is the bitmaps and not the arithmetic, and it scales with the pixel area of the edge band. Pre-existing, and decision 9.14 accounts for 2 ms of the 28. Nothing has been designed. The obvious directions are repainting only the part of a strip whose colour actually moved, or accepting a lower tick above some scale. |
+| O.8 | `CORE_HEAT` was chosen by eye.                                                    | Decision 9.12 needs a number for how much of the fringe's chroma the core burns out, and 0.45 is what looked right against rendered frames. There is no derivation behind it and no measurement saying it beats 0.35 or 0.55. The test guards the *direction* — the core carries less chroma than the fringe — precisely because the magnitude is not defensible. |
 | O.5 | `_spread` is asserted rather than derived.                                        | A corner is treated as `r/(r+d)` as bright as a straight run, which is the two-dimensional flux argument for a source *at* the silhouette; the real geometry is an extended source behind a rounded plate and would give something else. What is measured is that it is smooth round the arc (254 to 222 at the crest, 17 to 8 eighteen pixels out) and that it removes the "four edges meeting" tell. Nothing shows the falloff is correct, only that it is plausible and looks right. |
 
 ### Superseded decisions
@@ -572,6 +632,10 @@ The frame budget these are weighed against is 16 ms: the reactive border keeps t
 | S.19 | Translated lyrics planned → dropped by agreement, never started.                        | 2026-08-07 |
 | S.20 | Decision 8.8's second clause — the fast tick applies only while a word is lit — no longer holds. The reactive border asks for 60 Hz unconditionally while anything is playing, so the overlay runs at the fast tick all day, which is the cost 8.8 set out to avoid. Whether the border is worth it is open. Its first clause, canvas items built per line and afterwards only recoloured, still stands. | 2026-08-19 |
 | S.21 | Three border styles -> two. `comet` is removed: a bright head travelling an otherwise dark ring. Measured, it ran 19 to 132 in brightness and left each edge dark once it had passed, where the shine holds 36 to 83 everywhere always. It was dropped rather than tuned, because a moving spot beside the words is a thing to look at instead of them — the one job this light must not do — and every number that made it read as a comet (a tail of a seventh of the ring, a phase quantised twice as finely as the others) was a number spent making it more distracting. `PERIOD_S`, `TAIL`, `FLOOR` and `GAIN` went with it; `COLOUR_STOP` stayed, because the shine's ramp uses it. | 2026-09-01 |
+| S.22 | Two border styles -> one. `aurora` is removed: neighbouring cover hues rotating through the border. Measured, its amplitude cosine carried no phase, so at every phase it was ever asked for the brightest pixel of the border was the top-left corner and only the hue travelled through it — a fixed spot to look at, which is what `comet` was removed for. It also skipped the `MIN_BEAM_DE` contrast floor that guarded the other style, and applied `LYRICA_BEAM_INTENSITY` twice, once through `shape_at` and again in its own strength. What it had that survives is a colour that does not wash out when the music is loud (decision 9.13); what it had that does not is a hue that moves. `_aurora_colours` went with it, and so did `beam._around`, which had been written to fix aurora's hue staircase and never wired to anything. (`halo._around` is a different function — arc length round the path — and is untouched.) | 2026-09-01 |
+| S.23 | Decision 9.10 — lifting the strip cap for one call after a reshape — is superseded by 9.14, which removes the cap outright. 9.10 was the right fix scoped to the one case anybody had photographed; the same artefact was in every transient, and the cap turned out to buy between 0.4 and 2.5 ms a frame. `PER_CALL` and the `_whole` flag are gone. `test_a_resize_lights_the_whole_border_and_not_one_edge_of_it` is kept, and now guards the property rather than the exception. | 2026-09-01 |
+| S.24 | The border's ramp climbing from the cover's colour to `palette.sung` -> the colour holds and only the light moves (decision 9.13). This also answers open question O.4, which had recorded the top of the level range compressing without recording why: saturation fell from 0.29 to 0.07 across that range, and since most music sits above level 0.6 the border was white nearly all the time. | 2026-09-01 |
+| S.25 | `LYRICA_BEAM` naming a style -> on or off (decision 9.11). The old style names still parse and still mean on. | 2026-09-01 |
 
 ---
 
@@ -605,3 +669,6 @@ The frame budget these are weighed against is 16 ms: the reactive border keeps t
 | 2026-08-06 | The current line renders word by word (#23), rebuilt per line and recoloured per frame.                          |
 | 2026-08-06 | The cache can live in a synced folder (#25), so a second machine inherits it.                                    |
 | 2026-08-06 | Musixmatch richsync added (#27). Step 7 complete; the visual treatment is deferred to its own work.              |
+| 2026-09-01 | Three border styles become one (#144). `comet` and `aurora` removed, the ramp to white removed, and the light given a fringe and a core so its colour varies across its own cross-section instead of being one flat chroma at every distance. |
+| 2026-09-01 | The strip cap removed (#144). Every edge answers a transient in the frame it lands on, and the suite gained its first test that paints the way the app does — which is why the artefact had survived 865 green tests. |
+| 2026-09-01 | Plan brought up to the repository. The folder structure had still listed `smtc.py`, which has been `sessions/` for some time, and named 7 of the 37 modules that exist; the header had been reporting step 8 as the next delivery since step 9 shipped. Three questions opened (O.6 inner flank, O.7 frame budget, O.8 `CORE_HEAT`) and O.4 closed. |
