@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+- Reduce three border styles to one. `comet` sent a bright head round an
+  otherwise dark ring; `aurora` rotated neighbouring cover hues. Both are gone,
+  and in the end for the same reason: a head is a place, and aurora's brightest
+  point turned out to be a place too — its amplitude cosine carried no phase, so
+  at every phase it was ever asked for the top-left corner was the brightest
+  pixel of the border and only the hue travelled through it. A border that
+  frames words being read must not offer a spot to look at instead of them.
+  `LYRICA_BEAM` is now on or off; the old style names still parse and still mean
+  on.
+- Keep the cover's colour however loud the music gets. The border's ramp climbed
+  to the sung colour, which is white by design at chroma 8, so saturation fell
+  from 0.29 to 0.07 across the level range — and since most music sits above
+  0.6, the border was white nearly all the time. The cover's colour was being
+  spent exactly when the music asked for it. The level now moves how much light
+  there is and nothing else.
+- Give the light a colour across its own cross-section. Every pixel of the glow
+  used to carry the same hue and the same saturation, from the crest to the last
+  trace of spill twenty-six pixels out, because the falloff was applied to the
+  alpha alone. Nothing real does that: a source bright enough to blaze at its
+  centre is white there, and its colour survives at the edges where there is
+  less of it. One chroma scaled only in alpha is a sheet of tinted plastic held
+  over a lamp, and that is what "it looks painted" turned out to mean. The
+  border is now a fringe colour and a core colour with 45 % of that chroma burnt
+  out, mixed per pixel by how much light reaches it. Measured across the section
+  at full level: saturation 0.48 out in the tail, 0.28 seven pixels out, 0.13 at
+  the crest, against one number all the way before. Mixed by the cross-section
+  and not by the finished light, so how white the core runs does not move with
+  the volume.
+- Repaint every edge of the border in the frame that needs it. A cap allowed one
+  strip a call, round-robin, while the gradient rotates every frame — so three
+  of the four edges were always at least a frame behind. On a level that jumped
+  it showed: 139 of 255 between the brightest strip and the dimmest for three
+  frames running, against 57 for the gradient's own swing, which is a bright bar
+  chasing its way round the panel on every beat. The cap bought between 0.4 and
+  2.5 ms a frame, because a frame's real cost is handing bitmaps to Tk and
+  drawing the companion window rather than anything per strip.
+- Render the two border baselines against a cover's palette rather than the
+  neutral default. They had been rendered against the default for as long as
+  they existed, which made them blind to the one thing the border was worst at:
+  against a grey palette a white border is what a correct one looks like too.
+
 - Put the border's light *behind* the panel and let the panel occlude it. Every
   version of this border for eleven rejections has been an outline: a bright
   ring seven pixels inside the panel's own edge, twenty-two more of halo laid
