@@ -180,7 +180,7 @@ was the top-left corner at every phase it was ever asked for, because only its
 hue travelled. A spot to look at beside the words is the one thing this light
 must not offer.
 
-The shine also reads what the music is *doing*, not only how loud it is. How
+The border also reads what the music is *doing*, not only how loud it is. How
 much the level moves sets how far the gradient swings — a compressed wall of
 sound gets an almost even border, something with air between its hits gets a
 border with the same air in it — and how often it rises turns the gradient a
@@ -194,8 +194,15 @@ that way, where one claiming a BPM would be wrong about half the time and
 obviously so. See
 [`research/viability/probe_envelope_tempo.py`](research/viability/probe_envelope_tempo.py).
 
-It costs about a millisecond a frame at the default size — the loop it keeps
-awake is the expense, not the drawing.
+It costs about 4 ms a frame at the default panel size, and the loop it keeps
+awake all the while is as much of the expense as the drawing.
+
+That cost is paid per pixel of the lit band, so it climbs with the window: 7 ms
+a frame at 1.25 scale, 11 at 1.5 and 30 at 2.0, against the 16 ms a 60 Hz frame
+has. Above about 1.25 the border no longer fits in a frame — the time goes on
+handing bitmaps to Tk and drawing the companion window, not on deciding the
+colour. If you run the panel large and the overlay feels heavy, `LYRICA_BEAM=off`
+is the lever; a fix for it has not been designed.
 
 While the overlay is drawing it asks Windows for a finer timer than the 15.625 ms
 one it hands out by default. Without that, a 33 ms request lands on 46 and the
@@ -204,8 +211,8 @@ lyric sweep's frames arrive 7 ms from where they should; with it, 33 ms lands on
 since the finer resolution costs a little power.
 
 What it cannot do is follow a beat. The meter reports loudness and has no
-spectrum, so there is nothing in it to find a downbeat with — the head travels
-at a fixed rate and only its brightness answers the music. Looking the tempo up
+spectrum, so there is nothing in it to find a downbeat with — the gradient turns
+at its own rate and only the light answers the music. Looking the tempo up
 instead was measured and rejected: see
 [`research/viability/probe_bpm.py`](research/viability/probe_bpm.py).
 
@@ -364,13 +371,29 @@ database would be worse here, not better, since concurrent writers are what corr
 ```
 src/lyrica/
 ├─ app.py            tkinter overlay; interpolates position every 100 ms
-├─ smtc.py           Windows media session reader (background thread)
+├─ config.py         one reader per setting, over the environment and .env
 ├─ lyrics.py         Lyrics model + LRC parser
-└─ providers/
-   ├─ base.py        LyricsProvider interface
-   ├─ lrclib.py      LRCLIB: exact /get → scored fuzzy /search
-   └─ __init__.py    provider cascade + on-disk cache (%LOCALAPPDATA%/Lyrica)
+├─ ttml.py           word-level TTML: agents, backing lines
+├─ textmatch.py      title/artist matching for the cascade
+├─ sessions/         what is playing, per platform
+│  ├─ windows.py     SMTC          ├─ macos.py    MediaRemote
+│  └─ base.py        what a reader must answer
+├─ providers/        where the words come from
+│  ├─ base.py        LyricsProvider interface
+│  ├─ lrclib.py      LRCLIB: exact /get → scored fuzzy /search
+│  ├─ community.py   community TTML      ├─ musixmatch.py  richsync
+│  ├─ netease.py     NetEase, incl. yrc
+│  └─ __init__.py    provider cascade + on-disk cache (%LOCALAPPDATA%/Lyrica)
+├─ chrome/           the window itself: mode, scale, DWM, clip region
+│  └─ layered.py     the WS_EX_LAYERED companion the border's outer half needs
+└─ …                 drawing: palette, glass, songcolour, artwork,
+                     meter, beam, halo, bloom, lineview, overlay_text, motion
 ```
+
+The drawing split worth knowing: `beam.py` decides what colour the border is at
+each point of its circumference, and `halo.py` decides which pixels that reaches
+and how strongly. Neither knows the other's half — `halo` has never heard of
+music or palettes, and `beam` has never heard of strips or window handles.
 
 Browser metadata is normalized before lookup: "Artist - Title" splitting and
 removal of video-title noise like "(Official Video)".
@@ -395,3 +418,10 @@ outline, the packaging — so what is left is what is actually left:
   publish the executable, so `pyinstaller lyrica.spec` is a local step.
 - **macOS on real hardware.** There is a session reader and CI compiles it, but
   nobody has watched it read a song. Treat that path as unverified.
+- **The border above 1.25 scale.** It misses the frame budget there and the
+  overrun is in handing bitmaps to the compositor, not in the arithmetic. See
+  the section above; no fix is designed.
+- **The border over a light desktop.** Its light is additive, so over white
+  there is nothing to add to and the border is not dim but absent. Whether the
+  answer is a dark counter-rim, a palette that darkens instead, or accepting
+  it, is undecided.
