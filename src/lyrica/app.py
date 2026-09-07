@@ -418,7 +418,7 @@ def transport_is_live(track: Track, snap: Snapshot) -> bool:
     no moving clock either, so its last rendered frame remains the truth.
     """
     return (snap.ok and snap.playing and track.snapshot.ok
-            and snap.track_key() == track.snapshot.track_key())
+            and snap.playback_key() == track.snapshot.playback_key())
 
 
 def should_animate(step: int | None, dragging: bool) -> bool:
@@ -1022,7 +1022,8 @@ class Overlay:
                 # `target` stays in the recording's time because that is what the
                 # tick compares against; only the player is told where the video
                 # has to be for it.
-                if self.reader.seek(max(0.0, self._cuts.to_video(target))):
+                if self.reader.seek(
+                        max(0.0, self._cuts.to_video(target)), self._shown.snapshot):
                     logger.info("seeking to line %d at %.2fs", index, target)
                     # Move now rather than waiting for the next poll, and ignore
                     # the position until it catches up. Without the guard the
@@ -1625,7 +1626,7 @@ class Overlay:
         self._loading = loading
 
         def work():
-            found = fetch_for_candidates(snap.lookup_candidates(), snap.duration,
+            found = fetch_for_candidates(snap.lyrics_candidates(), snap.duration,
                                          snap.album)
             self._worker_results.put(WorkerResult(loading.gen, "lyrics", found))
 
@@ -1686,7 +1687,7 @@ class Overlay:
             # under you reads worse than one that arrives a moment late.
             wanted = max(600, self._thumb_size * 4)
             data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
-                    or self.reader.read_artwork())
+                    or self.reader.read_artwork(snap))
             # After the cover, because the search both need has then run and its
             # answer is on disk. Kept even when no cover was found: a track can
             # be named by a catalogue that has no picture of it.
@@ -2795,11 +2796,11 @@ class Overlay:
             return
 
         snap = self.reader.snapshot
-        if snap.ok and snap.track_key() != self._fetching_key:
+        if snap.ok and snap.playback_key() != self._fetching_key:
             # Only starts the assembling. Nothing on screen moves until the new
             # song is whole, so the one playing keeps its thumbnail, its name
             # and its last line until there is a complete one to replace them.
-            self._fetching_key = snap.track_key()
+            self._fetching_key = snap.playback_key()
             self._start_fetch(snap)
         # After observing the session change. A result for the outgoing track
         # can land in the same tick as the new snapshot; advancing the
@@ -2883,7 +2884,7 @@ class Overlay:
 
         paused_current = (
             snap.ok and not snap.playing and self._shown.snapshot.ok
-            and snap.track_key() == self._shown.snapshot.track_key())
+            and snap.playback_key() == self._shown.snapshot.playback_key())
         # A resize asks for exactly what a promotion asks for: the whole scene
         # built again, at the size and font it has now. Consumed whatever the
         # answer is, because a live transport rebuilds through the render below

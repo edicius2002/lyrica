@@ -128,6 +128,19 @@ def test_clean_source_yields_one_candidate():
     assert SPOTIFY.lookup_candidates() == [("Porter Robinson", "Goodbye To A World")]
 
 
+def test_lyrics_candidates_retain_version_evidence_removed_from_display_title():
+    snapshot = Snapshot(
+        app="Spotify.exe",
+        artist="Artist",
+        title="Song (2011 Remaster)",
+        ok=True,
+    )
+    assert snapshot.lookup_candidates() == [("Artist", "Song")]
+    assert snapshot.lyrics_candidates() == [
+        ("Artist", "Song", "Song (2011 Remaster)"),
+    ]
+
+
 def test_soundcloud_offers_the_title_split_because_the_artist_is_an_uploader():
     # "Minh Prime" is whoever re-uploaded it; the real artist is in the title.
     candidates = SOUNDCLOUD_REUPLOAD.lookup_candidates()
@@ -196,7 +209,7 @@ def test_a_result_remembers_which_reading_found_it(tmp_path, monkeypatch):
 
     monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda a, t, d, al: (
+                        lambda a, t, d, al, **k: (
                             (Lyrics(lines=[(0.0, "x")], synced=True), ["stub"])
                             if a == "Billie Eilish" else (None, ["stub"])))
     got = providers.fetch_for_candidates(
@@ -211,11 +224,11 @@ def test_the_reading_survives_the_cache(tmp_path, monkeypatch):
 
     monkeypatch.setattr(providers, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda *a: (Lyrics(lines=[(0.0, "x")], synced=True,
+                        lambda *a, **k: (Lyrics(lines=[(0.0, "x")], synced=True,
                                            source="s"), providers._provider_names()))
     providers.fetch_lyrics("Billie Eilish", "CHIHIRO")
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda *a: pytest.fail("the cache should have answered"))
+                        lambda *a, **k: pytest.fail("the cache should have answered"))
     again = providers.fetch_lyrics("Billie Eilish", "CHIHIRO")
     assert again.queried == ("Billie Eilish", "CHIHIRO")
 

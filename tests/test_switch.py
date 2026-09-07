@@ -13,9 +13,11 @@ def _snap(title, artist, key):
     return SimpleNamespace(
         ok=True, playing=True, position=1.0, duration=200.0,
         updated_at=datetime.now(UTC), live_position=lambda: 1.0,
-        track_key=lambda: key, is_browser=False, artist=artist, title=title,
+        track_key=lambda: key, playback_key=lambda: key,
+        is_browser=False, artist=artist, title=title,
         album="", norm_artist_title=lambda: (artist, title),
-        lookup_candidates=lambda: [(artist, title)])
+        lookup_candidates=lambda: [(artist, title)],
+        lyrics_candidates=lambda: [(artist, title, title)])
 
 
 @pytest.fixture

@@ -8,11 +8,13 @@ on any other platform fails outright, and the package has to remain importable
 everywhere for the platform selection to run at all.
 """
 import asyncio
+import hashlib
 import logging
 import sys
 from datetime import UTC
 
 from lyrica.sessions.base import SessionReader, Snapshot
+from lyrica.sessions.selection import SessionCandidate, StableSessionSelector
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,10 @@ def _session_manager_class():
 class WindowsSessionReader(SessionReader):
     """Polls the Windows media session on its own asyncio loop."""
 
+    def __init__(self, interval: float = 0.5):
+        super().__init__(interval)
+        self._selector = StableSessionSelector()
+
     @staticmethod
     def available() -> bool:
         if sys.platform != "win32":
@@ -50,22 +56,20 @@ class WindowsSessionReader(SessionReader):
             return False
         return True
 
-    def seek(self, seconds: float) -> bool:
+    def seek(self, seconds: float, snapshot: Snapshot | None = None) -> bool:
         """Ask the current session to jump. Verified working against Spotify.
 
         Runs on its own loop rather than the reader's: the reader is polling on
         its thread, and a jump is a one-off the caller is waiting on.
         """
         try:
-            return asyncio.run(self._seek(max(0.0, seconds)))
+            return asyncio.run(self._seek(max(0.0, seconds), snapshot or self.snapshot))
         except Exception:
             logger.exception("seek to %.2fs failed", seconds)
             return False
 
-    async def _seek(self, seconds: float) -> bool:
-        manager_cls = _session_manager_class()
-        mgr = await manager_cls.request_async()
-        session = mgr.get_current_session()
+    async def _seek(self, seconds: float, snapshot: Snapshot | None = None) -> bool:
+        session = await self._resolve_session(snapshot or self.snapshot)
         if session is None:
             return False
         controls = session.get_playback_info().controls
@@ -76,30 +80,30 @@ class WindowsSessionReader(SessionReader):
         return bool(await session.try_change_playback_position_async(
             int(seconds * 10_000_000)))
 
-    def read_artwork(self) -> bytes | None:
+    def read_artwork(self, snapshot: Snapshot | None = None) -> bytes | None:
         """The current track's artwork, if the player published any.
 
         Read on demand rather than with every poll: it is tens of kilobytes and
         changes once per track, where the position changes constantly.
         """
         try:
-            return asyncio.run(self._artwork())
+            return asyncio.run(self._artwork(snapshot or self.snapshot))
         except Exception:
             logger.debug("could not read artwork", exc_info=True)
             return None
 
-    async def _artwork(self) -> bytes | None:
+    async def _artwork(self, snapshot: Snapshot | None = None) -> bytes | None:
+        session = await self._resolve_session(snapshot or self.snapshot)
+        if session is None:
+            return None
+        return await self._read_session_artwork(session)
+
+    async def _read_session_artwork(self, session) -> bytes | None:
         from winsdk.windows.storage.streams import (
             Buffer,
             DataReader,
             InputStreamOptions,
         )
-
-        manager_cls = _session_manager_class()
-        mgr = await manager_cls.request_async()
-        session = mgr.get_current_session()
-        if session is None:
-            return None
         media = await session.try_get_media_properties_async()
         reference = media.thumbnail
         if reference is None:
@@ -162,39 +166,65 @@ class WindowsSessionReader(SessionReader):
     async def _read(self) -> Snapshot:
         manager_cls = _session_manager_class()
         mgr = await manager_cls.request_async()
-        sessions = list(mgr.get_sessions())
-        if not sessions:
+        records = await self._records(mgr)
+        if not records:
             return Snapshot()
+        selected = self._selector.choose([
+            SessionCandidate(snapshot.session_id, snapshot.playing, status == "PAUSED")
+            for _session, snapshot, status in records
+        ])
+        return next(
+            snapshot for _session, snapshot, _status in records
+            if snapshot.session_id == selected)
 
-        # Priority: playing session > paused > anything else
-        def score(s):
+    @staticmethod
+    def _session_id(app: str, artist: str, title: str,
+                    album: str, duration: float) -> str:
+        evidence = "\x1f".join((app, artist, title, album, f"{duration:.3f}"))
+        return hashlib.sha1(
+            evidence.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    async def _records(self, manager) -> list[tuple[object, Snapshot, str]]:
+        records = []
+        for session in list(manager.get_sessions()):
             try:
-                st = s.get_playback_info().playback_status.name
-            except OSError:
-                # A session can disappear between being listed and being read;
-                # WinRT surfaces that as an OSError. Rank it last and move on.
-                logger.debug("session %s did not report playback status",
-                             s.source_app_user_model_id)
-                st = ""
-            return 2 if st == "PLAYING" else (1 if st == "PAUSED" else 0)
+                playback = session.get_playback_info()
+                status = (playback.playback_status.name
+                          if playback and playback.playback_status else "")
+                media = await session.try_get_media_properties_async()
+                timeline = session.get_timeline_properties()
+            except (OSError, RuntimeError):
+                logger.debug("media session disappeared while being read", exc_info=True)
+                continue
+            app = session.source_app_user_model_id or ""
+            artist = (media.artist or "").strip()
+            title = (media.title or "").strip()
+            album = (media.album_title or "").strip()
+            duration = timeline.end_time.total_seconds()
+            updated = timeline.last_updated_time
+            if updated is not None and updated.tzinfo is None:
+                updated = updated.replace(tzinfo=UTC)
+            snapshot = Snapshot(
+                app=app,
+                artist=artist,
+                title=title,
+                album=album,
+                duration=duration,
+                position=timeline.position.total_seconds(),
+                updated_at=updated,
+                playing=(status == "PLAYING"),
+                ok=bool(title),
+                session_id=self._session_id(app, artist, title, album, duration),
+            )
+            if snapshot.ok:
+                records.append((session, snapshot, status))
+        return records
 
-        best = max(sessions, key=score)
-        media = await best.try_get_media_properties_async()
-        tl = best.get_timeline_properties()
-        pb = best.get_playback_info()
-        status = pb.playback_status.name if pb and pb.playback_status else ""
-        updated = tl.last_updated_time
-        if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=UTC)
-
-        return Snapshot(
-            app=best.source_app_user_model_id or "",
-            artist=(media.artist or "").strip(),
-            title=(media.title or "").strip(),
-            album=(media.album_title or "").strip(),
-            duration=tl.end_time.total_seconds(),
-            position=tl.position.total_seconds(),
-            updated_at=updated,
-            playing=(status == "PLAYING"),
-            ok=bool(media.title),
-        )
+    async def _resolve_session(self, snapshot: Snapshot):
+        if not snapshot.ok or not snapshot.session_id:
+            return None
+        manager_cls = _session_manager_class()
+        manager = await manager_cls.request_async()
+        records = await self._records(manager)
+        return next((session for session, candidate, _status in records
+                     if candidate.session_id == snapshot.session_id), None)

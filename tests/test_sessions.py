@@ -6,12 +6,13 @@ which is the only verification available without a Mac.
 """
 import asyncio
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from lyrica import sessions
-from lyrica.sessions import NullSessionReader, Snapshot, create_reader
+from lyrica.sessions import NullSessionReader, Snapshot, create_reader, windows
 from lyrica.sessions.macos import parse_timestamp, snapshot_from_payload
 from lyrica.sessions.windows import WindowsSessionReader, _RestartReadLoop
 
@@ -202,3 +203,216 @@ def test_a_macos_snapshot_still_produces_lookup_candidates():
         "title": "Dua Lipa - Levitating (Official Music Video)", "artist": "Dua Lipa",
     })
     assert snap.lookup_candidates()[0] == ("Dua Lipa", "Levitating")
+
+
+# --- Windows multi-session integration -------------------------------------
+
+class FakeWindowsSession:
+    def __init__(self, title, *, app="browser", artist="Artist", status="PLAYING"):
+        self.source_app_user_model_id = app
+        self.media = SimpleNamespace(
+            artist=artist, title=title, album_title="Album", thumbnail=None)
+        self.status = status
+        self.seeks = []
+
+    def get_playback_info(self):
+        return SimpleNamespace(
+            playback_status=SimpleNamespace(name=self.status),
+            controls=SimpleNamespace(is_playback_position_enabled=True),
+        )
+
+    async def try_get_media_properties_async(self):
+        return self.media
+
+    def get_timeline_properties(self):
+        return SimpleNamespace(
+            end_time=timedelta(seconds=200),
+            position=timedelta(seconds=20),
+            last_updated_time=datetime(2026, 9, 7, tzinfo=UTC),
+        )
+
+    async def try_change_playback_position_async(self, ticks):
+        self.seeks.append(ticks)
+        return True
+
+
+class FakeWindowsManager:
+    def __init__(self, sessions):
+        self.sessions = sessions
+
+    def get_sessions(self):
+        return list(self.sessions)
+
+    def get_current_session(self):
+        return self.sessions[-1] if self.sessions else None
+
+
+def wire_windows_manager(monkeypatch, manager):
+    class ManagerClass:
+        @staticmethod
+        async def request_async():
+            return manager
+
+    monkeypatch.setattr(windows, "_session_manager_class", lambda: ManagerClass)
+
+
+def test_two_playing_windows_sessions_do_not_flip_when_enumeration_reorders(monkeypatch):
+    a = FakeWindowsSession("A", app="shared-browser")
+    b = FakeWindowsSession("B", app="shared-browser")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    manager.sessions.reverse()
+    second = asyncio.run(reader._read())
+
+    assert first.title == second.title
+    assert first.session_id == second.session_id
+
+
+def test_a_paused_selection_switches_to_another_playing_session(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    selected = a if first.title == "A" else b
+    other = b if selected is a else a
+    selected.status = "PAUSED"
+    other.status = "PLAYING"
+
+    second = asyncio.run(reader._read())
+
+    assert second.title == other.media.title
+
+
+def test_a_paused_selection_is_retained_when_nothing_else_plays(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    a.status = b.status = "PAUSED"
+    manager.sessions.reverse()
+    second = asyncio.run(reader._read())
+
+    assert second.title == first.title
+    assert second.session_id == first.session_id
+
+
+def test_a_disappeared_selection_moves_to_the_remaining_session(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    manager.sessions = [b] if first.title == "A" else [a]
+    second = asyncio.run(reader._read())
+
+    assert second.title != first.title
+
+
+def test_sessions_sharing_an_app_id_have_distinct_bindings(monkeypatch):
+    manager = FakeWindowsManager([
+        FakeWindowsSession("A", app="same-browser"),
+        FakeWindowsSession("B", app="same-browser"),
+    ])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    manager.sessions = [manager.sessions[1]]
+    second = asyncio.run(reader._read())
+
+    assert first.app == second.app
+    assert first.session_id != second.session_id
+
+
+def test_a_restarted_projection_of_the_same_session_keeps_its_binding(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+
+    first = asyncio.run(reader._read())
+    replacement = FakeWindowsSession(first.title)
+    other = b if first.title == "A" else a
+    manager.sessions = [other, replacement]
+    second = asyncio.run(reader._read())
+
+    assert second.title == first.title
+    assert second.session_id == first.session_id
+
+
+def test_artwork_resolves_the_session_named_by_the_snapshot(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+
+    async def artwork_for(session):
+        return session.media.title.encode()
+
+    monkeypatch.setattr(reader, "_read_session_artwork", artwork_for, raising=False)
+
+    assert asyncio.run(reader._artwork(snapshot)) == snapshot.title.encode()
+
+
+def test_stale_artwork_binding_does_not_fall_through_to_current(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+    selected = a if snapshot.title == "A" else b
+    selected.media.title = "Changed"
+    called = []
+
+    async def artwork_for(session):
+        called.append(session)
+        return b"wrong"
+
+    monkeypatch.setattr(reader, "_read_session_artwork", artwork_for, raising=False)
+
+    assert asyncio.run(reader._artwork(snapshot)) is None
+    assert called == []
+
+
+def test_seek_controls_the_session_named_by_the_snapshot(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+
+    assert reader.seek(12.5, snapshot)
+    selected = a if snapshot.title == "A" else b
+    other = b if selected is a else a
+    assert selected.seeks == [125_000_000]
+    assert other.seeks == []
+
+
+def test_stale_seek_binding_never_controls_a_new_track(monkeypatch):
+    a = FakeWindowsSession("A")
+    b = FakeWindowsSession("B")
+    manager = FakeWindowsManager([a, b])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+    selected = a if snapshot.title == "A" else b
+    selected.media.title = "Changed"
+
+    assert not reader.seek(12.5, snapshot)
+    assert a.seeks == [] and b.seeks == []
