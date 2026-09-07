@@ -10,6 +10,8 @@ import requests
 
 from lyrica.lyrics import MAX_INFERRED_WORD_S, Precision
 from lyrica.providers import musixmatch
+from lyrica.providers.base import OutcomeKind
+from lyrica.providers.identity import SongQuery
 from lyrica.providers.musixmatch import MusixmatchProvider, richsync_to_lyrics, richsync_to_words
 
 # Captured shape: ts/te bound the line, x is its text, l lists word events whose
@@ -167,6 +169,51 @@ def test_no_match_is_a_miss(wired):
 def test_a_network_failure_is_a_miss_not_a_crash(wired):
     wired["error"] = requests.ConnectionError("down")
     assert MusixmatchProvider().fetch("A", "B", 200.0) is None
+
+
+def test_lookup_distinguishes_network_failure_from_no_match(wired):
+    provider = MusixmatchProvider()
+    query = SongQuery("A", "B", 200.0)
+    wired["error"] = requests.Timeout("slow")
+    assert provider.lookup(query).kind is OutcomeKind.RETRYABLE
+
+    wired["error"] = None
+    wired["responses"] = {
+        "token.get": envelope(body={"user_token": "tok"}),
+        "matcher.track.get": envelope(body={}),
+    }
+    assert provider.lookup(query).kind is OutcomeKind.NO_MATCH
+
+
+def test_lookup_surfaces_the_existing_cooldown(wired):
+    wired["responses"] = {"token.get": envelope(401, hint="captcha")}
+    provider = MusixmatchProvider()
+
+    first = provider.lookup(SongQuery("A", "B", 200.0))
+    assert first.kind is OutcomeKind.UNAVAILABLE
+    assert first.retry_after == pytest.approx(musixmatch.COOLDOWN_S, abs=1)
+
+    wired["calls"].clear()
+    second = provider.lookup(SongQuery("C", "D", 200.0))
+    assert second.kind is OutcomeKind.UNAVAILABLE
+    assert wired["calls"] == []
+
+
+def test_lookup_rejects_matcher_identity_contradictions(wired):
+    wired["responses"] = working()
+    wired["responses"]["matcher.track.get"] = envelope(body={"track": {
+        "track_id": 1,
+        "has_richsync": True,
+        "artist_name": "Wrong Artist",
+        "track_name": "Same Title",
+    }})
+
+    outcome = MusixmatchProvider().lookup(
+        SongQuery("Wanted Artist", "Same Title", 200.0))
+
+    assert outcome.kind is OutcomeKind.NO_MATCH
+    assert outcome.reason == "artist_mismatch"
+    assert "track.richsync.get" not in wired["calls"]
 
 
 def test_an_empty_title_never_reaches_the_network(wired):

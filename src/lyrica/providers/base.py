@@ -1,7 +1,45 @@
 """Provider interface for lyrics sources."""
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import StrEnum
 
 from lyrica.lyrics import Lyrics, Precision
+
+
+class OutcomeKind(StrEnum):
+    """The cache-relevant meaning of one provider attempt."""
+
+    HIT = "hit"
+    NO_MATCH = "no_match"
+    RETRYABLE = "retryable"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class ProviderOutcome:
+    """A provider answer without collapsing inability into a valid miss."""
+
+    kind: OutcomeKind
+    lyrics: Lyrics | None = None
+    reason: str = ""
+    retry_after: float | None = None
+
+    @classmethod
+    def hit(cls, lyrics: Lyrics, *, reason: str = "") -> "ProviderOutcome":
+        return cls(OutcomeKind.HIT, lyrics=lyrics, reason=reason)
+
+    @classmethod
+    def no_match(cls, *, reason: str = "") -> "ProviderOutcome":
+        return cls(OutcomeKind.NO_MATCH, reason=reason)
+
+    @classmethod
+    def retryable(cls, *, reason: str = "") -> "ProviderOutcome":
+        return cls(OutcomeKind.RETRYABLE, reason=reason)
+
+    @classmethod
+    def unavailable(cls, *, reason: str = "",
+                    retry_after: float | None = None) -> "ProviderOutcome":
+        return cls(OutcomeKind.UNAVAILABLE, reason=reason, retry_after=retry_after)
 
 
 class LyricsProvider(ABC):

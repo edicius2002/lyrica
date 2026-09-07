@@ -32,7 +32,8 @@ from lyrica.lyrics import (
     Precision,
     split_parenthetical_adlib,
 )
-from lyrica.providers.base import LyricsProvider
+from lyrica.providers.base import LyricsProvider, ProviderOutcome
+from lyrica.providers.identity import SongQuery, validate_identity
 
 BASE = "https://apic-desktop.musixmatch.com/ws/1.1"
 APP_ID = "web-desktop-app-v1.0"
@@ -232,22 +233,122 @@ class MusixmatchProvider(LyricsProvider):
             self._store_token(token)
         return token
 
+    def _cooldown_outcome(self, why: str) -> ProviderOutcome:
+        self._begin_cooldown(why)
+        return ProviderOutcome.unavailable(
+            reason="cooldown", retry_after=COOLDOWN_S)
+
+    def _token_outcome(self) -> tuple[str | None, ProviderOutcome | None]:
+        if self._token and time.monotonic() - self._token_at < TOKEN_TTL_S:
+            return self._token, None
+        cached = self._load_cached_token()
+        if cached:
+            self._token, self._token_at = cached, time.monotonic()
+            return cached, None
+
+        payload = self._call("token.get", {})
+        if payload is None:
+            return None, ProviderOutcome.retryable(reason="transport_or_invalid_json")
+        status, hint = self._header(payload)
+        if status != 200:
+            return None, self._cooldown_outcome(
+                f"token.get status {status} hint {hint!r}")
+        try:
+            token = payload["message"]["body"].get("user_token")
+        except (AttributeError, KeyError, TypeError):
+            return None, ProviderOutcome.retryable(reason="invalid_payload")
+        if not token:
+            return None, ProviderOutcome.retryable(reason="missing_token")
+        self._token, self._token_at = token, time.monotonic()
+        self._store_token(token)
+        return token, None
+
     # --- lookup ---
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:
-        if not title:
-            return None
+        return self.lookup(SongQuery(artist, title, duration, album, title)).lyrics
+
+    def lookup(self, query: SongQuery) -> ProviderOutcome:
+        if not query.title:
+            return ProviderOutcome.no_match(reason="empty_title")
         with self._lock:
             if time.monotonic() < self._cooldown_until:
-                logger.debug("musixmatch: still backing off, skipping %r - %r", artist, title)
-                return None
-            token = self._get_token()
-            if not token:
-                return None
-            track = self._match(token, artist, title, duration)
-            if not track or not track.get("has_richsync"):
-                return None
-            return self._richsync(token, track["track_id"])
+                logger.debug("musixmatch: still backing off, skipping %r - %r",
+                             query.artist, query.title)
+                return ProviderOutcome.unavailable(
+                    reason="cooldown",
+                    retry_after=max(0.0, self._cooldown_until - time.monotonic()),
+                )
+            token, failure = self._token_outcome()
+            if failure is not None:
+                return failure
+            return self._lookup_with_token(token, query)
+
+    def _lookup_with_token(self, token: str, query: SongQuery) -> ProviderOutcome:
+        params = {"q_artist": query.artist, "q_track": query.title,
+                  "usertoken": token}
+        if query.duration > 1:
+            params["q_duration"] = round(query.duration)
+        payload = self._call("matcher.track.get", params)
+        if payload is None:
+            return ProviderOutcome.retryable(reason="transport_or_invalid_json")
+        status, hint = self._header(payload)
+        if status in (401, 429):
+            return self._cooldown_outcome(f"matcher hint {hint!r}")
+        if status == 404:
+            return ProviderOutcome.no_match(reason="no_track")
+        if status != 200:
+            return ProviderOutcome.retryable(reason=f"matcher_status_{status}")
+        try:
+            track = payload["message"]["body"].get("track")
+        except (AttributeError, KeyError, TypeError):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not track:
+            return ProviderOutcome.no_match(reason="no_track")
+        decision = validate_identity(
+            requested_artist=query.artist,
+            requested_title=query.title,
+            requested_raw_title=query.raw_title or query.title,
+            returned_artist=track.get("artist_name") or "",
+            returned_title=track.get("track_name") or "",
+        )
+        if not decision.accepted:
+            return ProviderOutcome.no_match(reason=decision.reason)
+        if not track.get("has_richsync"):
+            return ProviderOutcome.no_match(reason="no_richsync")
+        try:
+            track_id = track["track_id"]
+        except KeyError:
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        return self._richsync_outcome(token, track_id)
+
+    def _richsync_outcome(self, token: str, track_id: int) -> ProviderOutcome:
+        payload = self._call("track.richsync.get",
+                             {"track_id": track_id, "usertoken": token})
+        if payload is None:
+            return ProviderOutcome.retryable(reason="transport_or_invalid_json")
+        status, hint = self._header(payload)
+        if status in (401, 429):
+            return self._cooldown_outcome(f"richsync hint {hint!r}")
+        if status == 404:
+            return ProviderOutcome.no_match(reason="no_richsync")
+        if status != 200:
+            return ProviderOutcome.retryable(reason=f"richsync_status_{status}")
+        try:
+            raw = (payload["message"]["body"].get("richsync") or {}).get(
+                "richsync_body")
+        except (AttributeError, KeyError, TypeError):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not raw:
+            return ProviderOutcome.no_match(reason="no_richsync")
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            return ProviderOutcome.retryable(reason="invalid_richsync")
+        lyrics = richsync_to_lyrics(parsed)
+        if not lyrics.lines:
+            return ProviderOutcome.retryable(reason="invalid_richsync")
+        return ProviderOutcome.hit(lyrics, reason="compatible")
 
     def _match(self, token: str, artist: str, title: str, duration: float) -> dict | None:
         params = {"q_artist": artist, "q_track": title, "usertoken": token}

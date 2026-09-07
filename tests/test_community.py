@@ -9,7 +9,9 @@ import requests
 
 from lyrica.lyrics import Precision
 from lyrica.providers import community
+from lyrica.providers.base import OutcomeKind
 from lyrica.providers.community import CommunityTtmlProvider, _score
+from lyrica.providers.identity import SongQuery
 
 TTML = """<tt xmlns="http://www.w3.org/ns/ttml"
     xmlns:itunes="http://music.apple.com/lyric-ttml-internal"
@@ -34,8 +36,9 @@ VARIANTS = [
 
 
 class FakeResponse:
-    def __init__(self, payload=None, text="", status=200):
+    def __init__(self, payload=None, text="", status=200, headers=None):
         self._payload, self.text, self.status_code = payload, text, status
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -142,6 +145,44 @@ def test_a_missing_document_is_a_miss(wired):
 def test_a_network_failure_is_a_miss_not_a_crash(wired):
     wired["error"] = requests.ConnectionError("down")
     assert CommunityTtmlProvider().fetch("Dua Lipa", "Levitating", 203.0) is None
+
+
+def test_lookup_distinguishes_network_failure_from_no_match(wired):
+    provider = CommunityTtmlProvider()
+    query = SongQuery("Dua Lipa", "Levitating", 203.0)
+    wired["error"] = requests.Timeout("slow")
+    assert provider.lookup(query).kind is OutcomeKind.RETRYABLE
+
+    wired["error"] = None
+    wired["results"] = []
+    assert provider.lookup(query).kind is OutcomeKind.NO_MATCH
+
+
+def test_lookup_surfaces_rate_limit_retry_time(monkeypatch):
+    monkeypatch.setattr(
+        community.requests,
+        "get",
+        lambda *_args, **_kwargs: FakeResponse(
+            status=429, headers={"Retry-After": "75"}),
+    )
+    outcome = CommunityTtmlProvider().lookup(
+        SongQuery("Dua Lipa", "Levitating", 203.0))
+    assert outcome.kind is OutcomeKind.UNAVAILABLE
+    assert outcome.retry_after == 75.0
+
+
+def test_lookup_rejects_an_incompatible_version_before_downloading(wired):
+    wired["results"] = [{
+        "track_name": "Levitating (Live)",
+        "artist_name": "Dua Lipa",
+        "duration": 203,
+        "lyricsUrl": "live",
+    }]
+    outcome = CommunityTtmlProvider().lookup(
+        SongQuery("Dua Lipa", "Levitating", 203.0, raw_title="Levitating"))
+    assert outcome.kind is OutcomeKind.NO_MATCH
+    assert outcome.reason == "version_mismatch"
+    assert wired["fetched"] == []
 
 
 def test_an_empty_title_never_reaches_the_network(wired):
