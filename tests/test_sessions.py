@@ -360,7 +360,8 @@ def test_artwork_resolves_the_session_named_by_the_snapshot(monkeypatch):
     reader = WindowsSessionReader()
     snapshot = asyncio.run(reader._read())
 
-    async def artwork_for(session):
+    async def artwork_for(session, expected):
+        assert expected is snapshot
         return session.media.title.encode()
 
     monkeypatch.setattr(reader, "_read_session_artwork", artwork_for, raising=False)
@@ -379,7 +380,7 @@ def test_stale_artwork_binding_does_not_fall_through_to_current(monkeypatch):
     selected.media.title = "Changed"
     called = []
 
-    async def artwork_for(session):
+    async def artwork_for(session, expected):
         called.append(session)
         return b"wrong"
 
@@ -416,3 +417,44 @@ def test_stale_seek_binding_never_controls_a_new_track(monkeypatch):
 
     assert not reader.seek(12.5, snapshot)
     assert a.seeks == [] and b.seeks == []
+
+
+def test_seek_rechecks_identity_after_resolving_an_in_flight_session(monkeypatch):
+    session = FakeWindowsSession("A")
+    manager = FakeWindowsManager([session])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+    old = session.media
+    changed = SimpleNamespace(
+        artist=old.artist, title="Changed", album_title=old.album_title,
+        thumbnail=None)
+    answers = iter((old, changed))
+
+    async def changing_media():
+        return next(answers)
+
+    session.try_get_media_properties_async = changing_media
+
+    assert not reader.seek(12.5, snapshot)
+    assert session.seeks == []
+
+
+def test_artwork_rechecks_identity_after_resolving_an_in_flight_session(monkeypatch):
+    session = FakeWindowsSession("A")
+    manager = FakeWindowsManager([session])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    snapshot = asyncio.run(reader._read())
+    old = session.media
+    changed = SimpleNamespace(
+        artist=old.artist, title="Changed", album_title=old.album_title,
+        thumbnail=object())
+    answers = iter((old, changed))
+
+    async def changing_media():
+        return next(answers)
+
+    session.try_get_media_properties_async = changing_media
+
+    assert asyncio.run(reader._artwork(snapshot)) is None

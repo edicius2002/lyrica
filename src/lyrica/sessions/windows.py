@@ -69,8 +69,11 @@ class WindowsSessionReader(SessionReader):
             return False
 
     async def _seek(self, seconds: float, snapshot: Snapshot | None = None) -> bool:
-        session = await self._resolve_session(snapshot or self.snapshot)
+        expected = snapshot or self.snapshot
+        session = await self._resolve_session(expected)
         if session is None:
+            return False
+        if await self._matching_media(session, expected) is None:
             return False
         controls = session.get_playback_info().controls
         if not getattr(controls, "is_playback_position_enabled", False):
@@ -93,18 +96,22 @@ class WindowsSessionReader(SessionReader):
             return None
 
     async def _artwork(self, snapshot: Snapshot | None = None) -> bytes | None:
-        session = await self._resolve_session(snapshot or self.snapshot)
+        expected = snapshot or self.snapshot
+        session = await self._resolve_session(expected)
         if session is None:
             return None
-        return await self._read_session_artwork(session)
+        return await self._read_session_artwork(session, expected)
 
-    async def _read_session_artwork(self, session) -> bytes | None:
+    async def _read_session_artwork(
+            self, session, expected: Snapshot) -> bytes | None:
+        media = await self._matching_media(session, expected)
+        if media is None:
+            return None
         from winsdk.windows.storage.streams import (
             Buffer,
             DataReader,
             InputStreamOptions,
         )
-        media = await session.try_get_media_properties_async()
         reference = media.thumbnail
         if reference is None:
             return None
@@ -228,3 +235,19 @@ class WindowsSessionReader(SessionReader):
         records = await self._records(manager)
         return next((session for session, candidate, _status in records
                      if candidate.session_id == snapshot.session_id), None)
+
+    async def _matching_media(self, session, snapshot: Snapshot):
+        """Recheck track identity immediately before acting on a session."""
+        try:
+            media = await session.try_get_media_properties_async()
+            timeline = session.get_timeline_properties()
+        except (OSError, RuntimeError):
+            return None
+        identity = self._session_id(
+            session.source_app_user_model_id or "",
+            (media.artist or "").strip(),
+            (media.title or "").strip(),
+            (media.album_title or "").strip(),
+            timeline.end_time.total_seconds(),
+        )
+        return media if identity == snapshot.session_id else None
