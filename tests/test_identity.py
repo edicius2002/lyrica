@@ -88,3 +88,13 @@ def test_missing_returned_version_evidence_is_not_a_contradiction():
         requested_raw_title="Song (Acoustic)",
         returned_title="Song",
     ).accepted
+
+
+def test_a_known_different_title_is_rejected_even_if_artist_and_duration_fit():
+    result = decision(returned_title="A Different Song")
+    assert not result.accepted
+    assert result.reason == "title_mismatch"
+
+
+def test_feature_credit_in_the_title_is_not_a_different_song():
+    assert decision(returned_title="Levitating (feat. DaBaby)").accepted

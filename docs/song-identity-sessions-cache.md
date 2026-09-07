@@ -47,7 +47,8 @@ Version 12 stores validated lyric payloads separately from per-provider lookup
 state. The initial policy is:
 
 - Confirmed no-match TTL: 7 days.
-- Retryable failure backoff: 30 seconds, doubling to at most 30 minutes.
+- Retryable failures receive one immediate recovery attempt; repeated failures
+  back off from 30 seconds, doubling to at most 30 minutes.
 - Unavailable outcomes: the provider's existing retry time when supplied,
   otherwise the same bounded backoff.
 - Legacy miss migration batch: one previously ambiguous provider per play.
