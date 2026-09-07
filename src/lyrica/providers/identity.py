@@ -21,7 +21,7 @@ _VERSION_PATTERNS = {
     "sped_up": re.compile(r"\bsped up\b"),
     "slowed": re.compile(r"\bslowed(?: down)?\b"),
 }
-_BRACKETED = re.compile(r"[\[(]([^\])]+)[\])]", re.IGNORECASE)
+_BRACKETED = re.compile(r"\(([^)]*)\)|\[([^\]]*)\]", re.IGNORECASE)
 _TRAILING_FEATURE = re.compile(
     r"\s+(?:feat|ft|featuring)\.?\s+.+$", re.IGNORECASE)
 _NON_RECORDING_LABEL = re.compile(
@@ -77,7 +77,7 @@ def version_qualifiers(title: str) -> frozenset[str]:
 
 def _base_title(title: str) -> str:
     def keep_or_remove(match: re.Match) -> str:
-        label = match.group(1)
+        label = match.group(1) or match.group(2)
         folded = fold(label)
         is_credit = bool(re.match(r"^(?:feat|ft|featuring)\b", folded))
         if is_credit or version_qualifiers(label) or _NON_RECORDING_LABEL.search(label):

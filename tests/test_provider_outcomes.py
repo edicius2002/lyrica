@@ -1,5 +1,6 @@
 """Explicit provider outcomes preserve the difference between misses and failures."""
 
+import pytest
 import requests
 
 from lyrica.providers import base as provider_base
@@ -30,6 +31,16 @@ def test_non_hits_carry_no_lyrics_and_may_bound_a_retry():
     )
     assert outcome.lyrics is None
     assert outcome.retry_after == 120.0
+
+
+def test_invalid_outcome_shapes_are_rejected():
+    from lyrica.lyrics import Lyrics
+
+    with pytest.raises(ValueError, match="hit"):
+        provider_base.ProviderOutcome(provider_base.OutcomeKind.HIT)
+    with pytest.raises(ValueError, match="non-hit"):
+        provider_base.ProviderOutcome(
+            provider_base.OutcomeKind.NO_MATCH, lyrics=Lyrics(plain="wrong"))
 
 
 class Response:

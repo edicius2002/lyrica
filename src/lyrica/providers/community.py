@@ -177,37 +177,3 @@ class CommunityTtmlProvider(LyricsProvider):
         # the same title before borrowing any of its timings.
         lyrics.recording_duration = float(rec.get("duration") or 0.0)
         return ProviderOutcome.hit(lyrics, reason="compatible")
-
-    def _best_match(self, artist: str, title: str,
-                    duration: float) -> tuple[dict, float] | None:
-        try:
-            r = requests.get(SEARCH_URL, params={"q": f"{title} {artist}".strip()},
-                             headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            results = r.json().get("results") or []
-        except (requests.RequestException, ValueError):
-            logger.debug("community-ttml search failed for %r - %r", artist, title,
-                         exc_info=True)
-            return None
-        if not results:
-            return None
-
-        best = max(results, key=lambda rec: _score(rec, artist, title, duration))
-        score = _score(best, artist, title, duration)
-        if score < self.MIN_SCORE:
-            logger.info("community-ttml: discarding %r by %r for %r - %r (score %.1f)",
-                        best.get("track_name"), best.get("artist_name"), artist, title, score)
-            return None
-        return best, score
-
-    def _body(self, rec: dict) -> str | None:
-        url = rec.get("lyricsUrl")
-        if not url:
-            return None
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.text
-        except requests.RequestException:
-            logger.debug("community-ttml document fetch failed: %s", url, exc_info=True)
-            return None

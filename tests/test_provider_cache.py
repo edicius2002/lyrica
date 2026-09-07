@@ -70,6 +70,22 @@ def test_malformed_provider_state_is_rejected(tmp_path):
         cache.read_entry(path, IDENTITY)
 
 
+def test_malformed_lyric_rows_are_rejected_before_reaching_playback(tmp_path):
+    path = tmp_path / "entry.json"
+    path.write_text(json.dumps({
+        "v": cache.CACHE_VERSION,
+        "identity": IDENTITY,
+        "lines": [["not-a-time"]],
+        "words": [[]],
+        "source": "broken",
+        "synced": True,
+        "provider_states": {},
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lyrics payload"):
+        cache.read_entry(path, IDENTITY)
+
+
 def test_cache_identity_metadata_must_match_the_lookup(tmp_path):
     path = tmp_path / "entry.json"
     cache.write_entry(path, entry(), IDENTITY)

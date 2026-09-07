@@ -213,26 +213,6 @@ class MusixmatchProvider(LyricsProvider):
         except OSError:
             logger.debug("musixmatch: could not persist the token", exc_info=True)
 
-    def _get_token(self) -> str | None:
-        if self._token and time.monotonic() - self._token_at < TOKEN_TTL_S:
-            return self._token
-        cached = self._load_cached_token()
-        if cached:
-            self._token, self._token_at = cached, time.monotonic()
-            return cached
-
-        payload = self._call("token.get", {})
-        status, hint = self._header(payload)
-        if status != 200:
-            # A captcha hint means "you are asking too often", never "try again".
-            self._begin_cooldown(f"token.get status {status} hint {hint!r}")
-            return None
-        token = payload["message"]["body"].get("user_token")
-        if token:
-            self._token, self._token_at = token, time.monotonic()
-            self._store_token(token)
-        return token
-
     def _cooldown_outcome(self, why: str) -> ProviderOutcome:
         self._begin_cooldown(why)
         return ProviderOutcome.unavailable(
@@ -349,39 +329,3 @@ class MusixmatchProvider(LyricsProvider):
         if not lyrics.lines:
             return ProviderOutcome.retryable(reason="invalid_richsync")
         return ProviderOutcome.hit(lyrics, reason="compatible")
-
-    def _match(self, token: str, artist: str, title: str, duration: float) -> dict | None:
-        params = {"q_artist": artist, "q_track": title, "usertoken": token}
-        if duration > 1:
-            params["q_duration"] = round(duration)
-        payload = self._call("matcher.track.get", params)
-        status, hint = self._header(payload)
-        if status == 401:
-            self._begin_cooldown(f"matcher hint {hint!r}")
-            return None
-        if status != 200:
-            return None
-        return payload["message"]["body"].get("track")
-
-    def _richsync(self, token: str, track_id: int) -> Lyrics | None:
-        payload = self._call("track.richsync.get",
-                             {"track_id": track_id, "usertoken": token})
-        status, hint = self._header(payload)
-        if status == 401:
-            self._begin_cooldown(f"richsync hint {hint!r}")
-            return None
-        if status != 200:
-            return None
-        raw = (payload["message"]["body"].get("richsync") or {}).get("richsync_body")
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)  # the body is JSON inside a JSON string
-        except ValueError:
-            return None
-        lyrics = richsync_to_lyrics(parsed)
-        if not lyrics.lines:
-            return None
-        # matcher.track.get matched on artist, title and duration together, so a
-        # hit here identifies the recording rather than approximating it.
-        return lyrics

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from lyrica.lyrics import BACKING_INFERRED, Lyrics
+from lyrica.lyrics import BACKING_INFERRED, Lyrics, Precision
 from lyrica.providers.base import OutcomeKind, ProviderOutcome
 
 CACHE_VERSION = 12
@@ -109,6 +109,28 @@ def _lyrics_from_payload(payload: dict) -> Lyrics:
     words = payload.get("words", [])
     if not isinstance(lines, list) or not isinstance(words, list):
         raise ValueError("invalid lyrics payload")
+    if any(
+        not isinstance(line, (list, tuple))
+        or len(line) != 2
+        or not isinstance(line[0], (int, float))
+        or isinstance(line[0], bool)
+        or not isinstance(line[1], str)
+        for line in lines
+    ):
+        raise ValueError("invalid lyrics payload")
+    if any(
+        not isinstance(line, list)
+        or any(
+            not isinstance(word, (list, tuple))
+            or len(word) != 3
+            or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                       for value in word[:2])
+            or not isinstance(word[2], str)
+            for word in line
+        )
+        for line in words
+    ):
+        raise ValueError("invalid lyrics payload")
     lyrics = Lyrics(**{
         field: payload[field] for field in _LYRIC_FIELDS if field in payload
     })
@@ -127,6 +149,8 @@ def _lyrics_from_payload(payload: dict) -> Lyrics:
     lyrics.singers = dict(payload.get("singers", {}))
     if "recording_duration" in payload:
         lyrics.recording_duration = float(payload["recording_duration"])
+    if lyrics.precision is Precision.NONE and not lyrics.instrumental:
+        raise ValueError("invalid lyrics payload")
     return lyrics
 
 

@@ -2,8 +2,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from lyrica.lyrics import Lyrics, Precision
+
+if TYPE_CHECKING:
+    from lyrica.providers.identity import SongQuery
 
 
 class OutcomeKind(StrEnum):
@@ -23,6 +27,14 @@ class ProviderOutcome:
     lyrics: Lyrics | None = None
     reason: str = ""
     retry_after: float | None = None
+
+    def __post_init__(self):
+        if self.kind is OutcomeKind.HIT and self.lyrics is None:
+            raise ValueError("a hit requires lyrics")
+        if self.kind is not OutcomeKind.HIT and self.lyrics is not None:
+            raise ValueError("a non-hit cannot carry lyrics")
+        if self.retry_after is not None and self.retry_after < 0:
+            raise ValueError("retry_after cannot be negative")
 
     @classmethod
     def hit(cls, lyrics: Lyrics, *, reason: str = "") -> "ProviderOutcome":
@@ -60,6 +72,10 @@ class LyricsProvider(ABC):
     carries_backing: bool = False
 
     @abstractmethod
+    def lookup(self, query: "SongQuery") -> ProviderOutcome:
+        """Return the cache-relevant outcome of one complete provider attempt."""
+
+    @abstractmethod
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:
-        """Return lyrics for the track, or None if this source has nothing."""
+        """Compatibility facade returning only usable lyrics, if any."""

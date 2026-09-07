@@ -398,6 +398,16 @@ def test_incompatible_versions_do_not_share_one_cache_entry(monkeypatch):
     assert source.calls == 2
 
 
+def test_cache_identity_is_case_insensitive_like_its_stable_path(monkeypatch):
+    source = Outcomes("source", ProviderOutcome.hit(synced()))
+    use(monkeypatch, source)
+
+    assert providers.fetch_lyrics("Artist", "Song", 200.0) is not None
+    assert providers.fetch_lyrics("artist", "song", 200.0) is not None
+
+    assert source.calls == 1
+
+
 # --- candidates -------------------------------------------------------------
 
 def test_candidates_prefer_the_best_reading_not_the_first(monkeypatch):

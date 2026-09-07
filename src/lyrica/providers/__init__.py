@@ -649,8 +649,8 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
     versions = sorted(version_qualifiers(raw_title))
     cpath = _cache_path(artist, title, duration, raw_title)
     identity = {
-        "artist": artist,
-        "title": title,
+        "artist": artist.lower(),
+        "title": title.lower(),
         "duration": int(duration),
         "versions": versions,
     }
