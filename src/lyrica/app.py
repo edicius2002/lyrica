@@ -83,35 +83,10 @@ INCOMING_VISIBILITY_FLOOR = 0.80
 # each other without sacrificing the active row's complete natural glide.
 INCOMING_FADE_S = 0.22
 
-# Where the line being sung sits, as a fraction of the window height. Derived
-# rather than chosen, and derived from the band below rather than from the band
-# above: what has to fit under the line being sung is a backing vocal *and* the
-# upcoming line, and what has to fit over it is a departure.
-#
-# The old 0.55 was derived from the wrong end. It reserved 88 px above for the
-# preceding line, which at rest never has any: its resting slot puts its halo
-# past `_content_top`, so `_visibility` returns zero for it in every layout —
-# measured, not reasoned. That row is only ever seen mid-glide, on its way out.
-# Meanwhile the band below was short, and `_safe_view_y` paid for it by lifting
-# a wrapped upcoming row into the gap the ad-lib had been promised.
-#
-# So the fraction is what leaves the lower band whole, at the nominal size and
-# for the worst layout that has to hold all three: a one-row lead, a response,
-# and an upcoming line that wrapped to two rows and is therefore already at its
-# lowest safe position. Walking that up — its glyph box, the response's, the
-# gap either side, the lead — lands on 144 of 320. The symmetric case, a
-# two-row lead over a one-row preview, has the same total height and lands on
-# the same number.
-#
-# Its two other bounds are satisfied with room to spare: the departing line
-# still reaches zero visibility before the clamp (needs <= 190), and the active
-# line's own halo still clears the card (needs >= 99).
-#
-# Taken to a whole pixel where it is applied. `move_to` shifts by a rounded
-# delta, so a row can only ever stand on one, and a fraction here put every
-# resting target somewhere no row could be — two representations of the same
-# pixel, disagreeing. It did not show before only because the band was short
-# enough that the clamp caught the upcoming row and handed back an integer.
+# The established resting anchor remains the preference, not a guarantee of
+# room for every font and wrap. Backing metadata reserves measured space before
+# rendering; only a constrained pair moves from these ordinary targets.
+# Whole-pixel targets agree with LineView.move_to's rounded canvas movement.
 ANCHOR = 0.45
 
 
@@ -1046,6 +1021,7 @@ class Overlay:
         self._incoming_fades.pop(index, None)
         indices = self._visible_indices(len(lyr.lines))
         self._ensure_views(indices, lyr)
+        self._ensure_backing_height()
         move = should_animate(step, self._dragging) if animate is None else animate
         previous = self._views.get(previous_index)
         active = self._views.get(index)
@@ -1105,7 +1081,7 @@ class Overlay:
         """
         full = (self.chrome.px(WIDTH), self.chrome.px(HEIGHT))
         if not self._compact:
-            return full
+            return full[0], max(full[1], self._backing_min_height())
         height = self._card_y * 2 + self._thumb_size
         width = self._card_span() + self.chrome.px(12) * 2
         return (max(self.chrome.px(COMPACT_MIN_WIDTH), min(width, full[0])),
@@ -2131,7 +2107,8 @@ class Overlay:
         active = self._views.get(self.line_index)
         if not text or not words or active is None or not self._views:
             return
-        block_key = (id(lyr), self.line_index, self.width, self.height, self.row_gap)
+        block_key = (id(lyr), self.line_index, self.width, self.height, self.row_gap,
+                     self.f_echo, self._growth, self._bloom, self.palette.outline)
         if self._echo_blocked == block_key:
             return
         opens, visible_end, fade_s = _backing_window(lyr, self.line_index)
@@ -2141,9 +2118,7 @@ class Overlay:
         # The supporting voice answers from the open lane. A centred or
         # unidentified lead keeps the established right-side placement.
         echo_side = -active_side if active_side else 1
-        margin = self.chrome.px(ECHO_SAFE_MARGIN)
-        available = max(1.0, self.width - 2 * margin)
-        echo_font = _font_for_single_row(text, self.f_echo, available)
+        echo_font, _height = self._backing_metrics(text)
         # Backing vocals are a single responding voice, never a second lyric
         # block. Keep the designed echo size consistently; only a genuinely
         # long response is reduced enough to remain inside the safe width. Its
@@ -2183,41 +2158,50 @@ class Overlay:
         self._echo_blocked = None
         self._order_text_layers()
 
-    def _place_backing_y(self, anchor: LineView) -> bool:
-        """Hang the echo off the lead, inside the band actually left below it.
+    def _place_backing_y(self, anchor: LineView | None) -> bool:
+        """Hang the echo in its reserved band, checking the actual frame's ink.
 
-        The band was the nominal `row_gap`, which is where the following row
-        *asks* to sit and not where it ends up. A row that wrapped is lifted by
-        `_safe_view_y` into that same band — it has nowhere else to go — and
-        the response was then drawn straight through it, because nothing here
-        ever looked. Measure the row's real glyph box instead, so a band that
-        has been eaten is a band this can decline.
+        Soft halos may meet; glyphs need their own padding plus clearance on
+        both sides. A preview yields its band only while completely hidden.
+        A departing response stops at the card as its lead fades away; after
+        a skip removes that lead, visible main rows may require another safe
+        position. Neither operation changes the response's clock.
 
-        Both clearances are taken from the two boxes either side rather than
-        from one constant. `glyph_padding` is what a row's own ink may claim as
-        it grows, so a separation smaller than the pair's is an overlap however
-        the constant is written; `ECHO_VERTICAL_GAP` is only what is left over
-        to see. It hangs from the top of the band rather than sitting in the
-        middle of it: the response belongs to the line it answers, and the
-        clearance below is a floor it must not cross, not a slot it shares.
-
-        Return false when no non-overlapping position remains. The caller then
-        suppresses this response instead of allowing the edge clamp to push it
-        over the lead — and suppressing it is the honest answer where the two
-        lyric rows have genuinely taken the whole band between them.
+        False means the actual viewport cannot contain this response safely
+        (for example an externally compressed panel or an oversized block).
+        Layout reserves supported one/two-row combinations before this check.
         """
         gap = self.chrome.px(ECHO_VERTICAL_GAP)
         lane_top = (anchor.y + anchor.height + gap
-                    + anchor.glyph_padding + self._echo.glyph_padding)
-        lane_bottom = anchor.y + anchor.height + self.row_gap - gap
+                    + anchor.glyph_padding + self._echo.glyph_padding
+                    if anchor is not None else self._echo.y)
+        lane_top = max(lane_top, getattr(self, "_content_top", 0)
+                       + self._echo.effect_padding)
+        lane_bottom = self.height - self._echo.effect_padding
         # The row it must not cross is the one after the line it answers, which
         # is not always the one after the active line: a response outlives its
         # own line, and by then the row below it is the line now being sung.
         below = self._views.get(self._echo_line + 1)
+        if anchor is None and self._views:
+            below = self._views.get(self.line_index)
+        if (below is self._views.get(getattr(self, "line_index", -1) + 1)
+                and self._preview_waiting(getattr(self, "line_index", -1) + 1)
+                and self._backing_space(self.line_index)):
+            below = None
         if below is not None:
             lane_bottom = min(lane_bottom,
                               below.glyph_vertical_span()[0] - gap
                               - self._echo.glyph_padding)
+        if anchor is None:
+            lane_top = max(getattr(self, "_content_top", 0) + self._echo.effect_padding,
+                           min(lane_top, lane_bottom - self._echo.height))
+            # A rapid second promotion can remove the original lead while an
+            # intermediate outgoing row is still visible. Its ink is an
+            # obstacle too, without making it the response's new owner.
+            for index, view in self._views.items():
+                if index < self.line_index and view._visible:
+                    lane_top = max(lane_top, view.glyph_vertical_span()[1]
+                                   + gap + self._echo.glyph_padding)
         if self._echo.height > lane_bottom - lane_top + 0.5:
             return False
         wanted = lane_top
@@ -2234,9 +2218,8 @@ class Overlay:
     def _advance_backing(self, pos: float, *, effects: bool = True) -> bool:
         """Carry the backing through its own window. False once it is spent.
 
-        It follows the line it answers for as long as that line is still on
-        screen, and holds where it is once the line has gone — which is what
-        lets it finish leaving after the column has moved on without it.
+        It follows the line it answers while that line is on screen, then
+        holds where it can safely finish after the column has moved on.
         """
         words = self._echo_words
         if not words:
@@ -2246,7 +2229,7 @@ class Overlay:
         if not opens <= pos <= closes:
             return False
         anchor = self._views.get(self._echo_line)
-        if anchor is not None and not self._place_backing_y(anchor):
+        if not self._place_backing_y(anchor):
             return False
         # Enter from the lead towards its corner and settle there with an
         # ordinary ease-in-out. On departure it yields only a quarter of that
@@ -2374,6 +2357,151 @@ class Overlay:
             return None
         return top, top + step, bottom
 
+    def _backing_metrics(self, text: str) -> tuple[tuple, int]:
+        """Cache the final single-row font and its real Tk height, without views.
+
+        Keep only the current font/width's measurements; resizing invalidates
+        them and repeated layout frames never create fonts or canvas items.
+        """
+        key = (id(self.lyrics), self.f_echo, self.width, self.chrome.scale)
+        if getattr(self, "_backing_metric_key", None) != key:
+            self._backing_metric_key = key
+            self._backing_metric_cache = {}
+        cache = self._backing_metric_cache
+        if text not in cache:
+            available = max(1.0, self.width - 2 * self.chrome.px(ECHO_SAFE_MARGIN))
+            font = _font_for_single_row(text, self.f_echo, available)
+            cache[text] = (font, tkfont.Font(font=font).metrics("linespace"))
+        return cache[text]
+
+    def _backing_min_height(self) -> int:
+        """Retain measured extra height until the song or display scale changes."""
+        key = (id(getattr(self, "lyrics", None)), self.chrome.scale,
+               getattr(self, "wrap", None))
+        if getattr(self, "_backing_height_key", None) != key:
+            self._backing_height_key = key
+            self._backing_height = 0
+        return self._backing_height
+
+    def _ensure_backing_height(self) -> None:
+        """Two supported wrapped rows must fit without shrinking either voice.
+
+        Tiny display sizes retain an unscaled soft halo. If that consumes the
+        last pixels, grow the viewport by the measured deficit before painting.
+        Pathological longer blocks still use the non-overlapping fallback.
+        """
+        self._backing_min_height()
+        active = self._views.get(self.line_index)
+        below = self._views.get(self.line_index + 1)
+        space = self._backing_space(self.line_index)
+        tail = self._backing_tail_clearance()
+        upcoming = self._backing_space(self.line_index + 1)
+        if (not (space or tail or upcoming) or active is None or below is None
+                or any(v.height > 2 * v.line_height for v in (active, below))):
+            return
+        required = math.ceil(self._content_top + max(active.effect_padding,
+                                                    tail + active.glyph_padding)
+                             + active.height + active.glyph_padding + (space or 1)
+                             + below.glyph_padding + below.height
+                             + self._backing_bottom_room(self.line_index + 1, below))
+        self._backing_height = max(self._backing_height, required)
+        if required > self.height and not self._compact and self._collapse is None:
+            positions = {i: v.y for i, v in self._views.items()}
+            targets, glides = self._targets.copy(), self._glides.copy()
+            self._resize_window(self.width, required, settling=True)
+            # Resizing normally seats rows immediately. Here the new line's
+            # retarget still owes its glide from the old preview position.
+            self._targets, self._glides = targets, glides
+            for index, y in positions.items():
+                self._views[index].move_to(y)
+
+    def _backing_geometry(self, index: int) -> tuple[int, int, int] | None:
+        """Single-row height, ink padding and canvas padding at the final size."""
+        echo = getattr(self, "_echo", None)
+        if echo is not None and index == self._echo_line:
+            return echo.height, echo.glyph_padding, echo.effect_padding
+        lyr = getattr(self, "lyrics", None)
+        if lyr is None or index < 0:
+            return None
+        text, words = lyr.backing_at(index)
+        if not text or not words:
+            return None
+        from lyrica import bloom
+        _font, height = self._backing_metrics(text)
+        growth = height * self._growth / 2
+        halo = bloom.OUTER_RADIUS if self._bloom > 0 and self.palette.glow else 0
+        return (height, math.ceil(max(self.palette.outline, growth)),
+                math.ceil(max(self.palette.outline, halo) + growth))
+
+    def _backing_space(self, index: int) -> float:
+        """Ink height plus both clearances, reserved for the lead's lifetime."""
+        geometry = self._backing_geometry(index)
+        if geometry is None:
+            return 0.0
+        height, pad, _effect = geometry
+        space = height + 2 * pad + 2 * self.chrome.px(ECHO_VERTICAL_GAP)
+        upper, lower = self._views.get(index), self._views.get(index + 1)
+        if (upper is not None and lower is not None
+                and any(v.height > 2 * v.line_height for v in (upper, lower))):
+            required = (self._content_top + upper.effect_padding + upper.height
+                        + upper.glyph_padding + space + lower.glyph_padding
+                        + lower.height + lower.effect_padding)
+            if required > self.height:
+                # Unsupported taller blocks never enlarge the viewport. Decide
+                # before rendering so suppressing an impossible echo leaves
+                # the ordinary main preview readable, not waiting forever.
+                return 0.0
+        return space
+
+    def _backing_tail_clearance(self) -> float:
+        """Keep an outgoing response below the card even after its lead fades."""
+        index = self.line_index - 1
+        if getattr(self, "_echo", None) is not None and self._echo_line < self.line_index:
+            index = self._echo_line
+        geometry = self._backing_geometry(index)
+        if geometry is None:
+            return 0.0
+        height, pad, effect = geometry
+        return effect + height + pad + self.chrome.px(ECHO_VERTICAL_GAP)
+
+    def _backing_bottom_room(self, index: int, view: LineView) -> float:
+        """Reserve an upcoming lead's response before that lead is promoted."""
+        geometry = self._backing_geometry(index)
+        if geometry is None:
+            return view.effect_padding
+        height, pad, effect = geometry
+        return max(view.effect_padding, view.glyph_padding
+                   + self.chrome.px(ECHO_VERTICAL_GAP) + pad + height + effect)
+
+    def _reserve_backing_targets(self, targets: dict[int, float]) -> None:
+        """Move the active/preview pair only as far as measured ink requires.
+
+        Prefer the established preview slot. Spend spare space below it first,
+        then lift the lead, bounded by the card. No-ad-lib scenes are untouched.
+        """
+        index = self.line_index
+        space = self._backing_space(index)
+        tail = self._backing_tail_clearance()
+        upcoming = self._backing_space(index + 1)
+        if not (space or tail or upcoming):
+            return
+        active = self._views[index]
+        below = self._views.get(index + 1)
+        floor = self._content_top + max(active.effect_padding, tail + active.glyph_padding)
+        if below is not None and index + 1 in targets:
+            distance = active.height + active.glyph_padding + (space or 1) + below.glyph_padding
+            bottom = self.height - below.height - self._backing_bottom_room(index + 1, below)
+            targets[index + 1] = min(bottom, max(targets[index + 1], floor + distance))
+            targets[index] = max(floor, min(targets[index], targets[index + 1] - distance))
+        elif space:
+            height, ink, pad = self._backing_geometry(index)
+            # Include the echo's halo at the canvas edge, not between glyphs.
+            bottom = (self.height - active.height - active.glyph_padding
+                      - self.chrome.px(ECHO_VERTICAL_GAP) - ink - height - pad)
+            targets[index] = max(floor, min(targets[index], bottom))
+        else:
+            targets[index] = max(floor, targets[index])
+
     def _row_targets(self, indices: list[int]) -> dict[int, float]:
         """Resting row positions, including fixed wrapped relay slots."""
         slots = self._multiline_relay_slots(indices)
@@ -2404,6 +2532,7 @@ class Overlay:
             targets[index] = self._safe_view_y(view, cursor)
             upper = view
             cursor = targets[index]
+        self._reserve_backing_targets(targets)
         return targets
 
     def _retarget(self, indices: list[int], animate: bool) -> None:
@@ -2550,11 +2679,28 @@ class Overlay:
         active.move_to(self._safe_view_y(active, active.y))
         active_bottom = active.glyph_vertical_span()[1]
         preview_top = view.glyph_vertical_span()[0]
-        if active_bottom > preview_top and self.line_index not in self._glides:
-            active.move_to(self._safe_view_y(
-                active, active.y - math.ceil(active_bottom - preview_top)))
+        reservation = self._backing_space(self.line_index)
+        if (active_bottom + reservation > preview_top
+                and self.line_index not in self._glides):
+            wanted = active.y - math.ceil(active_bottom + reservation - preview_top)
+            tail = self._backing_tail_clearance()
+            if reservation or tail:
+                floor = self._content_top + max(active.effect_padding,
+                                                tail + active.glyph_padding)
+                wanted = max(floor, wanted)
+            active.move_to(self._safe_view_y(active, wanted))
             active_bottom = active.glyph_vertical_span()[1]
-        return active_bottom <= preview_top
+        separated = active_bottom + reservation <= preview_top
+        if reservation and not separated:
+            self._incoming_fades[index] = (id(view), None)
+        return separated
+
+    def _preview_waiting(self, index: int) -> bool:
+        """Only a completely dissolved preview may yield its band to an echo."""
+        marker = getattr(self, "_incoming_fades", {}).get(index)
+        view = getattr(self, "_views", {}).get(index)
+        return (index > getattr(self, "line_index", -1) and view is not None
+                and marker is not None and marker == (id(view), None))
 
     def _keep_gliding_rows_apart(self) -> None:
         """Keep staggered row trajectories from crossing the active row.
@@ -2583,8 +2729,12 @@ class Overlay:
         for index in reversed(ordered[:active_at]):
             view = self._views[index]
             _top, bottom = view.glyph_vertical_span()
-            if bottom > lower_top:
-                view.move_to(view.y - math.ceil(bottom - lower_top))
+            space = self._backing_space(index)
+            if (getattr(self, "_echo", None) is not None
+                    and self._echo_line < index == self.line_index - 1):
+                space = max(space, self._backing_space(self._echo_line))
+            if bottom + space > lower_top:
+                view.move_to(view.y - math.ceil(bottom + space - lower_top))
             lower_top = view.glyph_vertical_span()[0]
 
         upper_bottom = active.glyph_vertical_span()[1]
@@ -3044,11 +3194,27 @@ class Overlay:
         incoming = self._views.get(incoming_index)
         if incoming is None or not self._is_incoming_context(incoming_index):
             return False
+        if (self._backing_space(self.line_index) or self._backing_tail_clearance()
+                or self._backing_space(incoming_index)):
+            height = self.height
+            self._ensure_backing_height()
+            if self.height != height:
+                # A late ink/style change can consume the last reserved
+                # pixels. Apply the same measured viewport policy here as at
+                # line creation, including a scene mounted while paused.
+                self._retarget(sorted(self._views), animate=bool(self._glides))
         # Final-frame geometry contract.  The collision guard runs earlier in
         # the tick, but a newly active view and a newly created preview share
         # the lower slot and later layout work can displace the preview again,
         # so the seating is asserted once more here. Once settled it is a no-op.
         separated = self._seat_preview_below_active(incoming_index, incoming)
+        if getattr(self, "_echo", None) is not None:
+            # Seating can move a lead after its echo was painted (including
+            # paused frames and a late restyle). Carry the reservation and the
+            # actual echo together through this final geometry boundary.
+            self._keep_gliding_rows_apart()
+            if not self._place_backing_y(self._views.get(self._echo_line)):
+                self._clear_backing()
         target_colour = self._incoming_preview_colour(incoming_index, incoming)
         incoming_fades = self._incoming_fades
         marker = incoming_fades.get(incoming_index)
@@ -3071,6 +3237,9 @@ class Overlay:
                     incoming_fades.pop(incoming_index, None)
             eased = motion.cubic_bezier(progress, motion.RESIZE_CURVE)
             colour = _between(self.palette.backdrop, target_colour, eased)
+        elif marker is not None and not separated and self._backing_space(self.line_index):
+            colour = glass.hex_of(self.palette.backdrop)
+            fading = True
         elif marker is not None:
             incoming_fades.pop(incoming_index, None)
         # This is deliberately reasserted at every stable frame.  Tk's actual
@@ -3078,6 +3247,10 @@ class Overlay:
         # changing LineView's target caches; the tag-based implementation is a
         # constant two Tcl calls regardless of how long the wrapped line is.
         incoming.present_inactive(colour)
+        if self._preview_waiting(incoming_index) and self._backing_space(self.line_index):
+            # A colour-keyed panel cannot dissolve into its desktop backdrop:
+            # hide outlines too until the reserved band is actually clear.
+            incoming.set_visible(False)
         # This wrote a presentation colour over the whole row without changing
         # anything a `LineView` records, which is exactly the case
         # `_text_scene_state` cannot see. Say so, rather than let a later wash
@@ -3168,7 +3341,8 @@ class Overlay:
         """Whether a neighbouring row is waiting below or rising into place."""
         glide = self._glides.get(index)
         entering_from_below = glide is None or glide.distance >= 0
-        return index > self.line_index and entering_from_below
+        waiting = self._preview_waiting(index)
+        return index > self.line_index and (entering_from_below or waiting)
 
     def _relay_outgoing_visibility(self, index: int, view: LineView) -> float:
         """Fade a wrapped outgoing row before it enters the card's lane.
@@ -3217,6 +3391,8 @@ class Overlay:
                       if self._is_incoming_context(index)
                       else self.palette.faded(
                           abs(index - self.line_index), visibility))
+            if self._preview_waiting(index) and self._backing_space(self.line_index):
+                view.set_visible(False)
             view.show_inactive(colour)
         self._order_text_layers()
 

@@ -94,3 +94,42 @@ No code from any of these was copied into this repository.
 Local, without qualification. Everything runs on the machine and the APIs are queried directly:
 no servers, no cost. Cloud would only earn its place if the lyrics had to reach a phone, which is
 outside the current scope.
+## Ad-lib layout reservation (2026-09-07)
+
+Measured with the real Windows/Tk overlay and Segoe UI, using only synthetic lyrics.
+`research/viability/probe_adlib_layout.py` follows the existing visual-baseline renderer's
+opaque, bounded capture convention. It writes PNGs and numeric ink/effect spans under the
+gitignored `research/shots/adlib-layout/`. Its `--baseline` option reads app.py from the
+fixed local revision `96da0d0` with `git show`; no checkout is switched or modified.
+
+Run with this checkout's `src` on `PYTHONPATH`:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path src).Path
+python research/viability/probe_adlib_layout.py --baseline
+python research/viability/probe_adlib_layout.py
+```
+
+| Effective scale | Main rows | Echo before | Panel height after (px) | Lead y before → after (px) | Ink clearance above / below echo (px) |
+| --- | --- | --- | --- | --- | --- |
+| 0.75 | 1 → 1 | Present | 240 | 108 → 108 | 2 / 6 |
+| 0.75 | 1 → 2 | Absent | 240 | 108 → 102 | 2 / 2 |
+| 0.75 | 2 → 1 | Absent | 240 | 108 → 102 | 2 / 2 |
+| 0.75 | 2 → 2 | Absent | 247 | 90 → 79 | 2 / 2 |
+| 1 | 1 → 1 | Present | 320 | 144 → 144 | 2 / 10 |
+| 1 | 1 → 2 | Absent | 320 | 144 → 141 | 2 / 2 |
+| 1 | 2 → 1 | Absent | 320 | 144 → 141 | 2 / 2 |
+| 1 | 2 → 2 | Absent | 322 | 119 → 102 | 2 / 2 |
+
+All eight after-frames contain the response at the designed echo font size. The two
+small viewport expansions are measured deficits, not replacement spacing constants.
+The 1 → 1 coordinates remain unchanged. Fonts/DPI and configuration can change the
+exact deficit; the implementation measures it rather than encoding these sample values.
+
+Visually inspected the synthetic before/after 2 → 2 frames at scale 0.75, after 2 → 2
+at scale 1, and after 1 → 1 at scale 1. The response has its own visible band, the lower
+lyric remains readable, and the card stays separate. Other combinations in the table
+were measured from real view spans. Motion continuity, timing and absence of visible ink
+overlap during transitions were verified by 61-frame GUI regressions, not inferred from
+these resting screenshots or from bitmap equality. No live-player or subjective motion
+evaluation was performed.

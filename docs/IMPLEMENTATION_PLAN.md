@@ -3,7 +3,7 @@
 > **Status:** Word-by-word lyrics, four ranked sources behind one cascade. The overlay resolves
 > tracks from Spotify, YouTube, YouTube Music and SoundCloud, is packaged as a single executable
 > with a tray icon, and every pull request is linted and tested on Windows and macOS.
-> **Last updated:** 2026-09-01
+> **Last updated:** 2026-09-07
 > **Review status:** Phase 9's border reworked in
 > [#144](https://github.com/edicius2002/lyrica/pull/144).
 > **Phase closure:** Steps 0–8 complete. Step 9 is demand-driven and has no end state; what is
@@ -456,6 +456,8 @@ not be made inside a data-layer phase.
       own cross-section rather than one flat chroma at every distance
       ([#144](https://github.com/edicius2002/lyrica/pull/144), decisions
       9.11-9.14).
+- [x] Measured ad-lib reservations across resting rows, glides, tails and static
+      mounts, with the viewport tradeoff recorded in **Ad-lib layout contract**.
 
 **Still open in this phase:** the border's inner flank is a hard edge, the
 border misses the frame budget above scale 1.25, and over a light desktop there
@@ -594,6 +596,39 @@ That budget is currently met at the default scale and missed above it — measur
 | 9.12 | The light is a fringe colour and a core colour, and `halo` mixes between them by how much light reaches each pixel. | Every pixel of the glow used to carry the same hue and the same saturation, from the crest to the last trace of spill twenty-six pixels out, because the falloff was applied to the alpha alone. Nothing real does that: a source bright enough to blaze at its centre is white there, and its colour survives at the edges where there is less of it. One chroma scaled only in alpha is a sheet of tinted plastic held over a lamp, and that — not the cross-section's step, which `halo` had already removed — is what "it looks painted" turned out to mean. Measured across the section at level 1.0: saturation 0.48 out in the tail, 0.28 seven pixels out, 0.13 at the crest, against one number all the way before. Mixed by the *profile* and not by the finished alpha, deliberately: how white the core runs is a property of the shape of the light and not of how loud the music is, and mixing by alpha would reinstate 9.13's defect wearing different arithmetic. The alternative considered was having `halo` derive the core itself from the profile, which is one fewer table and puts the colour policy in the module that is supposed to know only geometry. |
 | 9.13 | The level moves how much light there is and nothing else. Hue and saturation do not move with it. | The ramp climbed to `palette.sung`, which is white by design at chroma 8, so saturation fell from 0.29 to 0.07 across the level range — and since most music sits above 0.6, the border was white nearly all the time. The cover's colour was being spent exactly when the music asked for it. Loud now means more light. This collapses `_ramp`, `_along`, `COLOUR_STOP` and `GRADIENT_STEPS` into one colour and a number, and it costs the border its old top end: the brightest the light can be is the cover colour's own luminance rather than white, which is part of why 9.12's core exists. |
 | 9.14 | Every strip is repainted in the frame that needs it. There is no cap. | `PER_CALL` allowed one strip a call, round-robin, while the gradient rotates every frame — so three of the four edges were always at least a frame behind. On a level that jumped it was plain: measured 139 of 255 between the brightest strip and the dimmest for three frames running, against 57 for the gradient's own swing. A bright bar chasing its way round the panel on every beat, which is the same artefact 9.10 had already found in a resize and answered by making that one case an exception. The cap also bought almost nothing — measured against one strip a call over a kick: +0.4 ms a frame at scale 1.25, +2.5 at 1.5, +2.0 at 2.0 — because a frame's real cost is handing bitmaps to Tk and drawing the companion, and both are paid per pixel of edge band rather than per strip. The change detection stays: a level that has not moved a band leaves every strip alone and the call costs nothing. Guarded by `test_no_frame_leaves_an_edge_showing_the_frame_before`, which is the only test in the suite that paints the way the app does. |
+
+### Ad-lib layout contract (2026-09-07)
+
+Backing metadata reserves vertical space before the response is painted. The reservation
+uses its final single-row font's real Tk line height, maximum glyph growth/outline, and
+`ECHO_VERTICAL_GAP` on both sides. Measurement is cached per lyrics object, font, width and
+scale; rendering reuses the chosen font without constructing trial `LineView` instances.
+Soft halos may meet between voices, but complete effect boxes remain inside the canvas and
+below the card. Ordinary targets still prefer `ANCHOR` and `ROW_GAP`.
+
+The active/preview pair and wrapped relay use the same reservation. An upcoming line also
+reserves room for its own response before promotion, so its glide need not snap upward to
+make an echo fit. During promotion, the next preview retains its existing entrance fade:
+it waits entirely hidden until both lead and response clear its ink band. This includes
+outlines on colour-keyed windows. Once clear, the existing readable preview colour returns.
+Final-frame seating carries the echo with the lead, including paused scenes and late changes
+to ink padding. A lingering response retains its original clock and lead identity, stops
+below the card as its lead departs, and moves above the new active row if a skip removes
+that lead. Overlapping responses retain the existing one-at-a-time priority.
+
+For one/two-row main combinations, if the card, glyphs and effects cannot fit the nominal
+height, the panel grows by the measured deficit. The largest required height encountered is
+retained for that lyrics object and display/wrap scale, rather than shrinking when an echo
+ends. This is an explicit viewport tradeoff to preserve the normal voice sizes and margins.
+It resets for another song or scale. Longer unsupported blocks do not trigger unlimited
+growth: an impossible echo reservation yields to the main preview. An externally compressed
+viewport can likewise suppress an echo whose ink and effect bounds genuinely cannot fit.
+
+Verified with real Windows/Tk fonts at effective scales 0.6, 0.75, 1, 1.25, 1.5 and 2,
+including frame-sampled glides, long single-row responses, tails, skips, keyed outlines,
+static mounts and resize rebuilding. The CPU rendering path is unchanged. Synthetic visual
+measurements and the reproducible probe are recorded in
+[`research/VIABILITY.md`](../research/VIABILITY.md#ad-lib-layout-reservation-2026-09-07).
 
 ### Open
 

@@ -338,20 +338,27 @@ def _timed(text, start, span=2.0):
             for i, word in enumerate(parts)]
 
 
+@pytest.fixture
+def scaled_panel(panel, scale):
+    old_dpi, old_size = panel._dpi_scale, panel._size
+    panel._dpi_scale, panel._size = scale, 1.0
+    panel._apply_scale()
+    try:
+        yield panel
+    finally:
+        panel._dpi_scale, panel._size = old_dpi, old_size
+        panel._apply_scale()
+
+
 @pytest.mark.parametrize("lead", [FITS, WRAPS], ids=["lead-1row", "lead-2rows"])
 @pytest.mark.parametrize("below", [FITS, WRAPS], ids=["next-1row", "next-2rows"])
-def test_no_row_count_lets_an_adlib_share_ink_with_a_lyric(panel, lead, below):
-    """The clearance the ad-lib is drawn with, at every row count.
-
-    The older test above measures nominal boxes on two short lines, which is
-    the one layout that was already correct. What was actually on screen was a
-    response laid over the upcoming row in eight of the nine row-count
-    combinations, because `y` and `height` say nothing about the ink a grown
-    glyph puts outside them, and because a wrapped upcoming row is not where
-    the nominal layout puts it.
-    """
+@pytest.mark.parametrize("scale", [0.6, 0.75, 1.0, 1.25, 1.5, 2.0])
+def test_no_row_count_lets_an_adlib_share_ink_with_a_lyric(
+        scaled_panel, lead, below):
+    """Real font metrics must produce visible, bounded ink at every row count."""
     from lyrica import app as A
 
+    panel = scaled_panel
     panel.lyrics = Lyrics(
         lines=[(0.0, lead), (3.0, below)],
         words=[_timed(lead, 0.0), _timed(below, 3.0)],
@@ -362,18 +369,339 @@ def test_no_row_count_lets_an_adlib_share_ink_with_a_lyric(panel, lead, below):
     for glide in panel._glides.values():
         glide.started -= glide.duration + 1.0
     panel._advance_glides()
+    panel._restyle()
+    panel._present_incoming_preview()
     panel._show_backing(panel.lyrics, 1.3, effects=False)
     panel.root.update()
 
-    if panel._echo is None:
-        return          # declined for want of room, which is the honest answer
+    assert panel._echo is not None, (
+        panel.height, panel._content_top, panel._targets, panel._backing_space(0),
+        [(i, v.y, v.height, v.glyph_padding, v.effect_padding)
+         for i, v in panel._views.items()])
     lead_view, next_view = panel._views[0], panel._views[1]
+    assert lead_view.height / lead_view.line_height == (2 if lead == WRAPS else 1)
+    assert next_view.height / next_view.line_height == (2 if below == WRAPS else 1)
+    for view in (lead_view, panel._echo, next_view):
+        top, bottom = view.visual_vertical_span()
+        assert panel._content_top <= top <= bottom <= panel.height
     assert (panel._echo.glyph_vertical_span()[0]
             >= lead_view.glyph_vertical_span()[1]), (
         "the ad-lib is drawn through the line it answers")
     assert (panel._echo.glyph_vertical_span()[1]
             <= next_view.glyph_vertical_span()[0]), (
         "the ad-lib is drawn through the upcoming line")
+
+
+def _assert_backing_lane(panel, lead_index):
+    from lyrica.app import ECHO_VERTICAL_GAP
+    from lyrica.glass import hex_of
+
+    echo = panel._echo
+    assert echo is not None, "a feasible ad-lib must be visible, including during glides"
+    assert echo._visible
+    assert any(panel.canvas.itemcget(e[2], "state") != "hidden"
+               and panel.canvas.itemcget(e[2], "fill") != hex_of(echo.palette.backdrop)
+               for e in echo._items), "a constructed but invisible echo is not presence"
+    gap = panel.chrome.px(ECHO_VERTICAL_GAP)
+    lead = panel._views[lead_index]
+    below = panel._views.get(lead_index + 1)
+    assert echo.glyph_vertical_span()[0] >= lead.glyph_vertical_span()[1] + gap
+    if below is not None and below is panel._views.get(panel.line_index + 1):
+        colours = {panel.canvas.itemcget(e[2], "fill") for e in below._items}
+        states = {panel.canvas.itemcget(e[2], "state") for e in below._items}
+        if states == {"hidden"} or (panel.palette.washed
+                                  and colours == {hex_of(panel.palette.backdrop)}):
+            below = None
+    if below is not None:
+        assert echo.glyph_vertical_span()[1] + gap <= below.glyph_vertical_span()[0]
+    top, bottom = echo.visual_vertical_span()
+    assert panel._content_top <= top <= bottom <= panel.height
+    for index in (panel.line_index, panel.line_index + 1):
+        view = panel._views.get(index)
+        if view is not None:
+            top, bottom = view.visual_vertical_span()
+            assert panel._content_top <= top <= bottom <= panel.height
+
+
+@pytest.mark.parametrize("scale", [0.6, 0.75, 1.0, 1.25, 1.5, 2.0])
+@pytest.mark.parametrize("lead,below", [(FITS, FITS), (FITS, WRAPS),
+                                        (WRAPS, FITS), (WRAPS, WRAPS)],
+                         ids=["1-to-1", "1-to-2", "2-to-1", "2-to-2"])
+def test_backing_is_present_at_every_frame_of_a_wrap_transition(
+        scaled_panel, lead, below, monkeypatch):
+    from lyrica import app as A
+
+    panel = scaled_panel
+    now = [100.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+    panel.lyrics = Lyrics(
+        lines=[(0.0, FITS), (3.0, lead), (6.0, below)],
+        words=[_timed(FITS, 0.0), _timed(lead, 3.0), _timed(below, 6.0)],
+        synced=True, backing=["", "(You)", ""],
+        backing_words=[[], [(3.0, 5.0, "(You)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    start = panel._views[1].y
+    panel._go_to_line(1, panel.lyrics)
+    for frame in range(61):
+        now[0] = 100.0 + frame / 60
+        panel._advance_glides()
+        panel._restyle()
+        panel._show_backing(panel.lyrics, 3.1 + frame / 60, effects=False)
+        panel._present_incoming_preview()
+        _assert_backing_lane(panel, 1)
+        if frame == 0:
+            assert panel._views[1].y == pytest.approx(start, abs=1), (
+                "promotion must preserve the glide, not snap to the reserved slot")
+    assert panel._views[1].y < start
+    assert {panel.canvas.itemcget(e[2], "fill") for e in panel._views[2]._items} != {
+        A.glass.hex_of(panel.palette.backdrop)}
+
+
+@pytest.mark.parametrize("scale", [0.75, 1.0, 1.5])
+def test_lingering_echo_keeps_its_lane_through_the_next_line(scaled_panel, monkeypatch):
+    from lyrica import app as A
+
+    panel = scaled_panel
+    now = [100.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+    panel.lyrics = Lyrics(
+        lines=[(0.0, FITS), (3.0, FITS), (6.0, WRAPS)],
+        words=[_timed(FITS, 0.0), _timed(FITS, 3.0), _timed(WRAPS, 6.0)],
+        synced=True, backing=["(You)", "", ""],
+        backing_words=[[(2.5, 3.8, "(You)")], [], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._show_backing(panel.lyrics, 2.9, effects=False)
+    original = panel._echo
+    assert original is not None
+    panel._go_to_line(1, panel.lyrics)
+    for frame in range(61):
+        now[0] = 100.0 + frame / 60
+        panel._advance_glides()
+        panel._restyle()
+        panel._show_backing(panel.lyrics, 3.0 + frame / 60, effects=False)
+        panel._present_incoming_preview()
+        assert panel._echo is original, "a role change must not restart or drop a tail"
+        _assert_backing_lane(panel, 0)
+
+
+@pytest.mark.parametrize("scale", [0.6, 1.0, 2.0])
+def test_reservation_uses_the_final_long_echo_font_without_remeasuring(
+        scaled_panel, monkeypatch):
+    from lyrica import app as A
+
+    panel = scaled_panel
+    text = "(" + "a long responding voice " * 12 + ")"
+    panel.lyrics = Lyrics(
+        lines=[(0.0, WRAPS), (3.0, WRAPS)],
+        words=[_timed(WRAPS, 0.0), _timed(WRAPS, 3.0)], synced=True,
+        backing=[text, ""], backing_words=[_timed(text, 0.8, 1.2), []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    before = {i: v.y for i, v in panel._views.items()}
+
+    def unexpected_measurement(*args, **kwargs):
+        pytest.fail("a frame remeasured a backing font already reserved by the layout")
+
+    monkeypatch.setattr(A, "_font_for_single_row", unexpected_measurement)
+    for pos in (0.1, 1.0, 1.8, 2.5, 1.2):
+        panel._show_backing(panel.lyrics, pos, effects=False)
+        panel._present_incoming_preview()
+        assert {i: v.y for i, v in panel._views.items()} == before
+        if 0.8 <= pos <= 2.0:
+            _assert_backing_lane(panel, 0)
+            assert panel._echo.height == panel._echo.line_height
+            assert abs(panel._echo._font[1]) < abs(panel.f_echo[1])
+
+
+def test_an_impossible_short_viewport_suppresses_without_drawing_through_rows(panel):
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._resize_window(panel.width, 100)
+    active, below = panel._views[0], panel._views[1]
+    required = (active.height + below.height + panel._backing_space(0)
+                + active.glyph_padding + below.glyph_padding)
+    assert required > panel.height - panel._content_top
+    panel._show_backing(panel.lyrics, 1.3, effects=False)
+    assert panel._echo is None
+    assert panel._echo_blocked is not None
+
+
+@pytest.mark.parametrize("scale", [0.6, 1.0, 1.25, 2.0])
+def test_no_backing_keeps_the_ordinary_anchor_and_gap(scaled_panel):
+    from lyrica.app import HEIGHT
+
+    panel = scaled_panel
+    panel.lyrics = Lyrics(lines=[(0.0, FITS), (3.0, FITS)], synced=True)
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    before = {i: v.y for i, v in panel._views.items()}
+    assert panel.height == panel.chrome.px(HEIGHT)
+    assert before[0] == panel.anchor_y
+    assert before[1] == before[0] + panel._views[0].height + panel.row_gap
+    panel._show_backing(panel.lyrics, 1.3, effects=False)
+    panel._present_incoming_preview()
+    assert panel._echo is None
+    assert {i: v.y for i, v in panel._views.items()} == before
+
+
+def test_a_rapid_skip_keeps_an_orphaned_tail_clear_of_the_new_active_row(panel):
+    panel._clear_views()
+    panel.lyrics = Lyrics(
+        lines=[(0.0, FITS), (1.0, WRAPS), (2.0, WRAPS), (3.0, FITS)],
+        words=[_timed(FITS, 0.0), _timed(WRAPS, 1.0),
+               _timed(WRAPS, 2.0), _timed(FITS, 3.0)], synced=True,
+        backing=["(You)", "", "", ""],
+        backing_words=[[(0.5, 3.0, "(You)")], [], [], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._show_backing(panel.lyrics, 0.8, effects=False)
+    original = panel._echo
+    panel._go_to_line(2, panel.lyrics, animate=False)
+    panel._advance_glides()
+    panel._restyle()
+    panel._show_backing(panel.lyrics, 2.1, effects=False)
+    panel._present_incoming_preview()
+    assert panel._echo is original
+    assert original.glyph_vertical_span()[1] < panel._views[2].glyph_vertical_span()[0]
+    assert original.visual_vertical_span()[0] >= panel._content_top
+
+
+@pytest.mark.parametrize("scale", [0.6, 0.75, 1.0, 1.25, 1.5, 2.0])
+def test_frame_boundary_repositions_the_echo_after_late_ink_growth(scaled_panel):
+    panel = scaled_panel
+    panel.lyrics = Lyrics(
+        lines=[(0.0, WRAPS), (3.0, WRAPS)], synced=True,
+        backing=["(You)", ""], backing_words=[[(1.0, 2.0, "(You)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._show_backing(panel.lyrics, 1.3, effects=False)
+    assert panel._echo is not None
+    panel._views[0].growth += 0.08
+    panel._views[1].growth += 0.08
+    panel._present_incoming_preview()
+    _assert_backing_lane(panel, 0)
+    assert panel._views[1]._visible, "a settled preview must not wait forever after restyling"
+
+
+def test_a_keyed_preview_waits_without_painting_an_outline_over_the_echo(panel, monkeypatch):
+    from lyrica import app as A
+    from lyrica.palette import KEYED
+
+    monkeypatch.setattr(panel, "palette", KEYED)
+    now = [100.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+    panel._clear_views()
+    panel.lyrics = Lyrics(
+        lines=[(0.0, FITS), (3.0, WRAPS), (6.0, WRAPS)], synced=True,
+        backing=["", "(You)", ""], backing_words=[[], [(3.0, 5.0, "(You)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._go_to_line(1, panel.lyrics)
+    for frame in range(61):
+        now[0] = 100.0 + frame / 60
+        panel._advance_glides()
+        panel._restyle()
+        panel._show_backing(panel.lyrics, 3.1 + frame / 60, effects=False)
+        panel._present_incoming_preview()
+        _assert_backing_lane(panel, 1)
+        if frame == 0:
+            preview = panel._views[2]
+            assert all(panel.canvas.itemcget(item, "state") == "hidden"
+                       for item in panel.canvas.find_withtag(preview._tag))
+    assert panel._views[2]._visible
+
+
+@pytest.mark.parametrize("scale", [0.6, 0.75, 1.0, 1.5, 2.0])
+def test_paused_mount_and_resize_rebuild_the_reserved_lane(scaled_panel):
+    from datetime import UTC, datetime
+
+    from lyrica.sessions import Snapshot
+
+    panel = scaled_panel
+    panel.lyrics = Lyrics(
+        lines=[(0.0, WRAPS), (3.0, WRAPS)], synced=True,
+        backing=["(You)", ""], backing_words=[[(1.0, 2.0, "(You)")], []])
+    snap = Snapshot(ok=True, position=1.3, playing=False, updated_at=datetime.now(UTC))
+    panel._mount_static_lyrics(snap)
+    panel._present_incoming_preview()
+    _assert_backing_lane(panel, 0)
+    assert not panel._glides
+    panel._dpi_scale = 1.0 if panel._dpi_scale != 1.0 else 1.5
+    panel._apply_scale()
+    assert panel._echo is None
+    panel._mount_static_lyrics(snap)
+    panel._present_incoming_preview()
+    _assert_backing_lane(panel, 0)
+    assert not panel._glides
+
+
+def test_overlapping_responses_keep_the_original_voice_until_its_tail_finishes(panel):
+    panel._clear_views()
+    panel.lyrics = Lyrics(
+        lines=[(0.0, FITS), (3.0, FITS), (6.0, WRAPS)], synced=True,
+        backing=["(First)", "(Second)", ""],
+        backing_words=[[(2.5, 3.8, "(First)")], [(3.4, 4.8, "(Second)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    panel._show_backing(panel.lyrics, 2.9, effects=False)
+    original = panel._echo
+    panel._go_to_line(1, panel.lyrics, animate=False)
+    panel._advance_glides()
+    panel._show_backing(panel.lyrics, 3.6, effects=False)
+    panel._present_incoming_preview()
+    assert panel._echo is original
+    _assert_backing_lane(panel, 0)
+    before = {i: v.y for i, v in panel._views.items()}
+    panel._show_backing(panel.lyrics, 4.2, effects=False)
+    panel._present_incoming_preview()
+    assert panel._echo.text == "(Second)"
+    _assert_backing_lane(panel, 1)
+    assert {i: v.y for i, v in panel._views.items()} == before
+
+
+@pytest.mark.parametrize("scale", [1.5])
+def test_impossible_echo_space_does_not_hide_a_feasible_main_preview(scaled_panel):
+    panel = scaled_panel
+    lead = WRAPS + " " + WRAPS[:50]
+    panel.lyrics = Lyrics(
+        lines=[(0.0, lead), (3.0, WRAPS)], synced=True,
+        backing=["(You)", ""], backing_words=[[(1.0, 2.0, "(You)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    active, incoming = panel._views[0], panel._views[1]
+    assert active.height == 3 * active.line_height
+    panel._show_backing(panel.lyrics, 1.3, effects=False)
+    panel._incoming_fades.clear()
+    panel._present_incoming_preview()
+    assert panel._echo is None
+    assert incoming._visible, "an impossible echo must yield to readable main lyrics"
+    assert active.glyph_vertical_span()[1] <= incoming.glyph_vertical_span()[0]
+    assert {panel.canvas.itemcget(e[2], "fill") for e in incoming._items} == {
+        panel._incoming_preview_colour(1, incoming)}
+
+
+def test_rapid_promotions_preserve_a_visible_tail_and_safe_glyphs(panel, monkeypatch):
+    from lyrica import app as A
+
+    now = [100.0]
+    monkeypatch.setattr(A.time, "monotonic", lambda: now[0])
+    panel._clear_views()
+    panel.lyrics = Lyrics(
+        lines=[(i / 10, WRAPS) for i in range(4)], synced=True,
+        backing=["(First)", "(Second)", "(Third)", ""],
+        backing_words=[[(0.0, 0.5, "(First)")], [(0.1, 1.0, "(Second)")],
+                       [(0.2, 2.0, "(Third)")], []])
+    panel._go_to_line(0, panel.lyrics, animate=False)
+    for frame in range(61):
+        elapsed = frame / 60
+        now[0] = 100.0 + elapsed
+        if frame in (6, 12):
+            panel._go_to_line(frame // 6, panel.lyrics)
+        panel._advance_glides()
+        panel._restyle()
+        panel._show_backing(panel.lyrics, elapsed, effects=False)
+        panel._present_incoming_preview()
+        echo = panel._echo
+        assert echo is not None, (frame, panel.line_index)
+        top, bottom = echo.visual_vertical_span()
+        assert panel._content_top <= top <= bottom <= panel.height
+        echo_top, echo_bottom = echo.glyph_vertical_span()
+        for view in panel._views.values():
+            if view._visible:
+                top, bottom = view.glyph_vertical_span()
+                assert bottom <= echo_top or top >= echo_bottom, (frame, view.text)
 
 
 def test_an_ordinary_adlib_keeps_the_designed_echo_size(panel):
