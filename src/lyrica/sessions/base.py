@@ -102,6 +102,7 @@ class Snapshot:
     playing: bool = False
     ok: bool = False               # a valid session exists
     session_id: str = ""           # immutable platform binding for this reading
+    session_ambiguous: bool = False  # duplicate bindings cannot authorize actions
 
     @property
     def is_browser(self) -> bool:

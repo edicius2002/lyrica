@@ -21,6 +21,10 @@ compatible with the requested song:
 - Title and duration improve ranking only after the contradiction checks. They
   cannot compensate for a different known artist or recording.
 
+Recognized version suffixes separated by a spaced dash are normalized like
+bracketed labels: `Song - 2011 Remaster` and `Song (Remastered 2011)` do not
+contradict each other. Version words inside the main title remain significant.
+
 Rejection reasons remain internal provider provenance for future diagnostics;
 this change adds no diagnostic UI.
 
@@ -53,6 +57,10 @@ state. The initial policy is:
   otherwise the same bounded backoff.
 - Legacy miss migration batch: one previously ambiguous provider per play.
 
+Providers still pending at the overall cascade deadline receive a retryable
+timeout state even if their background request has not returned. The shorter
+hybrid grace and successful early exits do not imply provider failures.
+
 A refresh begins with the usable cached lyric as the incumbent. A failed,
 unavailable, invalid, or lower-quality refresh cannot replace it. A successful
 quality upgrade replaces it under the existing ranking rules. Compatible v10
@@ -80,7 +88,18 @@ The binding includes the app id and track metadata; an app id alone is not a
 session identity because browsers publish several sessions under one id.
 Snapshots carry this binding without changing the existing persistent
 `track_key`, which remains the offset key. A separate playback key lets the app
-notice a session switch even when two sessions expose the same display track.
+notice distinguishable session switches. These bindings are metadata evidence,
+not globally unique physical tab identifiers. For display continuity, unchanged
+bindings are matched first; a single removed and added binding within the same
+app is treated as a track update. Multiple simultaneous changes cannot prove
+continuity and fall back to deterministic selection. No COM object is retained
+for this matching.
+
+Duplicate bindings prefer a playing reading for display, but mark the snapshot
+ambiguous. Such a snapshot cannot authorize seek or artwork, even if a duplicate
+later disappears. An initially unique snapshot also fails closed if its binding
+has multiple matches when resolving an action. Indistinguishable tabs cannot
+be reliably tracked individually from these metadata fields.
 
 Seek and artwork calls receive the snapshot they are acting for. Each call
 requests a fresh WinRT manager on its own event loop, enumerates sessions, and

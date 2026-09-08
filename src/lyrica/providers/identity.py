@@ -28,6 +28,12 @@ _NON_RECORDING_LABEL = re.compile(
     r"\b(?:official|oficial|music video|video|audio|lyrics?|lyric video|visualizer)\b",
     re.IGNORECASE,
 )
+_VERSION_SUFFIX = re.compile(
+    r"(?:\d{4}\s+)?(?:remaster(?:ed)?|live(?:\s+(?:at|in|from)\s+.+)?|"
+    r"acoustic|instrumental|karaoke|demo|(?:radio|single)\s+edit|"
+    r"(?:club|dance|extended)\s+mix|remix|sped up|slowed(?: down)?)"
+    r"(?:\s+\d{4})?"
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,12 @@ def _base_title(title: str) -> str:
         return match.group(0)
 
     without_labels = _BRACKETED.sub(keep_or_remove, title)
+    # Catalogue suffixes use either brackets or a spaced dash. Recognize
+    # complete version labels, never remove words from the main song title.
+    parts = re.split(r"\s+[-–—]\s+", without_labels)
+    while len(parts) > 1 and _VERSION_SUFFIX.fullmatch(fold(parts[-1])):
+        parts.pop()
+    without_labels = " - ".join(parts)
     return fold(_TRAILING_FEATURE.sub("", without_labels))
 
 

@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import logging
 import sys
+from collections import Counter
+from dataclasses import replace
 from datetime import UTC
 
 from lyrica.sessions.base import SessionReader, Snapshot
@@ -45,6 +47,7 @@ class WindowsSessionReader(SessionReader):
     def __init__(self, interval: float = 0.5):
         super().__init__(interval)
         self._selector = StableSessionSelector()
+        self._previous_sessions: list[Snapshot] = []
 
     @staticmethod
     def available() -> bool:
@@ -174,15 +177,39 @@ class WindowsSessionReader(SessionReader):
         manager_cls = _session_manager_class()
         mgr = await manager_cls.request_async()
         records = await self._records(mgr)
+        self._retain_continuation([snapshot for _, snapshot, _ in records])
         if not records:
+            self._selector.choose([])
             return Snapshot()
         selected = self._selector.choose([
             SessionCandidate(snapshot.session_id, snapshot.playing, status == "PAUSED")
             for _session, snapshot, status in records
         ])
-        return next(
-            snapshot for _session, snapshot, _status in records
-            if snapshot.session_id == selected)
+        # Duplicate metadata is not a physical session identity. For display,
+        # prefer the playing reading; never let a paused duplicate mask it.
+        return max(
+            (snapshot for _, snapshot, _ in records if snapshot.session_id == selected),
+            key=lambda snapshot: (snapshot.playing, snapshot.position))
+
+    def _retain_continuation(self, current: list[Snapshot]) -> None:
+        """Follow one unambiguous metadata change without retaining COM objects.
+
+        Match unchanged bindings first. Only one removed and one added record
+        in the selected app can establish a continuation. Multiple simultaneous
+        changes and duplicate metadata are not proof of tab identity.
+        This affects display selection only; actions still require exact media.
+        """
+        previous, self._previous_sessions = self._previous_sessions, current
+        selected = self._selector.selected
+        old_ids = Counter(s.session_id for s in previous)
+        new_ids = Counter(s.session_id for s in current)
+        if not selected or new_ids[selected] or old_ids[selected] != 1:
+            return
+        old = next(s for s in previous if s.session_id == selected)
+        removed = [s for s in previous if s.app == old.app and not new_ids[s.session_id]]
+        added = [s for s in current if s.app == old.app and not old_ids[s.session_id]]
+        if len(removed) == len(added) == 1 and not old.session_ambiguous:
+            self._selector.selected = added[0].session_id
 
     @staticmethod
     def _session_id(app: str, artist: str, title: str,
@@ -225,16 +252,19 @@ class WindowsSessionReader(SessionReader):
             )
             if snapshot.ok:
                 records.append((session, snapshot, status))
-        return records
+        counts = Counter(snapshot.session_id for _, snapshot, _ in records)
+        return [(session, replace(snapshot, session_ambiguous=counts[snapshot.session_id] > 1),
+                 status) for session, snapshot, status in records]
 
     async def _resolve_session(self, snapshot: Snapshot):
-        if not snapshot.ok or not snapshot.session_id:
+        if not snapshot.ok or not snapshot.session_id or snapshot.session_ambiguous:
             return None
         manager_cls = _session_manager_class()
         manager = await manager_cls.request_async()
         records = await self._records(manager)
-        return next((session for session, candidate, _status in records
-                     if candidate.session_id == snapshot.session_id), None)
+        matches = [session for session, candidate, _status in records
+                   if candidate.session_id == snapshot.session_id]
+        return matches[0] if len(matches) == 1 else None
 
     async def _matching_media(self, session, snapshot: Snapshot):
         """Recheck track identity immediately before acting on a session."""

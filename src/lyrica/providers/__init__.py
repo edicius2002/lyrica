@@ -594,6 +594,12 @@ def _ask_providers(artist: str, title: str, duration: float,
         except queue.Empty:
             logger.info("gave up waiting on %s for %r - %r",
                         sorted(pending), artist, title)
+            if time.monotonic() >= deadline:
+                # A provider can outlive the cascade's overall deadline. Its
+                # late answer is discarded, but its timeout must still feed
+                # cache backoff. A shorter hybrid grace is not a failure.
+                for name in pending:
+                    outcomes[name] = ProviderOutcome.retryable(reason="overall_timeout")
             break
         outcomes[provider.name] = outcome
         pending.pop(provider.name, None)
