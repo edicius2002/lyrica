@@ -101,6 +101,8 @@ class Snapshot:
     updated_at: datetime | None = None  # when that position was reported (UTC)
     playing: bool = False
     ok: bool = False               # a valid session exists
+    session_id: str = ""           # immutable platform binding for this reading
+    session_ambiguous: bool = False  # duplicate bindings cannot authorize actions
 
     @property
     def is_browser(self) -> bool:
@@ -129,16 +131,23 @@ class Snapshot:
         ranked rather than guessed between, and the caller stops at the first
         that resolves.
         """
+        return [(artist, title) for artist, title, _raw in self.lyrics_candidates()]
+
+    def lyrics_candidates(self) -> list[tuple[str, str, str]]:
+        """Lookup pairs plus the raw title evidence identity checks require."""
         seen: set[tuple[str, str]] = set()
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, str, str]] = []
 
         def add(artist: str, title: str) -> None:
             pair = (artist.strip(), clean_title(title))
             if pair[1] and pair not in seen:
                 seen.add(pair)
-                out.append(pair)
+                out.append((*pair, title.strip()))
 
-        add(*self.norm_artist_title())
+        artist, title = self.artist.strip(), self.title
+        if not artist and self.is_browser:
+            artist, title = split_browser_title(title)
+        add(artist, strip_artist_prefix(artist, title))
 
         # The artist field may be an uploader handle rather than a performer,
         # or only the first name of a longer credit. Either way the title's own
@@ -157,6 +166,11 @@ class Snapshot:
 
     def track_key(self) -> str:
         return f"{self.app}|{self.artist}|{self.title}"
+
+    def playback_key(self) -> str:
+        """Track key plus session binding, without changing saved offset keys."""
+        key = self.track_key()
+        return f"{key}|{self.session_id}" if self.session_id else key
 
     def live_position(self) -> float:
         """Playback position interpolated to now.
@@ -205,11 +219,11 @@ class SessionReader(ABC):
         """Whether this reader can work on the machine it is running on."""
         return False
 
-    def read_artwork(self) -> bytes | None:
+    def read_artwork(self, snapshot: Snapshot | None = None) -> bytes | None:
         """The current track's artwork, if the platform publishes any."""
         return None
 
-    def seek(self, seconds: float) -> bool:
+    def seek(self, seconds: float, snapshot: Snapshot | None = None) -> bool:
         """Ask the player to jump to a position. False if it will not.
 
         Watching and controlling are separate permissions here: an overlay

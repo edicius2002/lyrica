@@ -15,7 +15,8 @@ import logging
 import requests
 
 from lyrica.lyrics import Lyrics, Precision
-from lyrica.providers.base import LyricsProvider
+from lyrica.providers.base import LyricsProvider, ProviderOutcome
+from lyrica.providers.identity import SongQuery, validate_identity
 from lyrica.textmatch import fold
 from lyrica.ttml import parse_ttml
 
@@ -83,56 +84,96 @@ class CommunityTtmlProvider(LyricsProvider):
 
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:
-        if not title:
-            return None
-        best = self._best_match(artist, title, duration)
-        if best is None:
-            return None
-        rec, score = best
-        body = self._body(rec)
+        return self.lookup(SongQuery(artist, title, duration, album, title)).lyrics
+
+    @staticmethod
+    def _http_failure(response) -> ProviderOutcome:
+        status = response.status_code
+        if status in (401, 403, 429):
+            retry_after = None
+            try:
+                retry_after = float(response.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                pass
+            return ProviderOutcome.unavailable(
+                reason=f"http_{status}", retry_after=retry_after)
+        return ProviderOutcome.retryable(reason=f"http_{status}")
+
+    def lookup(self, query: SongQuery) -> ProviderOutcome:
+        if not query.title:
+            return ProviderOutcome.no_match(reason="empty_title")
+        try:
+            response = requests.get(
+                SEARCH_URL,
+                params={"q": f"{query.title} {query.artist}".strip()},
+                headers=HEADERS,
+                timeout=TIMEOUT,
+            )
+        except requests.RequestException:
+            logger.debug("community-ttml search failed for %r - %r",
+                         query.artist, query.title, exc_info=True)
+            return ProviderOutcome.retryable(reason="transport")
+        if response.status_code != 200:
+            return self._http_failure(response)
+        try:
+            payload = response.json()
+            results = payload.get("results") or []
+        except (AttributeError, TypeError, ValueError):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not isinstance(results, list):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not results:
+            return ProviderOutcome.no_match(reason="empty_search")
+
+        accepted = []
+        rejected = []
+        for record in results:
+            if not isinstance(record, dict):
+                continue
+            decision = validate_identity(
+                requested_artist=query.artist,
+                requested_title=query.title,
+                requested_raw_title=query.raw_title or query.title,
+                returned_artist=record.get("artist_name") or "",
+                returned_title=record.get("track_name") or "",
+            )
+            if decision.accepted:
+                accepted.append(record)
+            else:
+                rejected.append(decision.reason)
+        if not accepted:
+            return ProviderOutcome.no_match(
+                reason=rejected[0] if rejected else "invalid_payload")
+
+        rec = max(accepted, key=lambda item: _score(
+            item, query.artist, query.title, query.duration))
+        score = _score(rec, query.artist, query.title, query.duration)
+        if score < self.MIN_SCORE:
+            return ProviderOutcome.no_match(reason="low_score")
+
+        url = rec.get("lyricsUrl")
+        if not url:
+            return ProviderOutcome.no_match(reason="no_document")
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        except requests.RequestException:
+            logger.debug("community-ttml document fetch failed: %s", url, exc_info=True)
+            return ProviderOutcome.retryable(reason="transport")
+        if response.status_code == 404:
+            return ProviderOutcome.no_match(reason="no_document")
+        if response.status_code != 200:
+            return self._http_failure(response)
+        body = response.text
         if not body:
-            return None
+            return ProviderOutcome.no_match(reason="no_document")
         lyrics = parse_ttml(body)
         if lyrics is None:
-            logger.info("community-ttml: unparseable document for %r - %r", artist, title)
-            return None
+            logger.info("community-ttml: unparseable document for %r - %r",
+                        query.artist, query.title)
+            return ProviderOutcome.retryable(reason="invalid_document")
         lyrics.source = f"community-ttml/{rec.get('timing_type', '?')}"
         lyrics.exact = score >= self.EXACT_SCORE
         # Kept on the live result so a hybrid can reject another release of
         # the same title before borrowing any of its timings.
         lyrics.recording_duration = float(rec.get("duration") or 0.0)
-        return lyrics
-
-    def _best_match(self, artist: str, title: str,
-                    duration: float) -> tuple[dict, float] | None:
-        try:
-            r = requests.get(SEARCH_URL, params={"q": f"{title} {artist}".strip()},
-                             headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            results = r.json().get("results") or []
-        except (requests.RequestException, ValueError):
-            logger.debug("community-ttml search failed for %r - %r", artist, title,
-                         exc_info=True)
-            return None
-        if not results:
-            return None
-
-        best = max(results, key=lambda rec: _score(rec, artist, title, duration))
-        score = _score(best, artist, title, duration)
-        if score < self.MIN_SCORE:
-            logger.info("community-ttml: discarding %r by %r for %r - %r (score %.1f)",
-                        best.get("track_name"), best.get("artist_name"), artist, title, score)
-            return None
-        return best, score
-
-    def _body(self, rec: dict) -> str | None:
-        url = rec.get("lyricsUrl")
-        if not url:
-            return None
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.text
-        except requests.RequestException:
-            logger.debug("community-ttml document fetch failed: %s", url, exc_info=True)
-            return None
+        return ProviderOutcome.hit(lyrics, reason="compatible")

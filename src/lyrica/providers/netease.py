@@ -19,7 +19,8 @@ import logging
 import requests
 
 from lyrica.lyrics import Lyrics, parse_lrc
-from lyrica.providers.base import LyricsProvider
+from lyrica.providers.base import LyricsProvider, ProviderOutcome
+from lyrica.providers.identity import SongQuery, validate_identity
 from lyrica.textmatch import fold
 
 SEARCH_URL = "https://music.163.com/api/search/get"
@@ -79,52 +80,102 @@ class NeteaseProvider(LyricsProvider):
 
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:
-        if not title:
-            return None
-        matched = self._best_match(artist, title, duration)
-        if matched is None:
-            return None
-        song, score = matched
-        return self._lyrics_for(song, exact=score >= self.EXACT_SCORE)
+        return self.lookup(SongQuery(artist, title, duration, album, title)).lyrics
 
-    def _best_match(self, artist: str, title: str,
-                    duration: float) -> tuple[dict, float] | None:
-        query = f"{artist} {title}".strip()
+    @staticmethod
+    def _http_failure(response) -> ProviderOutcome:
+        status = response.status_code
+        if status in (401, 403, 429):
+            retry_after = None
+            try:
+                retry_after = float(response.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                pass
+            return ProviderOutcome.unavailable(
+                reason=f"http_{status}", retry_after=retry_after)
+        return ProviderOutcome.retryable(reason=f"http_{status}")
+
+    def lookup(self, query: SongQuery) -> ProviderOutcome:
+        if not query.title:
+            return ProviderOutcome.no_match(reason="empty_title")
+        search = f"{query.artist} {query.title}".strip()
         try:
-            r = requests.post(SEARCH_URL, data={"s": query, "type": 1, "limit": 5, "offset": 0},
-                              headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            songs = (r.json().get("result") or {}).get("songs") or []
-        except (requests.RequestException, ValueError):
-            logger.debug("netease search failed for %r", query, exc_info=True)
-            return None
+            response = requests.post(
+                SEARCH_URL,
+                data={"s": search, "type": 1, "limit": 5, "offset": 0},
+                headers=HEADERS,
+                timeout=TIMEOUT,
+            )
+        except requests.RequestException:
+            logger.debug("netease search failed for %r", search, exc_info=True)
+            return ProviderOutcome.retryable(reason="transport")
+        if response.status_code != 200:
+            return self._http_failure(response)
+        try:
+            songs = (response.json().get("result") or {}).get("songs") or []
+        except (AttributeError, TypeError, ValueError):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not isinstance(songs, list):
+            return ProviderOutcome.retryable(reason="invalid_payload")
         if not songs:
-            return None
+            return ProviderOutcome.no_match(reason="empty_search")
 
-        best = max(songs, key=lambda s: _score(s, artist, title, duration))
-        score = _score(best, artist, title, duration)
+        accepted = []
+        rejected = []
+        for song in songs:
+            if not isinstance(song, dict):
+                continue
+            decision = validate_identity(
+                requested_artist=query.artist,
+                requested_title=query.title,
+                requested_raw_title=query.raw_title or query.title,
+                returned_artist=_artists_of(song),
+                returned_title=song.get("name") or "",
+            )
+            if decision.accepted:
+                accepted.append(song)
+            else:
+                rejected.append(decision.reason)
+        if not accepted:
+            return ProviderOutcome.no_match(
+                reason=rejected[0] if rejected else "invalid_payload")
+
+        song = max(accepted, key=lambda item: _score(
+            item, query.artist, query.title, query.duration))
+        score = _score(song, query.artist, query.title, query.duration)
         if score < self.MIN_SCORE:
-            logger.info("netease: discarding %r by %r for %r - %r (score %.1f)",
-                        best.get("name"), _artists_of(best), artist, title, score)
-            return None
-        return best, score
-
-    def _lyrics_for(self, song: dict, *, exact: bool) -> Lyrics | None:
+            return ProviderOutcome.no_match(reason="low_score")
         try:
-            r = requests.get(LYRIC_URL, params={"id": song["id"], "lv": 1, "kv": 1, "tv": -1},
-                             headers=HEADERS, timeout=TIMEOUT)
-            r.raise_for_status()
-            payload = r.json()
-        except (requests.RequestException, ValueError, KeyError):
-            logger.debug("netease lyric fetch failed for %s", song.get("id"), exc_info=True)
-            return None
+            response = requests.get(
+                LYRIC_URL,
+                params={"id": song["id"], "lv": 1, "kv": 1, "tv": -1},
+                headers=HEADERS,
+                timeout=TIMEOUT,
+            )
+        except (requests.RequestException, KeyError):
+            logger.debug("netease lyric fetch failed for %s", song.get("id"),
+                         exc_info=True)
+            return ProviderOutcome.retryable(reason="transport")
+        if response.status_code == 404:
+            return ProviderOutcome.no_match(reason="no_lyrics")
+        if response.status_code != 200:
+            return self._http_failure(response)
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            return ProviderOutcome.retryable(reason="invalid_payload")
 
         lrc = (payload.get("lrc") or {}).get("lyric") or ""
         if not lrc:
-            return None
+            return ProviderOutcome.no_match(reason="no_lyrics")
         lines = parse_lrc(lrc)
         if lines:
-            return Lyrics(lines=lines, synced=True, source="netease", exact=exact)
-        # Some entries carry lyrics with no timestamps at all.
-        text = "\n".join(ln for ln in lrc.splitlines() if ln.strip())
-        return Lyrics(plain=text, synced=False, source="netease", exact=exact) if text else None
+            lyrics = Lyrics(lines=lines, synced=True, source="netease",
+                            exact=score >= self.EXACT_SCORE)
+        else:
+            text = "\n".join(line for line in lrc.splitlines() if line.strip())
+            if not text:
+                return ProviderOutcome.no_match(reason="no_lyrics")
+            lyrics = Lyrics(plain=text, synced=False, source="netease",
+                            exact=score >= self.EXACT_SCORE)
+        return ProviderOutcome.hit(lyrics, reason="compatible")

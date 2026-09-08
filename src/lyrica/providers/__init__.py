@@ -9,7 +9,6 @@ Searching stops as soon as an answer is definitive (see `Lyrics.is_definitive`),
 so the extra request is only ever spent when the answer in hand is weak.
 """
 import hashlib
-import json
 import logging
 import queue
 import threading
@@ -22,18 +21,38 @@ from statistics import median
 from lyrica import config
 from lyrica.lyrics import (
     BACKING_CROSS_SOURCE_ALIGNED,
-    BACKING_INFERRED,
     Lyrics,
     Precision,
 )
-from lyrica.providers.base import LyricsProvider
+from lyrica.providers.base import LyricsProvider, OutcomeKind, ProviderOutcome
+from lyrica.providers.cache import (
+    CACHE_VERSION,
+    CONFIRMED_MISS_TTL_S,
+    LEGACY_MIGRATION_BATCH,
+    RETRY_BACKOFF_INITIAL_S,
+    CacheEntry,
+    ProviderState,
+    read_entry,
+    state_from_outcome,
+    write_entry,
+)
 from lyrica.providers.community import CommunityTtmlProvider
+from lyrica.providers.identity import SongQuery, version_qualifiers
 from lyrica.providers.lrclib import LrclibProvider
 from lyrica.providers.musixmatch import MusixmatchProvider
 from lyrica.providers.netease import NeteaseProvider
 from lyrica.textmatch import fold
 
 logger = logging.getLogger(__name__)
+_wall_time = time.time
+
+__all__ = [
+    "CACHE_VERSION",
+    "CONFIRMED_MISS_TTL_S",
+    "RETRY_BACKOFF_INITIAL_S",
+    "fetch_for_candidates",
+    "fetch_lyrics",
+]
 
 
 def default_cache_dir() -> Path:
@@ -94,9 +113,6 @@ HYBRID_SINGLE_TEXT_RATIO = 0.94
 # comparison; the final clock checks below remain much stricter.
 HYBRID_MAX_GROUP_DISTANCE_S = 8.0
 
-_CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
-                 "queried")
-
 # What shape the entries on disk are. Raised whenever a result carries
 # something an older entry could not, so the older ones are fetched again
 # rather than answering with a hole: backing vocals were parsed, cached
@@ -122,13 +138,17 @@ _CACHE_FIELDS = ("plain", "synced", "source", "instrumental", "exact",
 #    being rendered as overlapping backing layers.
 # 10: those suffixes correctly remain in the backing lane, while their lead
 #     stays current until the sequential response has finished.
-# 11: hybrid backing now records cross-source provenance, its affine transform
-#     and local residual instead of caching a transformed clock as "exact".
-CACHE_VERSION = 11
+# 11: hybrid backing records cross-source provenance, its affine transform and
+#     local residual. Version 12 keeps that payload while adding per-provider
+#     outcome freshness and atomic replacement.
 
 
-def _cache_path(artist: str, title: str, duration: float) -> Path:
+def _cache_path(artist: str, title: str, duration: float,
+                raw_title: str = "") -> Path:
     key = f"{artist.lower()}|{title.lower()}|{int(duration)}"
+    versions = version_qualifiers(raw_title)
+    if versions:
+        key += "|versions:" + ",".join(sorted(versions))
     # Naming a file, not protecting anything: the digest just turns arbitrary
     # track text into a safe filename.
     digest = hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest()
@@ -146,64 +166,21 @@ def _cache_read(path: Path) -> tuple[Lyrics | None, list[str]]:
     makes them look unexhausted — correct, since back then there was no way to
     know whether a better source had been asked.
     """
-    d = json.loads(path.read_text(encoding="utf-8"))
-    version = d.get("v")
-    if version != CACHE_VERSION:
-        # Version 10 already contains every field required by direct TTML and
-        # Richsync. Preserve those entries: invalidating the entire listening
-        # history would burst requests into Musixmatch's throttle. Only its old
-        # hybrids are unsafe because they cached a transformed clock as
-        # ``exact`` without the residual needed to validate it locally.
-        source = str(d.get("source", ""))
-        inferred_backing = (
-            source.startswith("musixmatch/richsync")
-            and any(d.get("backing", []))
-            and any(timing == BACKING_INFERRED
-                    for timing in d.get("backing_timing", [])))
-        old_safe = (version == 10
-                    and not source.startswith(
-                        "musixmatch/richsync+community-ttml-adlibs")
-                    and not inferred_backing)
-        if not old_safe:
-            # Reported as a miss nobody has been asked about, which sends only
-            # the unsafe/unknown shape round the providers again.
-            return None, []
-    asked = d.get("asked", [])
-    if d.get("miss"):
-        return None, asked
-    # Tolerate fields added after an entry was written: a missing one takes the
-    # dataclass default rather than discarding an otherwise good answer.
-    lyr = Lyrics(**{k: d[k] for k in _CACHE_FIELDS if k in d})
-    lyr.lines = [tuple(x) for x in d["lines"]]
-    # JSON has no tuples, so word timings come back as lists and would compare
-    # unequal to freshly parsed ones. Restoring the shape keeps a cached hit
-    # indistinguishable from a live one.
-    lyr.words = [[tuple(w) for w in line] for line in d.get("words", [])]
-    lyr.queried = tuple(lyr.queried)     # JSON has no tuples
-    lyr.backing = list(d.get("backing", []))
-    lyr.backing_words = [[tuple(w) for w in line]
-                         for line in d.get("backing_words", [])]
-    lyr.backing_timing = list(d.get("backing_timing", []))
-    lyr.backing_alignment = list(d.get("backing_alignment", []))
-    lyr.backing_modes = list(d.get("backing_modes", []))
-    lyr.voices = list(d.get("voices", []))
-    lyr.singers = dict(d.get("singers", {}))
-    return lyr, asked
+    entry = read_entry(path)
+    if entry is None:
+        return None, []
+    settled = [
+        name for name, state in entry.states.items()
+        if state.kind in (OutcomeKind.HIT, OutcomeKind.NO_MATCH)
+    ]
+    return entry.lyrics, [*settled, *entry.legacy_pending]
 
 
 def _cache_write(path: Path, result: Lyrics | None, asked: list[str]) -> None:
-    if result is None:
-        payload = {"miss": True, "asked": asked, "v": CACHE_VERSION}
-    else:
-        payload = {"lines": result.lines, "words": result.words, "asked": asked,
-                   "backing": result.backing, "backing_words": result.backing_words,
-                   "backing_timing": result.backing_timing,
-                   "backing_alignment": result.backing_alignment,
-                   "backing_modes": result.backing_modes,
-                   "voices": result.voices, "singers": result.singers,
-                   "v": CACHE_VERSION}
-        payload.update({k: getattr(result, k) for k in _CACHE_FIELDS})
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    now = _wall_time()
+    kind = OutcomeKind.HIT if result is not None else OutcomeKind.NO_MATCH
+    states = {name: ProviderState(kind, now) for name in asked}
+    write_entry(path, CacheEntry(result, states), identity={})
 
 
 def _staged(lyr: Lyrics) -> bool:
@@ -537,25 +514,35 @@ def _candidate_is_complete(best: Lyrics | None) -> bool:
 
 
 def _ask_one(provider: LyricsProvider, artist: str, title: str,
-             duration: float, album: str):
+             duration: float, album: str, raw_title: str = ""):
     started = time.perf_counter()
     try:
-        result = provider.fetch(artist, title, duration, album)
+        if hasattr(provider, "lookup"):
+            outcome = provider.lookup(SongQuery(
+                artist, title, duration, album, raw_title or title))
+        else:
+            result = provider.fetch(artist, title, duration, album)
+            outcome = (ProviderOutcome.hit(result)
+                       if result is not None else ProviderOutcome.no_match())
     except Exception:
         # One broken source must not deny the track lyrics that another source
-        # has. Logged with its traceback, then treated as a miss.
+        # has. Logged with its traceback and kept retryable rather than turned
+        # into evidence that the song has no lyrics there.
         logger.exception("provider %s failed for %r - %r",
                          provider.name, artist, title)
-        result = None
+        outcome = ProviderOutcome.retryable(reason="exception")
     elapsed_ms = (time.perf_counter() - started) * 1000
     logger.info("%s answered %s in %.0f ms for %r - %r", provider.name,
-                result.precision.name if result else "MISS", elapsed_ms,
+                (outcome.lyrics.precision.name if outcome.lyrics
+                 else outcome.kind.value.upper()), elapsed_ms,
                 artist, title)
-    return provider, result
+    return provider, outcome
 
 
 def _ask_providers(artist: str, title: str, duration: float,
-                   album: str) -> tuple[Lyrics | None, list[str]]:
+                   album: str, *, provider_list: list[LyricsProvider] | None = None,
+                   incumbent: Lyrics | None = None,
+                   raw_title: str = "") -> tuple[Lyrics | None, dict[str, ProviderOutcome]]:
     """Ask every provider at once, keeping the best. Returns it and who answered.
 
     Asked together rather than in turn. The order still decides *what wins* —
@@ -574,13 +561,19 @@ def _ask_providers(artist: str, title: str, duration: float,
     than only until one satisfies the ceiling. Acceptable because the result is
     cached — this is once per track ever, not once per play.
     """
-    best: Lyrics | None = None
-    asked: list[str] = []
-    pending = {p.name: p for p in PROVIDERS}
+    selected = PROVIDERS if provider_list is None else provider_list
+    best: Lyrics | None = incumbent
+    outcomes: dict[str, ProviderOutcome] = {}
+    pending = {p.name: p for p in selected}
     answers_by_provider: dict[str, Lyrics | None] = {}
+    if incumbent is not None:
+        if incumbent.source.startswith("musixmatch/richsync"):
+            answers_by_provider["musixmatch"] = incumbent
+        elif incumbent.source.startswith("community-ttml"):
+            answers_by_provider["community-ttml"] = incumbent
     answers: queue.Queue = queue.Queue()
 
-    for provider in PROVIDERS:
+    for provider in selected:
         # Daemon threads and a queue rather than a pool. A pool's shutdown
         # waits for every worker, which would undo the early exit entirely —
         # the answer would be in hand and the call would still sit there until
@@ -588,7 +581,7 @@ def _ask_providers(artist: str, title: str, duration: float,
         # daemons they cannot hold up the process on the way out.
         threading.Thread(
             target=lambda p=provider, a=artist, ti=title, d=duration, al=album:
-                answers.put(_ask_one(p, a, ti, d, al)),
+                answers.put(_ask_one(p, a, ti, d, al, raw_title)),
             name=f"lyrics-{provider.name}", daemon=True).start()
 
     deadline = time.monotonic() + OVERALL_TIMEOUT_S
@@ -596,14 +589,21 @@ def _ask_providers(artist: str, title: str, duration: float,
     while pending:
         try:
             wait_until = min(deadline, hybrid_deadline or deadline)
-            provider, result = answers.get(
+            provider, outcome = answers.get(
                 timeout=max(0.05, wait_until - time.monotonic()))
         except queue.Empty:
             logger.info("gave up waiting on %s for %r - %r",
                         sorted(pending), artist, title)
+            if time.monotonic() >= deadline:
+                # A provider can outlive the cascade's overall deadline. Its
+                # late answer is discarded, but its timeout must still feed
+                # cache backoff. A shorter hybrid grace is not a failure.
+                for name in pending:
+                    outcomes[name] = ProviderOutcome.retryable(reason="overall_timeout")
             break
-        asked.append(provider.name)
+        outcomes[provider.name] = outcome
         pending.pop(provider.name, None)
+        result = outcome.lyrics
         answers_by_provider[provider.name] = result
         richsync = answers_by_provider.get("musixmatch")
         community = answers_by_provider.get("community-ttml")
@@ -627,7 +627,7 @@ def _ask_providers(artist: str, title: str, duration: float,
         if _waiting_for_hybrid(best, pending) and hybrid_deadline is None:
             hybrid_deadline = time.monotonic() + HYBRID_GRACE_S
 
-    return best, asked
+    return best, outcomes
 
 
 def _stamp(result: Lyrics | None, artist: str, title: str) -> Lyrics | None:
@@ -642,7 +642,7 @@ def _stamp(result: Lyrics | None, artist: str, title: str) -> Lyrics | None:
 
 
 def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
-                 album: str = "") -> Lyrics | None:
+                 album: str = "", *, raw_title: str = "") -> Lyrics | None:
     """Best answer any provider has for one artist/title pair, or None.
 
     The answer is cached, misses included: a track with no lyrics anywhere is
@@ -652,34 +652,79 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
     if not title:
         return None
 
-    cpath = _cache_path(artist, title, duration)
+    versions = sorted(version_qualifiers(raw_title))
+    cpath = _cache_path(artist, title, duration, raw_title)
+    identity = {
+        "artist": artist.lower(),
+        "title": title.lower(),
+        "duration": int(duration),
+        "versions": versions,
+    }
+    entry: CacheEntry | None = None
     if cpath.exists():
         try:
-            cached, asked = _cache_read(cpath)
+            entry = read_entry(cpath, identity)
         except (OSError, ValueError, KeyError, TypeError):
-            cached, asked = None, _provider_names()  # unreadable: fetch again below
-            cpath.unlink(missing_ok=True)
-        else:
-            # A cached answer is only trusted while nothing unasked could beat
-            # it. Once a better source exists that this entry never saw, it is
-            # worth revisiting — that is what lets a word-level provider added
-            # later supersede a line-level hit instead of being shadowed by it.
-            unasked = [p for p in PROVIDERS if p.name not in asked]
-            if not unasked or _nothing_left_to_beat(cached, unasked):
-                return _stamp(cached, artist, title)
-            logger.info("re-querying %r - %r: %s never asked", artist, title,
-                        [p.name for p in unasked])
+            # Keep the unreadable file until a complete replacement is ready;
+            # deleting first turns a transient refresh failure into data loss.
+            entry = None
 
-    best, asked = _ask_providers(artist, title, duration, album)
+    cached = entry.lyrics if entry is not None else None
+    states = dict(entry.states) if entry is not None else {}
+    providers_by_name = {provider.name: provider for provider in PROVIDERS}
+    if entry is not None and entry.legacy_miss:
+        pending_names = list(dict.fromkeys([
+            *entry.legacy_pending,
+            *(name for name in providers_by_name if name not in states),
+        ]))
+        due = [providers_by_name[name] for name in pending_names
+               if name in providers_by_name][:LEGACY_MIGRATION_BATCH]
+    else:
+        now = _wall_time()
+        due = [provider for provider in PROVIDERS
+               if provider.name not in states or states[provider.name].due(now)]
+        pending_names = list(entry.legacy_pending) if entry is not None else []
+
+    if cached is not None and (_nothing_left_to_beat(cached, due)
+                               and not _may_add_backing(cached, due)):
+        return _stamp(cached, artist, title)
+    if not due:
+        return _stamp(cached, artist, title)
+
+    best, outcomes = _ask_providers(
+        artist, title, duration, album,
+        provider_list=due,
+        incumbent=cached,
+        raw_title=raw_title or title,
+    )
+    # Compatibility for tests and third-party monkeypatches written against
+    # the former ``asked: list[str]`` return value.
+    if isinstance(outcomes, list):
+        legacy_kind = OutcomeKind.HIT if best is not None else OutcomeKind.NO_MATCH
+        outcomes = {name: ProviderOutcome(legacy_kind, lyrics=(best if legacy_kind
+                    is OutcomeKind.HIT else None)) for name in outcomes}
+
+    now = _wall_time()
+    for name, outcome in outcomes.items():
+        states[name] = state_from_outcome(outcome, states.get(name), now)
+    if entry is not None and entry.legacy_miss:
+        answered = set(outcomes)
+        pending_names = [name for name in pending_names if name not in answered]
+    best = best if _better(best, cached) else cached
     _stamp(best, artist, title)
     try:
-        _cache_write(cpath, best, asked)
+        write_entry(cpath, CacheEntry(
+            best,
+            states,
+            tuple(pending_names),
+            bool(pending_names) and entry is not None and entry.legacy_miss,
+        ), identity)
     except OSError:
         logger.warning("could not cache result for %r - %r", artist, title, exc_info=True)
     return best
 
 
-def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.0,
+def fetch_for_candidates(candidates: list[tuple], duration: float = 0.0,
                          album: str = "") -> Lyrics | None:
     """Best answer across every reading of the metadata.
 
@@ -688,8 +733,13 @@ def fetch_for_candidates(candidates: list[tuple[str, str]], duration: float = 0.
     the search stopping early on a definitive answer.
     """
     best: Lyrics | None = None
-    for artist, title in candidates:
-        result = fetch_lyrics(artist, title, duration, album)
+    for candidate in candidates:
+        artist, title = candidate[:2]
+        if len(candidate) > 2:
+            result = fetch_lyrics(
+                artist, title, duration, album, raw_title=candidate[2])
+        else:
+            result = fetch_lyrics(artist, title, duration, album)
         if _better(result, best):
             best = result
         # Every candidate asks the whole cascade, so the bar to clear here is

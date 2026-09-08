@@ -3,8 +3,9 @@ import queue
 from types import SimpleNamespace
 
 from lyrica import artwork, sponsorblock
-from lyrica.app import ArtworkResult, Overlay, Track, WorkerResult
+from lyrica.app import ArtworkResult, Overlay, Track, WorkerResult, transport_is_live
 from lyrica.lyrics import Lyrics
+from lyrica.sessions import Snapshot
 
 
 def _panel() -> Overlay:
@@ -119,3 +120,42 @@ def test_a_cut_correction_fades_the_landed_scene_out_of_the_wash(monkeypatch):
     assert panel._advance_cut_fade() is False
     assert shown["row-text"] == "#ffffff"
     assert panel._cut_fade_at is None
+
+
+def test_player_artwork_is_requested_for_the_loading_snapshot(monkeypatch):
+    from lyrica import app
+
+    snapshot = Snapshot(
+        app="browser", artist="Artist", title="Song", ok=True,
+        session_id="bound-session")
+    loading = Track(gen=3, snapshot=snapshot)
+    panel = Overlay.__new__(Overlay)
+    panel._thumb_size = 58
+    panel._shape_gen = 4
+    panel._worker_results = queue.SimpleQueue()
+    panel._build_art = lambda data: ("built", data)
+    received = []
+    panel.reader = SimpleNamespace(
+        read_artwork=lambda snap: received.append(snap) or b"player-art")
+    monkeypatch.setattr(app.artwork, "available", lambda: True)
+    monkeypatch.setattr(app.artwork, "best_cover_for_candidates", lambda *a, **k: None)
+    monkeypatch.setattr(app.artwork, "identify", lambda *a, **k: None)
+
+    panel._start_artwork(loading)
+    result = panel._worker_results.get(timeout=2)
+
+    assert received == [snapshot]
+    assert result.value.cover == b"player-art"
+
+
+def test_same_track_in_another_session_cannot_drive_visible_lyrics():
+    shown = Snapshot(
+        app="browser", artist="Artist", title="Song", playing=True, ok=True,
+        session_id="session-a")
+    other = Snapshot(
+        app="browser", artist="Artist", title="Song", playing=True, ok=True,
+        session_id="session-b")
+
+    assert shown.track_key() == other.track_key()
+    assert shown.playback_key() != other.playback_key()
+    assert not transport_is_live(Track(snapshot=shown), other)

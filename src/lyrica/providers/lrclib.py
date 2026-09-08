@@ -7,7 +7,8 @@ then fuzzy /search scored by artist/title/duration similarity.
 import requests
 
 from lyrica.lyrics import Lyrics, parse_lrc
-from lyrica.providers.base import LyricsProvider
+from lyrica.providers.base import LyricsProvider, ProviderOutcome
+from lyrica.providers.identity import SongQuery, validate_identity
 
 API = "https://lrclib.net/api"
 HEADERS = {"User-Agent": "lyrica/0.2.7 (personal research overlay)"}
@@ -47,19 +48,45 @@ class LrclibProvider(LyricsProvider):
 
     def fetch(self, artist: str, title: str, duration: float = 0.0,
               album: str = "") -> Lyrics | None:
-        if not title:
-            return None
+        return self.lookup(SongQuery(artist, title, duration, album, title)).lyrics
+
+    @staticmethod
+    def _failure(response) -> ProviderOutcome:
+        status = response.status_code
+        if status in (401, 403, 429):
+            retry_after = None
+            try:
+                retry_after = float(response.headers.get("Retry-After", ""))
+            except (TypeError, ValueError):
+                pass
+            return ProviderOutcome.unavailable(
+                reason=f"http_{status}", retry_after=retry_after)
+        return ProviderOutcome.retryable(reason=f"http_{status}")
+
+    @staticmethod
+    def _identity(query: SongQuery, record: dict):
+        return validate_identity(
+            requested_artist=query.artist,
+            requested_title=query.title,
+            requested_raw_title=query.raw_title or query.title,
+            returned_artist=record.get("artistName") or "",
+            returned_title=record.get("trackName") or "",
+        )
+
+    def lookup(self, query: SongQuery) -> ProviderOutcome:
+        if not query.title:
+            return ProviderOutcome.no_match(reason="empty_title")
 
         # Exact lookup, then the same lookup without the duration. A re-upload
         # can be padded or concatenated — one SoundCloud copy of a 3-minute
         # song reported 12 minutes — and LRCLIB matches duration within ±2 s,
         # so a wrong duration turns a findable track into a miss.
         attempts: list[dict] = []
-        base = {"artist_name": artist, "track_name": title}
-        if album:
-            base["album_name"] = album
-        if duration > 1:
-            attempts.append({**base, "duration": round(duration)})
+        base = {"artist_name": query.artist, "track_name": query.title}
+        if query.album:
+            base["album_name"] = query.album
+        if query.duration > 1:
+            attempts.append({**base, "duration": round(query.duration)})
         attempts.append(base)
 
         # A /get hit names the track; a /search hit is the closest thing found.
@@ -68,19 +95,52 @@ class LrclibProvider(LyricsProvider):
             try:
                 r = requests.get(f"{API}/get", params=params, headers=HEADERS, timeout=10)
                 if r.status_code == 200:
-                    result = _from_record(r.json(), "lrclib/get", exact=True)
-                    if result is not None:
-                        return result
+                    record = r.json()
+                    identity = self._identity(query, record)
+                    result = _from_record(record, "lrclib/get", exact=True)
+                    if identity.accepted and result is not None:
+                        return ProviderOutcome.hit(result, reason=identity.reason)
+                elif r.status_code in (401, 403, 429):
+                    return self._failure(r)
             except requests.RequestException:
-                pass
+                continue
+            except (TypeError, ValueError):
+                continue
 
         try:
-            q = f"{artist} {title}".strip()
+            q = f"{query.artist} {query.title}".strip()
             r = requests.get(f"{API}/search", params={"q": q}, headers=HEADERS, timeout=10)
-            if r.status_code == 200 and r.json():
-                best = max(r.json(), key=lambda rec: _score(rec, artist, title, duration))
-                if _score(best, artist, title, duration) >= 2:
-                    return _from_record(best, "lrclib/search", exact=False)
+            if r.status_code != 200:
+                return self._failure(r)
+            records = r.json()
         except requests.RequestException:
-            pass
-        return None
+            return ProviderOutcome.retryable(reason="transport")
+        except (TypeError, ValueError):
+            return ProviderOutcome.retryable(reason="invalid_json")
+        if not isinstance(records, list):
+            return ProviderOutcome.retryable(reason="invalid_payload")
+        if not records:
+            return ProviderOutcome.no_match(reason="empty_search")
+
+        accepted = []
+        rejected = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            decision = self._identity(query, record)
+            if decision.accepted:
+                accepted.append(record)
+            else:
+                rejected.append(decision.reason)
+        if not accepted:
+            reason = rejected[0] if rejected else "invalid_payload"
+            return ProviderOutcome.no_match(reason=reason)
+
+        best = max(accepted, key=lambda rec: _score(
+            rec, query.artist, query.title, query.duration))
+        if _score(best, query.artist, query.title, query.duration) < 2:
+            return ProviderOutcome.no_match(reason="low_score")
+        result = _from_record(best, "lrclib/search", exact=False)
+        if result is None:
+            return ProviderOutcome.no_match(reason="no_lyrics")
+        return ProviderOutcome.hit(result, reason="compatible")
