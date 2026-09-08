@@ -1,6 +1,11 @@
 """Click-to-seek: telling a click from a drag, and asking rather than assuming."""
+from types import SimpleNamespace
+
+from lyrica import sponsorblock
+from lyrica.app import Overlay, Track
+from lyrica.lyrics import Lyrics
 from lyrica.sessions import NullSessionReader
-from lyrica.sessions.base import SessionReader
+from lyrica.sessions.base import SessionReader, Snapshot
 
 
 class Recorder(SessionReader):
@@ -64,3 +69,24 @@ def test_the_base_reader_refuses_by_default():
     # A new platform reader that forgets to implement this must fail closed,
     # not silently claim success.
     assert NullSessionReader("no player").seek(10.0) is False
+
+
+def test_overlay_seek_passes_the_snapshot_behind_the_visible_lyrics():
+    snapshot = Snapshot(
+        app="browser", artist="Artist", title="Song", ok=True,
+        session_id="bound-session")
+    panel = Overlay.__new__(Overlay)
+    panel.lyrics = Lyrics(lines=[(12.0, "line")], synced=True)
+    panel._shown = Track(snapshot=snapshot)
+    panel._views = {0: SimpleNamespace(y=10, height=20)}
+    panel.offset = 0.0
+    panel._cuts = sponsorblock.Cuts()
+    panel._awaiting_seek = None
+    panel._go_to_line = lambda *_args: None
+    received = []
+    panel.reader = SimpleNamespace(
+        seek=lambda seconds, snap: received.append((seconds, snap)) or True)
+
+    panel._seek_to_line_at(15)
+
+    assert received == [(12.0, snapshot)]

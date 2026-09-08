@@ -9,6 +9,7 @@ import pytest
 
 from lyrica import providers
 from lyrica.lyrics import Lyrics, Precision
+from lyrica.providers.base import ProviderOutcome
 
 
 def synced(source: str = "fake") -> Lyrics:
@@ -51,6 +52,39 @@ class Exploding:
     def fetch(self, artist, title, duration=0.0, album=""):
         self.calls += 1
         raise RuntimeError("provider is broken")
+
+
+class Recovers:
+    """Fails transiently, then returns the configured usable result."""
+
+    def __init__(self, name: str, result: Lyrics,
+                 ceiling: Precision = Precision.LINE):
+        self.name = name
+        self.result = result
+        self.max_precision = ceiling
+        self.calls = 0
+
+    def fetch(self, artist, title, duration=0.0, album=""):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary failure")
+        return self.result
+
+
+class Outcomes:
+    """A provider whose explicit outcomes change between attempts."""
+
+    def __init__(self, name: str, *outcomes: ProviderOutcome,
+                 ceiling: Precision = Precision.LINE):
+        self.name = name
+        self.outcomes = list(outcomes)
+        self.max_precision = ceiling
+        self.calls = 0
+
+    def lookup(self, query):
+        outcome = self.outcomes[min(self.calls, len(self.outcomes) - 1)]
+        self.calls += 1
+        return outcome
 
 
 @pytest.fixture(autouse=True)
@@ -220,6 +254,160 @@ def test_a_corrupt_cache_entry_is_replaced(monkeypatch):
     assert only.calls == 2
 
 
+def test_a_provider_exception_is_not_cached_as_a_permanent_miss(monkeypatch):
+    recovering = Recovers("recovering", synced())
+    use(monkeypatch, recovering)
+
+    assert providers.fetch_lyrics("A", "B") is None
+    assert providers.fetch_lyrics("A", "B") is not None
+    assert recovering.calls == 2
+
+
+def test_a_failed_upgrade_cannot_replace_a_usable_cached_hit(monkeypatch):
+    (old,) = use(monkeypatch, Fake("old", plain("old"), Precision.PLAIN))
+    first = providers.fetch_lyrics("A", "B")
+
+    old.result = None
+    use(monkeypatch, old, Exploding())
+    second = providers.fetch_lyrics("A", "B")
+
+    assert second.plain == first.plain
+    assert second.source == "old"
+
+
+def test_an_unavailable_provider_obeys_its_retry_time(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(providers, "_wall_time", lambda: now[0], raising=False)
+    source = Outcomes(
+        "limited",
+        ProviderOutcome.unavailable(reason="rate_limit", retry_after=60.0),
+        ProviderOutcome.hit(synced()),
+    )
+    use(monkeypatch, source)
+
+    assert providers.fetch_lyrics("A", "B") is None
+    now[0] += 59.0
+    assert providers.fetch_lyrics("A", "B") is None
+    assert source.calls == 1
+    now[0] += 2.0
+    assert providers.fetch_lyrics("A", "B") is not None
+    assert source.calls == 2
+
+
+def test_a_confirmed_miss_expires(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(providers, "_wall_time", lambda: now[0], raising=False)
+    source = Outcomes(
+        "empty",
+        ProviderOutcome.no_match(reason="empty_search"),
+        ProviderOutcome.hit(synced()),
+    )
+    use(monkeypatch, source)
+
+    assert providers.fetch_lyrics("A", "B") is None
+    now[0] += providers.CONFIRMED_MISS_TTL_S - 1
+    assert providers.fetch_lyrics("A", "B") is None
+    assert source.calls == 1
+    now[0] += 2
+    assert providers.fetch_lyrics("A", "B") is not None
+
+
+def test_repeated_transient_failures_back_off_but_remain_recoverable(monkeypatch):
+    now = [1_000.0]
+    monkeypatch.setattr(providers, "_wall_time", lambda: now[0], raising=False)
+    source = Outcomes(
+        "flaky",
+        ProviderOutcome.retryable(reason="timeout"),
+        ProviderOutcome.retryable(reason="timeout"),
+        ProviderOutcome.hit(synced()),
+    )
+    use(monkeypatch, source)
+
+    assert providers.fetch_lyrics("A", "B") is None
+    assert providers.fetch_lyrics("A", "B") is None  # one immediate recovery chance
+    now[0] += providers.RETRY_BACKOFF_INITIAL_S - 1
+    assert providers.fetch_lyrics("A", "B") is None
+    assert source.calls == 2
+    now[0] += 2
+    assert providers.fetch_lyrics("A", "B") is not None
+    assert source.calls == 3
+
+
+def test_a_word_provider_failure_does_not_exhaust_quality_recovery(monkeypatch):
+    word_source = Outcomes(
+        "worder",
+        ProviderOutcome.retryable(reason="timeout"),
+        ProviderOutcome.hit(Lyrics(
+            lines=[(0.0, "word")],
+            words=[[(0.0, 0.5, "word")]],
+            synced=True,
+            source="worder",
+        )),
+        ceiling=Precision.WORD,
+    )
+    line_source = Outcomes(
+        "liner", ProviderOutcome.hit(synced("liner")), ceiling=Precision.LINE)
+    use(monkeypatch, word_source, line_source)
+
+    assert providers.fetch_lyrics("A", "B").precision is Precision.LINE
+    assert providers.fetch_lyrics("A", "B").precision is Precision.WORD
+    assert word_source.calls == 2
+
+
+def test_a_legacy_miss_revisits_only_one_provider_per_play(tmp_path, monkeypatch):
+    import json
+
+    first = Outcomes("first", ProviderOutcome.no_match())
+    second = Outcomes("second", ProviderOutcome.no_match())
+    use(monkeypatch, first, second)
+    path = providers._cache_path("A", "B", 0.0)
+    path.write_text(json.dumps({
+        "v": 11,
+        "miss": True,
+        "asked": ["first", "second"],
+    }), encoding="utf-8")
+
+    assert providers.fetch_lyrics("A", "B") is None
+    assert first.calls + second.calls == 1
+    assert providers.fetch_lyrics("A", "B") is None
+    assert first.calls + second.calls == 2
+
+
+def test_incompatible_versions_do_not_share_one_cache_entry(monkeypatch):
+    class Versioned:
+        name = "versioned"
+        max_precision = Precision.LINE
+
+        def __init__(self):
+            self.calls = 0
+
+        def lookup(self, query):
+            self.calls += 1
+            return ProviderOutcome.hit(synced(query.raw_title))
+
+    source = Versioned()
+    use(monkeypatch, source)
+
+    live = providers.fetch_lyrics(
+        "Artist", "Song", 200.0, raw_title="Song (Live)")
+    remix = providers.fetch_lyrics(
+        "Artist", "Song", 200.0, raw_title="Song (Club Remix)")
+
+    assert live.source == "Song (Live)"
+    assert remix.source == "Song (Club Remix)"
+    assert source.calls == 2
+
+
+def test_cache_identity_is_case_insensitive_like_its_stable_path(monkeypatch):
+    source = Outcomes("source", ProviderOutcome.hit(synced()))
+    use(monkeypatch, source)
+
+    assert providers.fetch_lyrics("Artist", "Song", 200.0) is not None
+    assert providers.fetch_lyrics("artist", "song", 200.0) is not None
+
+    assert source.calls == 1
+
+
 # --- candidates -------------------------------------------------------------
 
 def test_candidates_prefer_the_best_reading_not_the_first(monkeypatch):
@@ -272,6 +460,20 @@ def test_no_candidates_returns_none(monkeypatch):
     assert providers.fetch_for_candidates([]) is None
 
 
+def test_candidate_raw_title_reaches_provider_identity_validation(monkeypatch):
+    received = []
+
+    def fetch(artist, title, duration=0.0, album="", *, raw_title=""):
+        received.append((artist, title, raw_title))
+        return synced()
+
+    monkeypatch.setattr(providers, "fetch_lyrics", fetch)
+    providers.fetch_for_candidates([
+        ("Artist", "Song", "Song (2011 Remaster)"),
+    ])
+    assert received == [("Artist", "Song", "Song (2011 Remaster)")]
+
+
 # --- what the cache is allowed to lose --------------------------------------
 
 def test_backing_vocals_survive_the_cache(tmp_path, monkeypatch):
@@ -291,11 +493,11 @@ def test_backing_vocals_survive_the_cache(tmp_path, monkeypatch):
                        "rate": 1.0, "local_residual": 0.04, "anchors": 3,
                    }])
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda *a: (fresh, providers._provider_names()))
+                        lambda *a, **k: (fresh, providers._provider_names()))
     providers.fetch_lyrics("Dua Lipa", "Levitating")
 
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda *a: pytest.fail("the cache should have answered"))
+                        lambda *a, **k: pytest.fail("the cache should have answered"))
     again = providers.fetch_lyrics("Dua Lipa", "Levitating")
     assert again.backing_at(0) == ("(You)", [(0.5, 0.9, "(You)")])
     assert again.backing_timing_at(0) == "cross_source_aligned"
@@ -319,7 +521,7 @@ def test_an_entry_of_an_older_shape_is_fetched_again(tmp_path, monkeypatch):
 
     asked = []
     monkeypatch.setattr(providers, "_ask_providers",
-                        lambda *a: asked.append(1) or (
+                        lambda *a, **k: asked.append(1) or (
                             Lyrics(lines=[(0.0, "new")], words=[[]], synced=True),
                             providers._provider_names()))
     got = providers.fetch_lyrics("A", "B")
@@ -350,7 +552,7 @@ def test_only_unsafe_adlib_timings_are_refetched_from_cache_v10(tmp_path, monkey
     calls = []
     monkeypatch.setattr(
         providers, "_ask_providers",
-        lambda *_args: calls.append(1) or (
+        lambda *_args, **_kwargs: calls.append(1) or (
             synced("fresh"), providers._provider_names()))
 
     assert providers.fetch_lyrics("A", "direct").source == "community-ttml/word"

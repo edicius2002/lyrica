@@ -458,3 +458,24 @@ def test_a_failed_hybrid_falls_back_to_richsync_not_the_ttml_race_winner(monkeyp
     result, _asked = providers._ask_providers("A", "B", 180.0, "")
 
     assert result is rich
+
+
+def test_a_cached_richsync_hit_can_gain_a_later_community_hybrid(monkeypatch):
+    rich = _hybrid_source("musixmatch/richsync", [10.2, 20.2, 30.2, 40.2])
+    community = _hybrid_source(
+        "community-ttml/word", [10, 20, 30, 40], ["", "(echo)", "", ""])
+    community.recording_duration = 180.0
+    musixmatch = Fake("musixmatch", rich, Precision.WORD)
+    use(monkeypatch, musixmatch)
+    assert providers.fetch_lyrics("A", "B", 180.0).source == "musixmatch/richsync"
+
+    community_source = Fake(
+        "community-ttml", community, Precision.WORD)
+    community_source.carries_backing = True
+    use(monkeypatch, musixmatch, community_source)
+
+    upgraded = providers.fetch_lyrics("A", "B", 180.0)
+
+    assert upgraded.source == "musixmatch/richsync+community-ttml-adlibs"
+    assert upgraded.lines == rich.lines
+    assert upgraded.backing_at(1)[0] == "(echo)"

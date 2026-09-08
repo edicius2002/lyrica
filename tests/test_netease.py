@@ -10,6 +10,8 @@ import requests
 
 from lyrica.lyrics import Precision
 from lyrica.providers import netease
+from lyrica.providers.base import OutcomeKind
+from lyrica.providers.identity import SongQuery
 from lyrica.providers.netease import NeteaseProvider, _score
 
 LRC_BODY = "[00:10.00]first\n[00:20.00]second\n"
@@ -21,9 +23,10 @@ def song(name: str, artists: list[str], duration_ms: int = 200_000, id_: int = 1
 
 
 class FakeResponse:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self._payload = payload
         self.status_code = status
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -136,6 +139,37 @@ def test_a_lyric_endpoint_failure_is_a_miss(wired):
     wired["songs"] = [song("Blinding Lights", ["The Weeknd"], 200_000)]
     wired["lyric_error"] = requests.Timeout("slow")
     assert NeteaseProvider().fetch("The Weeknd", "Blinding Lights", 200.0) is None
+
+
+def test_lookup_distinguishes_timeout_from_a_valid_miss(wired):
+    query = SongQuery("The Weeknd", "Blinding Lights", 200.0)
+    wired["search_error"] = requests.Timeout("slow")
+    assert NeteaseProvider().lookup(query).kind is OutcomeKind.RETRYABLE
+
+    wired["search_error"] = None
+    wired["songs"] = []
+    assert NeteaseProvider().lookup(query).kind is OutcomeKind.NO_MATCH
+
+
+def test_lookup_does_not_exhaust_a_failed_lyric_download(wired):
+    wired["songs"] = [song("Blinding Lights", ["The Weeknd"], 200_000)]
+    wired["lyric_error"] = requests.ConnectionError("down")
+    outcome = NeteaseProvider().lookup(
+        SongQuery("The Weeknd", "Blinding Lights", 200.0))
+    assert outcome.kind is OutcomeKind.RETRYABLE
+
+
+def test_lookup_surfaces_search_rate_limiting(monkeypatch):
+    monkeypatch.setattr(
+        netease.requests,
+        "post",
+        lambda *_args, **_kwargs: FakeResponse(
+            {}, status=429, headers={"Retry-After": "45"}),
+    )
+    outcome = NeteaseProvider().lookup(
+        SongQuery("The Weeknd", "Blinding Lights", 200.0))
+    assert outcome.kind is OutcomeKind.UNAVAILABLE
+    assert outcome.retry_after == 45.0
 
 
 def test_an_empty_title_never_reaches_the_network(wired):
