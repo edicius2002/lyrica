@@ -12,6 +12,25 @@ from lyrica.providers.base import OutcomeKind, ProviderOutcome
 IDENTITY = {"artist": "A", "title": "B", "duration": 200}
 
 
+@pytest.mark.parametrize('bad', ['Artist', ['Artist'], ['Artist', 1], ['', 'Song']])
+def test_invalid_resolved_name_is_rejected(tmp_path, bad):
+    path = tmp_path / 'entry.json'
+    cache.write_entry(path, entry(), IDENTITY)
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    payload['resolved'] = bad
+    path.write_text(json.dumps(payload), encoding='utf-8')
+    with pytest.raises(ValueError, match='resolved'):
+        cache.read_entry(path, IDENTITY)
+
+
+def test_resolved_name_survives_cache(tmp_path):
+    saved = entry()
+    saved.lyrics.resolved = ('Artist', 'Song')
+    path = tmp_path / 'entry.json'
+    cache.write_entry(path, saved, IDENTITY)
+    assert cache.read_entry(path, IDENTITY).lyrics.resolved == ('Artist', 'Song')
+
+
 def entry(source="one"):
     return cache.CacheEntry(
         Lyrics(lines=[(0.0, "placeholder")], synced=True, source=source),
