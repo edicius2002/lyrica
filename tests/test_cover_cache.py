@@ -204,3 +204,11 @@ def test_the_first_reading_that_answers_ends_the_search(monkeypatch):
     monkeypatch.setattr(artwork, "fetch_cover_discogs", lambda *a, **k: None)
     assert artwork.best_cover_for_candidates([("A", "B"), ("C", "D")]) == b"sleeve"
     assert asked == ["A"]
+def test_vevo_cover_cache_is_separate(tmp_path, monkeypatch):
+    from lyrica import artwork
+    from lyrica.artist_names import ArtistReading
+    monkeypatch.setattr(artwork, 'cover_dir', lambda: tmp_path)
+    reading = ArtistReading('BillieEilish', 'BillieEilishVEVO', 'vevo')
+    artwork.store_cover('BillieEilish', 'Song', '', b'cover', artist_reading=reading)
+    assert artwork.cached_cover('BillieEilish', 'Song') is None
+    assert artwork.cached_cover('BillieEilish', 'Song', artist_reading=reading) == b'cover'

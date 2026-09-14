@@ -16,6 +16,46 @@ from lyrica.sessions.base import (
 )
 
 
+def test_topic_search_preserves_session_identity():
+    snap = Snapshot(app='chrome.exe', artist='BTS - Topic', title='BTS - Song')
+    candidate = snap.search_candidates()[0]
+    assert (candidate.artist.name, candidate.title) == ('BTS', 'Song')
+    assert candidate.artist.original == 'BTS - Topic'
+    assert snap.track_key() == 'chrome.exe|BTS - Topic|BTS - Song'
+    assert snap.norm_artist_title() == ('BTS', 'Song')
+
+
+def test_repeated_topic_channel_is_removed_before_normalizing_artist():
+    snap = Snapshot(app='chrome.exe', artist='BTS - Topic', title='BTS - Topic - Song')
+    assert snap.norm_artist_title() == ('BTS', 'Song')
+    assert snap.lookup_candidates()[0] == ('BTS', 'Song')
+
+
+def test_vevo_readings_keep_evidence_and_explicit_title_priority():
+    snap = Snapshot(app='chrome.exe', artist='BillieEilishVEVO',
+                    title='Billie Eilish - CHIHIRO (Official Video)')
+    candidates = snap.search_candidates()
+    assert (candidates[1].artist.name, candidates[1].title) == ('Billie Eilish', 'CHIHIRO')
+    alias = next(c for c in candidates if c.artist.rule == 'vevo')
+    assert alias.artist.original == 'BillieEilishVEVO'
+    assert len(candidates) <= 6
+
+
+def test_generic_label_is_only_a_last_resort():
+    snap = Snapshot(app='chrome.exe', artist='Artist Official', title='Song')
+    candidates = snap.search_candidates()
+    assert candidates[0].artist.name == 'Artist Official'
+    assert candidates[-1].artist.name == 'Artist'
+    assert candidates[-1].artist.rule == 'decorated'
+
+
+@pytest.mark.parametrize('channel', ['ArtistVEVO', 'ArtistOfficialVEVO', 'Artist Official'])
+def test_alias_keeps_song_after_removing_repeated_channel(channel):
+    snap = Snapshot(app='chrome.exe', artist=channel, title=channel + ' - Song')
+    candidates = snap.search_candidates()
+    assert any(c.artist.name == 'Artist' and c.title == 'Song' for c in candidates)
+
+
 @pytest.fixture
 def store_offsets(tmp_path, monkeypatch):
     """A settings file of this test's own, so a saved nudge goes nowhere real."""
@@ -240,6 +280,13 @@ class Panel:
         from lyrica.artwork import Release
         self.lyrics = lyrics
         self._identified = identified or Release()
+
+
+def test_card_uses_returned_name_before_query():
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+    panel = Panel(Lyrics(queried=('BillieEilish', 'Song'), resolved=('Billie Eilish', 'Song')))
+    assert Overlay._resolved_name(panel) == ('Billie Eilish', 'Song')
 
 
 def test_the_card_is_named_after_the_reading_that_resolved():

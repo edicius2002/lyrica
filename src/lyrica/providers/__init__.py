@@ -19,11 +19,13 @@ from pathlib import Path
 from statistics import median
 
 from lyrica import config
+from lyrica.artist_names import ArtistReading, artist_cache_mode
 from lyrica.lyrics import (
     BACKING_CROSS_SOURCE_ALIGNED,
     Lyrics,
     Precision,
 )
+from lyrica.metadata import LookupCandidate, as_candidate
 from lyrica.providers.base import LyricsProvider, OutcomeKind, ProviderOutcome
 from lyrica.providers.cache import (
     CACHE_VERSION,
@@ -144,8 +146,11 @@ HYBRID_MAX_GROUP_DISTANCE_S = 8.0
 
 
 def _cache_path(artist: str, title: str, duration: float,
-                raw_title: str = "") -> Path:
+                raw_title: str = "", *,
+                artist_reading: ArtistReading | None = None) -> Path:
     key = f"{artist.lower()}|{title.lower()}|{int(duration)}"
+    if mode := artist_cache_mode(artist_reading):
+        key += "|artist-mode:" + mode
     versions = version_qualifiers(raw_title)
     if versions:
         key += "|versions:" + ",".join(sorted(versions))
@@ -514,12 +519,13 @@ def _candidate_is_complete(best: Lyrics | None) -> bool:
 
 
 def _ask_one(provider: LyricsProvider, artist: str, title: str,
-             duration: float, album: str, raw_title: str = ""):
+             duration: float, album: str, raw_title: str = "",
+             artist_reading: ArtistReading | None = None):
     started = time.perf_counter()
     try:
         if hasattr(provider, "lookup"):
             outcome = provider.lookup(SongQuery(
-                artist, title, duration, album, raw_title or title))
+                artist, title, duration, album, raw_title or title, artist_reading))
         else:
             result = provider.fetch(artist, title, duration, album)
             outcome = (ProviderOutcome.hit(result)
@@ -542,7 +548,9 @@ def _ask_one(provider: LyricsProvider, artist: str, title: str,
 def _ask_providers(artist: str, title: str, duration: float,
                    album: str, *, provider_list: list[LyricsProvider] | None = None,
                    incumbent: Lyrics | None = None,
-                   raw_title: str = "") -> tuple[Lyrics | None, dict[str, ProviderOutcome]]:
+                   raw_title: str = "",
+                   artist_reading: ArtistReading | None = None,
+                   ) -> tuple[Lyrics | None, dict[str, ProviderOutcome]]:
     """Ask every provider at once, keeping the best. Returns it and who answered.
 
     Asked together rather than in turn. The order still decides *what wins* —
@@ -581,7 +589,7 @@ def _ask_providers(artist: str, title: str, duration: float,
         # daemons they cannot hold up the process on the way out.
         threading.Thread(
             target=lambda p=provider, a=artist, ti=title, d=duration, al=album:
-                answers.put(_ask_one(p, a, ti, d, al, raw_title)),
+                answers.put(_ask_one(p, a, ti, d, al, raw_title, artist_reading)),
             name=f"lyrics-{provider.name}", daemon=True).start()
 
     deadline = time.monotonic() + OVERALL_TIMEOUT_S
@@ -642,7 +650,8 @@ def _stamp(result: Lyrics | None, artist: str, title: str) -> Lyrics | None:
 
 
 def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
-                 album: str = "", *, raw_title: str = "") -> Lyrics | None:
+                 album: str = "", *, raw_title: str = "",
+                 artist_reading: ArtistReading | None = None) -> Lyrics | None:
     """Best answer any provider has for one artist/title pair, or None.
 
     The answer is cached, misses included: a track with no lyrics anywhere is
@@ -653,13 +662,16 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
         return None
 
     versions = sorted(version_qualifiers(raw_title))
-    cpath = _cache_path(artist, title, duration, raw_title)
+    context = {"artist_reading": artist_reading} if artist_cache_mode(artist_reading) else {}
+    cpath = _cache_path(artist, title, duration, raw_title, **context)
     identity = {
         "artist": artist.lower(),
         "title": title.lower(),
         "duration": int(duration),
         "versions": versions,
     }
+    if mode := artist_cache_mode(artist_reading):
+        identity["artist_mode"] = mode
     entry: CacheEntry | None = None
     if cpath.exists():
         try:
@@ -696,6 +708,7 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
         provider_list=due,
         incumbent=cached,
         raw_title=raw_title or title,
+        **context,
     )
     # Compatibility for tests and third-party monkeypatches written against
     # the former ``asked: list[str]`` return value.
@@ -724,7 +737,7 @@ def fetch_lyrics(artist: str, title: str, duration: float = 0.0,
     return best
 
 
-def fetch_for_candidates(candidates: list[tuple], duration: float = 0.0,
+def fetch_for_candidates(candidates: list[LookupCandidate | tuple], duration: float = 0.0,
                          album: str = "") -> Lyrics | None:
     """Best answer across every reading of the metadata.
 
@@ -733,13 +746,17 @@ def fetch_for_candidates(candidates: list[tuple], duration: float = 0.0,
     the search stopping early on a definitive answer.
     """
     best: Lyrics | None = None
-    for candidate in candidates:
-        artist, title = candidate[:2]
-        if len(candidate) > 2:
-            result = fetch_lyrics(
-                artist, title, duration, album, raw_title=candidate[2])
-        else:
-            result = fetch_lyrics(artist, title, duration, album)
+    for value in candidates:
+        candidate = as_candidate(value)
+        if candidate.artist.rule == 'decorated' and best is not None:
+            continue
+        artist, title = candidate.artist.name, candidate.title
+        context = {}
+        if isinstance(value, LookupCandidate) or len(value) > 2:
+            context["raw_title"] = candidate.raw_title
+        if artist_cache_mode(candidate.artist):
+            context["artist_reading"] = candidate.artist
+        result = fetch_lyrics(artist, title, duration, album, **context)
         if _better(result, best):
             best = result
         # Every candidate asks the whole cascade, so the bar to clear here is

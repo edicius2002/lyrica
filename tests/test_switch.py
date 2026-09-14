@@ -17,7 +17,8 @@ def _snap(title, artist, key):
         is_browser=False, artist=artist, title=title,
         album="", norm_artist_title=lambda: (artist, title),
         lookup_candidates=lambda: [(artist, title)],
-        lyrics_candidates=lambda: [(artist, title, title)])
+        lyrics_candidates=lambda: [(artist, title, title)],
+        search_candidates=Snapshot(artist=artist, title=title).search_candidates)
 
 
 @pytest.fixture

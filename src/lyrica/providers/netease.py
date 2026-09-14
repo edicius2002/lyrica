@@ -18,6 +18,7 @@ import logging
 
 import requests
 
+from lyrica.artist_names import ArtistReading, artist_relation, resolved_name
 from lyrica.lyrics import Lyrics, parse_lrc
 from lyrica.providers.base import LyricsProvider, ProviderOutcome
 from lyrica.providers.identity import SongQuery, validate_identity
@@ -32,10 +33,20 @@ logger = logging.getLogger(__name__)
 
 
 def _artists_of(song: dict) -> str:
-    return " ".join(a.get("name", "") for a in song.get("artists", []))
+    return ", ".join(a.get("name", "") for a in song.get("artists", []))
 
 
-def _score(song: dict, artist: str, title: str, duration: float) -> float:
+def _identity_artist(song: dict, requested: ArtistReading | str) -> str:
+    names = [a.get("name") or "" for a in song.get("artists", [])]
+    known = [name for name in names if artist_relation(name, name) != 'unknown']
+    for name in known:
+        if artist_relation(requested, name) != 'mismatch':
+            return name
+    return known[0] if known else ""
+
+
+def _score(song: dict, artist: str, title: str, duration: float, *,
+           artist_reading: ArtistReading | None = None) -> float:
     """How much this result looks like the track that is actually playing.
 
     The artist is weighted hardest because that is the axis the search gets
@@ -43,16 +54,24 @@ def _score(song: dict, artist: str, title: str, duration: float) -> float:
     duration alone.
     """
     score = 0.0
-    got_artist, got_title = fold(_artists_of(song)), fold(song.get("name", ""))
-    want_artist, want_title = fold(artist), fold(title)
+    got_title = fold(song.get("name", ""))
+    want_title = fold(title)
 
-    if want_artist and got_artist:
-        if want_artist == got_artist:
-            score += 3
-        elif want_artist in got_artist or got_artist in want_artist:
-            score += 2
-        else:
-            score -= 2
+    requested = artist_reading or artist
+    relation = artist_relation(requested, _artists_of(song))
+    # A matching member is a compatible credit, not the complete recording
+    # credit. In particular, adding a guest must not raise the exactness score.
+    if relation == 'mismatch':
+        member = _identity_artist(song, requested)
+        member_relation = artist_relation(requested, member)
+        if member_relation not in ('unknown', 'mismatch'):
+            relation = 'credit'
+    if relation == 'exact':
+        score += 3
+    elif relation in ('credit', 'channel_alias'):
+        score += 2
+    elif relation == 'mismatch':
+        score -= 2
     if want_title == got_title:
         score += 2
     elif want_title and (want_title in got_title or got_title in want_title):
@@ -127,9 +146,10 @@ class NeteaseProvider(LyricsProvider):
                 continue
             decision = validate_identity(
                 requested_artist=query.artist,
+                requested_artist_reading=query.artist_reading,
                 requested_title=query.title,
                 requested_raw_title=query.raw_title or query.title,
-                returned_artist=_artists_of(song),
+                returned_artist=_identity_artist(song, query.artist_reading or query.artist),
                 returned_title=song.get("name") or "",
             )
             if decision.accepted:
@@ -141,8 +161,9 @@ class NeteaseProvider(LyricsProvider):
                 reason=rejected[0] if rejected else "invalid_payload")
 
         song = max(accepted, key=lambda item: _score(
-            item, query.artist, query.title, query.duration))
-        score = _score(song, query.artist, query.title, query.duration)
+            item, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
+        score = _score(song, query.artist, query.title, query.duration,
+                       artist_reading=query.artist_reading)
         if score < self.MIN_SCORE:
             return ProviderOutcome.no_match(reason="low_score")
         try:
@@ -178,4 +199,5 @@ class NeteaseProvider(LyricsProvider):
                 return ProviderOutcome.no_match(reason="no_lyrics")
             lyrics = Lyrics(plain=text, synced=False, source="netease",
                             exact=score >= self.EXACT_SCORE)
+        lyrics.resolved = resolved_name(_artists_of(song), song.get("name") or "")
         return ProviderOutcome.hit(lyrics, reason="compatible")

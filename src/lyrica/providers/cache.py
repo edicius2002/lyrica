@@ -17,7 +17,7 @@ RETRY_BACKOFF_INITIAL_S = 30.0
 RETRY_BACKOFF_MAX_S = 30 * 60.0
 LEGACY_MIGRATION_BATCH = 1
 
-_LYRIC_FIELDS = ("plain", "synced", "source", "instrumental", "exact", "queried")
+_LYRIC_FIELDS = ("plain", "synced", "source", "instrumental", "exact", "queried", "resolved")
 _locks_guard = threading.Lock()
 _path_locks: dict[Path, threading.RLock] = {}
 
@@ -131,12 +131,17 @@ def _lyrics_from_payload(payload: dict) -> Lyrics:
         for line in words
     ):
         raise ValueError("invalid lyrics payload")
+    resolved = payload.get("resolved", [])
+    if (not isinstance(resolved, (list, tuple)) or len(resolved) not in (0, 2)
+            or any(not isinstance(part, str) or not part.strip() for part in resolved)):
+        raise ValueError("invalid resolved name")
     lyrics = Lyrics(**{
         field: payload[field] for field in _LYRIC_FIELDS if field in payload
     })
     lyrics.lines = [tuple(line) for line in lines]
     lyrics.words = [[tuple(word) for word in line] for line in words]
     lyrics.queried = tuple(lyrics.queried)
+    lyrics.resolved = tuple(resolved)
     lyrics.backing = list(payload.get("backing", []))
     lyrics.backing_words = [
         [tuple(word) for word in line]

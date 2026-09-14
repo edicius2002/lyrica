@@ -179,6 +179,8 @@ class Lyrics:
     # Only the ones the source declared; an id absent here was used on a line
     # and never introduced, and that is a different thing from being a person.
     singers: dict = field(default_factory=dict)
+    # Complete artist/title returned by the validated provider record.
+    resolved: tuple = ()
 
     # (the `lines` list it was built from, its length then, the timestamps).
     # Deliberately *not* a dataclass field: it is a cache of `lines`, and a

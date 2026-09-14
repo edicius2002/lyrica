@@ -21,6 +21,8 @@ from pathlib import Path
 import requests
 
 from lyrica import config
+from lyrica.artist_names import ArtistReading, artist_cache_mode, artist_relation, resolved_name
+from lyrica.metadata import as_candidate
 from lyrica.textmatch import fold
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,17 @@ class Unreachable(Exception):
     """
 
 
-def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
+def _artist_context(reading: ArtistReading | None) -> dict:
+    return {"artist_reading": reading} if artist_cache_mode(reading) else {}
+
+
+def _artist_cache_suffix(reading: ArtistReading | None) -> str:
+    mode = artist_cache_mode(reading)
+    return "|artist-mode:" + mode if mode else ""
+
+
+def fetch_cover(artist: str, title: str, album: str = "", size: int = 600, *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """A high-resolution cover from Apple's public catalogue search.
 
     The media session's own thumbnail is whatever the player felt like
@@ -77,7 +89,7 @@ def fetch_cover(artist: str, title: str, album: str = "", size: int = 600) -> by
     Returns None on anything unexpected: a missing cover is a cosmetic loss,
     and the session's own thumbnail is already on screen by the time this runs.
     """
-    best = _apple_match(artist, title, album)
+    best = _apple_match(artist, title, album, **_artist_context(artist_reading))
     if best is None:
         return None
     url = best.get("artworkUrl100") or best.get("artworkUrl60") or ""
@@ -101,7 +113,8 @@ def _match_dir() -> Path:
     return path
 
 
-def _apple_match(artist: str, title: str, album: str = "") -> dict | None:
+def _apple_match(artist: str, title: str, album: str = "", *,
+                artist_reading: ArtistReading | None = None) -> dict | None:
     """The catalogue entry that looks like this track, or None.
 
     Cached, because two callers want it — the cover and the name — and a search
@@ -112,14 +125,20 @@ def _apple_match(artist: str, title: str, album: str = "") -> dict | None:
     if not query:
         return None
     path = _match_dir() / (hashlib.sha1(
-        f"{artist.lower()}|{title.lower()}|{album.lower()}".encode(),
+        (f"{artist.lower()}|{title.lower()}|{album.lower()}"
+         + _artist_cache_suffix(artist_reading)).encode(),
         usedforsecurity=False).hexdigest() + ".json")
     try:
         cached = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
     else:
-        return cached or None
+        if cached == {}:
+            return None
+        if isinstance(cached, dict):
+            checked = _closest([cached], artist, title, album, **_artist_context(artist_reading))
+            if checked is not None:
+                return checked
 
     try:
         r = requests.get(SEARCH_URL,
@@ -133,7 +152,7 @@ def _apple_match(artist: str, title: str, album: str = "") -> dict | None:
         # about whether the catalogue has the track.
         raise Unreachable from None
 
-    best = _closest(results, artist, title, album)
+    best = _closest(results, artist, title, album, **_artist_context(artist_reading))
     try:
         path.write_text(json.dumps(best or {}, ensure_ascii=False), encoding="utf-8")
     except OSError:
@@ -141,19 +160,24 @@ def _apple_match(artist: str, title: str, album: str = "") -> dict | None:
     return best
 
 
-def _closest(results: list, artist: str, title: str, album: str):
+def _closest(results: list, artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None):
     """Pick the result that looks like the track, or nothing.
 
     A search always answers with something; showing a stranger's cover over
     someone's lyrics is worse than showing the small one the player gave us.
     """
-    want_artist, want_title, want_album = fold(artist), fold(title), fold(album)
+    want_title, want_album = fold(title), fold(album)
     best, best_score = None, 0.0
     for item in results:
-        got_artist = fold(item.get("artistName", ""))
+        if not isinstance(item, dict):
+            continue
+        relation = artist_relation(artist_reading or artist, item.get("artistName") or "")
+        if relation == 'mismatch':
+            continue
         got_title = fold(item.get("trackName", ""))
         score = 0.0
-        if want_artist and (want_artist in got_artist or got_artist in want_artist):
+        if relation != 'unknown':
             score += 2
         if want_title and (want_title == got_title):
             score += 2
@@ -236,12 +260,15 @@ def _digest(key: str) -> Path:
         hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".img")
 
 
-def _cover_path(artist: str, title: str, album: str) -> Path:
+def _cover_path(artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> Path:
     """The per-track key. Every track gets one; it is the fallback."""
-    return _digest(f"{artist.lower()}|{title.lower()}|{album.lower()}")
+    return _digest(f"{artist.lower()}|{title.lower()}|{album.lower()}"
+                   + _artist_cache_suffix(artist_reading))
 
 
-def _album_path(artist: str, album: str) -> Path | None:
+def _album_path(artist: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> Path | None:
     """The per-album key, where the player named an album.
 
     Cover art belongs to a release, not to a track, and keying it by track made
@@ -252,7 +279,8 @@ def _album_path(artist: str, album: str) -> Path | None:
     """
     if not album or not (artist or album):
         return None
-    return _digest(f"album|{artist.lower()}|{album.lower()}")
+    return _digest(f"album|{artist.lower()}|{album.lower()}"
+                   + _artist_cache_suffix(artist_reading))
 
 
 # How long a recorded miss is believed. Misses have to be recorded or a track
@@ -281,39 +309,49 @@ def _read(path: Path | None) -> bytes | None:
     return b""
 
 
-def cached_cover(artist: str, title: str, album: str = "") -> bytes | None:
+def cached_cover(artist: str, title: str, album: str = "", *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """A cover already on disk, or None.
 
     The album key is tried first and the track key second, so entries written
     before covers were keyed by release still answer instead of forcing one
     refetch each.
     """
-    for path in (_album_path(artist, album), _cover_path(artist, title, album)):
+    context = _artist_context(artist_reading)
+    for path in (_album_path(artist, album, **context),
+                 _cover_path(artist, title, album, **context)):
         data = _read(path)
         if data:
             return data
     return None
 
 
-def _recorded_miss(artist: str, title: str, album: str) -> bool:
+def _recorded_miss(artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> bool:
+    context = _artist_context(artist_reading)
     return any(_read(p) == b"" for p in
-               (_album_path(artist, album), _cover_path(artist, title, album)))
+               (_album_path(artist, album, **context),
+                _cover_path(artist, title, album, **context)))
 
 
-def store_cover(artist: str, title: str, album: str, data: bytes | None) -> None:
+def store_cover(artist: str, title: str, album: str, data: bytes | None, *,
+                artist_reading: ArtistReading | None = None) -> None:
     """Keep a cover for next time. Misses are kept too.
 
     Written under the album key when there is one, so the rest of the record is
     already answered before it is ever played.
     """
-    path = _album_path(artist, album) or _cover_path(artist, title, album)
+    context = _artist_context(artist_reading)
+    path = (_album_path(artist, album, **context)
+            or _cover_path(artist, title, album, **context))
     try:
         path.write_bytes(data or b"")
     except OSError:
         logger.debug("could not cache the cover", exc_info=True)
 
 
-def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> bytes | None:
+def best_cover(artist: str, title: str, album: str = "", size: int = 600, *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """The best cover any configured source has, or None.
 
     Disk first, so a track played before appears instantly rather than after a
@@ -334,14 +372,15 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> byt
     """
     if not (artist or title):
         return None
-    cached = cached_cover(artist, title, album)
+    cached = cached_cover(artist, title, album, **_artist_context(artist_reading))
     if cached is not None:
         return cached
-    if _recorded_miss(artist, title, album):
+    if _recorded_miss(artist, title, album, **_artist_context(artist_reading)):
         return None     # asked before and nobody had it
 
     data, unreachable = None, False
-    for ask in (lambda: fetch_cover(artist, title, album, size=size),
+    context = _artist_context(artist_reading)
+    for ask in (lambda: fetch_cover(artist, title, album, size=size, **context),
                 lambda: fetch_cover_discogs(artist, title, album)):
         try:
             data = ask()
@@ -353,7 +392,7 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600) -> byt
         if data:
             break
     if data or not unreachable:
-        store_cover(artist, title, album, data)
+        store_cover(artist, title, album, data, **_artist_context(artist_reading))
     return data
 
 
@@ -390,12 +429,16 @@ def identify(candidates: list, album: str = "") -> Release:
     The search this needs has already run for the cover, and its answer is
     cached, so this costs nothing on top in the ordinary case.
     """
-    for artist, title in candidates:
+    for value in candidates:
+        candidate = as_candidate(value)
+        artist_reading = candidate.artist
+        artist, title = candidate.artist.name, candidate.title
         try:
-            item = _apple_match(artist, title, album)
+            item = _apple_match(artist, title, album, **_artist_context(artist_reading))
         except Unreachable:
             continue
-        if item and item.get("_score", 0.0) >= IDENTIFY_SCORE:
+        if (item and item.get("_score", 0.0) >= IDENTIFY_SCORE
+                and resolved_name(item.get("artistName") or "", item.get("trackName") or "")):
             return Release(artist=(item.get("artistName") or "").strip(),
                            title=(item.get("trackName") or "").strip(),
                            album=(item.get("collectionName") or "").strip())
@@ -413,8 +456,11 @@ def best_cover_for_candidates(candidates: list, album: str = "",
     channel wearing the video's own letterboxed thumbnail. Measured on one:
     the first reading found nothing in 482 ms, the second found 38 KB.
     """
-    for artist, title in candidates:
-        data = best_cover(artist, title, album, size=size)
+    for value in candidates:
+        candidate = as_candidate(value)
+        artist_reading = candidate.artist
+        artist, title = candidate.artist.name, candidate.title
+        data = best_cover(artist, title, album, size=size, **_artist_context(artist_reading))
         if data:
             return data
     return None

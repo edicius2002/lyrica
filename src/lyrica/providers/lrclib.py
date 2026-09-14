@@ -6,6 +6,7 @@ then fuzzy /search scored by artist/title/duration similarity.
 
 import requests
 
+from lyrica.artist_names import ArtistReading, artist_relation, resolved_name
 from lyrica.lyrics import Lyrics, parse_lrc
 from lyrica.providers.base import LyricsProvider, ProviderOutcome
 from lyrica.providers.identity import SongQuery, validate_identity
@@ -15,21 +16,24 @@ HEADERS = {"User-Agent": "lyrica/0.2.7 (personal research overlay)"}
 
 
 def _from_record(d: dict, source: str, *, exact: bool) -> Lyrics | None:
+    name = resolved_name(d.get("artistName") or "", d.get("trackName") or "")
     if d.get("instrumental"):
-        return Lyrics(instrumental=True, source=source, exact=exact)
+        return Lyrics(instrumental=True, source=source, exact=exact, resolved=name)
     if d.get("syncedLyrics"):
         return Lyrics(lines=parse_lrc(d["syncedLyrics"]), plain=d.get("plainLyrics") or "",
-                      synced=True, source=source, exact=exact)
+                      synced=True, source=source, exact=exact, resolved=name)
     if d.get("plainLyrics"):
-        return Lyrics(plain=d["plainLyrics"], synced=False, source=source, exact=exact)
+        return Lyrics(plain=d["plainLyrics"], synced=False,
+                      source=source, exact=exact, resolved=name)
     return None
 
 
-def _score(rec: dict, artist: str, title: str, duration: float) -> float:
+def _score(rec: dict, artist: str, title: str, duration: float, *,
+           artist_reading: ArtistReading | None = None) -> float:
     s = 0.0
-    ra = (rec.get("artistName") or "").lower()
+    relation = artist_relation(artist_reading or artist, rec.get("artistName") or "")
     rt = (rec.get("trackName") or "").lower()
-    if artist and (artist.lower() in ra or ra in artist.lower()):
+    if relation not in ('unknown', 'mismatch'):
         s += 2
     if title.lower() == rt:
         s += 2
@@ -67,6 +71,7 @@ class LrclibProvider(LyricsProvider):
     def _identity(query: SongQuery, record: dict):
         return validate_identity(
             requested_artist=query.artist,
+            requested_artist_reading=query.artist_reading,
             requested_title=query.title,
             requested_raw_title=query.raw_title or query.title,
             returned_artist=record.get("artistName") or "",
@@ -137,8 +142,9 @@ class LrclibProvider(LyricsProvider):
             return ProviderOutcome.no_match(reason=reason)
 
         best = max(accepted, key=lambda rec: _score(
-            rec, query.artist, query.title, query.duration))
-        if _score(best, query.artist, query.title, query.duration) < 2:
+            rec, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
+        if _score(best, query.artist, query.title, query.duration,
+                  artist_reading=query.artist_reading) < 2:
             return ProviderOutcome.no_match(reason="low_score")
         result = _from_record(best, "lrclib/search", exact=False)
         if result is None:

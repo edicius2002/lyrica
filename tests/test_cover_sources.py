@@ -45,6 +45,33 @@ def test_no_results_matches_nothing():
     assert _closest([], "A", "B", "") is None
 
 
+def test_album_cannot_compensate_for_artist_mismatch():
+    records = [{'artistName': 'Queensryche', 'trackName': 'Song',
+                'collectionName': 'Album'}]
+    assert _closest(records, 'Queen', 'Song', 'Album') is None
+
+
+def test_cover_vevo_matching_requires_context():
+    from lyrica.artist_names import ArtistReading
+    records = [{'artistName': 'Billie Eilish', 'trackName': 'Song'}]
+    assert _closest(records, 'BillieEilish', 'Song', '') is None
+    assert _closest(records, 'BillieEilish', 'Song', '', artist_reading=ArtistReading(
+        'BillieEilish', 'BillieEilishVEVO', 'vevo')) is records[0]
+
+
+def test_cached_match_is_revalidated(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    monkeypatch.setattr(artwork, '_match_dir', lambda: tmp_path)
+    digest = hashlib.sha1(b'queen|song|album', usedforsecurity=False).hexdigest()
+    path = tmp_path / (digest + '.json')
+    path.write_text(json.dumps({'artistName': 'Queensryche', 'trackName': 'Song',
+                               'collectionName': 'Album', '_score': 5}), encoding='utf-8')
+    monkeypatch.setattr(artwork.requests, 'get', lambda *a, **k: FakeResponse(payload={
+        'results': [{'artistName': 'Queen', 'trackName': 'Song', 'collectionName': 'Album'}]}))
+    assert artwork._apple_match('Queen', 'Song', 'Album')['artistName'] == 'Queen'
+
+
 # --- the token --------------------------------------------------------------
 
 def test_no_token_means_the_source_is_simply_absent(monkeypatch):
