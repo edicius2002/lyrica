@@ -1602,7 +1602,7 @@ class Overlay:
         self._loading = loading
 
         def work():
-            found = fetch_for_candidates(snap.lyrics_candidates(), snap.duration,
+            found = fetch_for_candidates(snap.search_candidates(), snap.duration,
                                          snap.album)
             self._worker_results.put(WorkerResult(loading.gen, "lyrics", found))
 
@@ -1651,7 +1651,7 @@ class Overlay:
             return
 
         snap = loading.snapshot
-        candidates = snap.lookup_candidates()
+        candidates = snap.search_candidates()
         album = snap.album
         shape_gen = self._shape_gen
 
@@ -1951,6 +1951,9 @@ class Overlay:
         if named:
             return (named.artist, named.title)
         lyr = self.lyrics
+        resolved = getattr(lyr, "resolved", ()) if lyr is not None else ()
+        if len(resolved) == 2 and all(resolved):
+            return resolved
         queried = getattr(lyr, "queried", ()) if lyr is not None else ()
         return queried if len(queried) == 2 and all(queried) else ()
 
@@ -1967,6 +1970,12 @@ class Overlay:
 
         if not snap.ok:
             return "", ""
+        if (found and not self._identified
+                and not getattr(self.lyrics, "resolved", ())):
+            readings = [c.artist.rule for c in snap.search_candidates()
+                        if (c.artist.name, c.title) == found]
+            if readings and all(rule in ('vevo', 'decorated') for rule in readings):
+                found = ()
         artist, title = found or snap.norm_artist_title()
         if self.offset:
             title += f"   [{self.offset:+.2f}s]"

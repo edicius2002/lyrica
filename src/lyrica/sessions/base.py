@@ -158,7 +158,8 @@ class Snapshot:
             artist, title = split_browser_title(title)
         readings = artist_readings(artist, channel_hint=self.is_browser)
         main = readings[0]
-        add(main, strip_artist_prefix(main.name, title))
+        main_title = strip_artist_prefix(main.name, title)
+        add(main, main_title)
         if self.is_browser:
             split_artist, split_title = split_browser_title(self.title)
             if split_artist:
@@ -167,11 +168,11 @@ class Snapshot:
         # The explicit artist in a title is independent evidence.
         for reading in readings[1:]:
             if reading.rule == 'vevo':
-                add(reading, strip_artist_prefix(reading.name, title))
+                add(reading, strip_artist_prefix(reading.name, main_title))
         add(artist_readings(self.artist, channel_hint=False)[0], self.title)
         for reading in readings[1:]:
             if reading.rule == 'decorated':
-                add(reading, strip_artist_prefix(reading.name, title))
+                add(reading, strip_artist_prefix(reading.name, main_title))
         return out[:6]
 
     def track_key(self) -> str:

@@ -43,6 +43,13 @@ def test_generic_label_is_only_a_last_resort():
     assert candidates[-1].artist.rule == 'decorated'
 
 
+@pytest.mark.parametrize('channel', ['ArtistVEVO', 'ArtistOfficialVEVO', 'Artist Official'])
+def test_alias_keeps_song_after_removing_repeated_channel(channel):
+    snap = Snapshot(app='chrome.exe', artist=channel, title=channel + ' - Song')
+    candidates = snap.search_candidates()
+    assert any(c.artist.name == 'Artist' and c.title == 'Song' for c in candidates)
+
+
 @pytest.fixture
 def store_offsets(tmp_path, monkeypatch):
     """A settings file of this test's own, so a saved nudge goes nowhere real."""
@@ -267,6 +274,13 @@ class Panel:
         from lyrica.artwork import Release
         self.lyrics = lyrics
         self._identified = identified or Release()
+
+
+def test_card_uses_returned_name_before_query():
+    from lyrica.app import Overlay
+    from lyrica.lyrics import Lyrics
+    panel = Panel(Lyrics(queried=('BillieEilish', 'Song'), resolved=('Billie Eilish', 'Song')))
+    assert Overlay._resolved_name(panel) == ('Billie Eilish', 'Song')
 
 
 def test_the_card_is_named_after_the_reading_that_resolved():
