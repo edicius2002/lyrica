@@ -65,3 +65,18 @@ def test_compact_name_requires_vevo_evidence():
     assert artist_relation(alias, 'Billie Eilish Tribute') == 'mismatch'
     assert artist_cache_mode(alias) == 'vevo'
     assert artist_cache_mode(None) == ''
+
+
+@pytest.mark.parametrize('value', [('A',), ('A', 'B', 'C', 'D'), ('A', 2), 'AB'])
+def test_legacy_candidate_rejects_malformed_input(value):
+    from lyrica.metadata import as_candidate
+    with pytest.raises(ValueError):
+        as_candidate(value)
+
+
+def test_legacy_candidate_does_not_invent_channel_evidence():
+    from lyrica.metadata import as_candidate
+    assert as_candidate(('BillieEilish', 'CHIHIRO')).artist.rule == 'original'
+    candidate = as_candidate(('BTS - Topic', 'Song', 'Song (Live)'))
+    assert candidate.artist.name == 'BTS'
+    assert candidate.raw_title == 'Song (Live)'

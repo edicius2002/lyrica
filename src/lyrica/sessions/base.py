@@ -12,6 +12,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from lyrica.artist_names import ArtistReading, artist_cache_mode, artist_readings, clean_artist
+from lyrica.metadata import LookupCandidate
+
 # Browser apps may leave `artist` empty and encode "Artist - Title" in the title
 BROWSER_HINTS = ("chrome", "msedge", "firefox", "opera", "brave", "vivaldi", "safari")
 
@@ -114,7 +117,8 @@ class Snapshot:
         artist, title = self.artist.strip(), self.title
         if not artist and self.is_browser:
             artist, title = split_browser_title(title)
-        return artist.strip(), clean_title(strip_artist_prefix(artist, title))
+        artist = clean_artist(artist)
+        return artist, clean_title(strip_artist_prefix(artist, title))
 
     def lookup_candidates(self) -> list[tuple[str, str]]:
         """Artist/title pairs to try, best first.
@@ -134,35 +138,41 @@ class Snapshot:
         return [(artist, title) for artist, title, _raw in self.lyrics_candidates()]
 
     def lyrics_candidates(self) -> list[tuple[str, str, str]]:
-        """Lookup pairs plus the raw title evidence identity checks require."""
-        seen: set[tuple[str, str]] = set()
-        out: list[tuple[str, str, str]] = []
+        """Legacy projection; production consumers use the complete readings."""
+        return [(c.artist.name, c.title, c.raw_title) for c in self.search_candidates()]
 
-        def add(artist: str, title: str) -> None:
-            pair = (artist.strip(), clean_title(title))
-            if pair[1] and pair not in seen:
-                seen.add(pair)
-                out.append((*pair, title.strip()))
+    def search_candidates(self) -> list[LookupCandidate]:
+        """At most three structural interpretations and three channel aliases."""
+        out: list[LookupCandidate] = []
+        seen: set[tuple[str, str, str]] = set()
 
-        artist, title = self.artist.strip(), self.title
-        if not artist and self.is_browser:
+        def add(reading: ArtistReading, title: str) -> None:
+            cleaned = clean_title(title)
+            key = (reading.name, cleaned, artist_cache_mode(reading))
+            if cleaned and key not in seen:
+                seen.add(key)
+                out.append(LookupCandidate(reading, cleaned, title.strip()))
+
+        artist, title = self.artist, self.title
+        if not artist.strip() and self.is_browser:
             artist, title = split_browser_title(title)
-        add(artist, strip_artist_prefix(artist, title))
-
-        # The artist field may be an uploader handle rather than a performer,
-        # or only the first name of a longer credit. Either way the title's own
-        # left-hand side is a reading worth trying; when it says the same thing
-        # as the first candidate, `add` drops it as a duplicate. It used to be
-        # skipped whenever the artist appeared anywhere in the title, which also
-        # skipped it for "Tiago PZK, Myke Towers - Traductor" — where the split
-        # is the only reading that names the song.
+        readings = artist_readings(artist, channel_hint=self.is_browser)
+        main = readings[0]
+        add(main, strip_artist_prefix(main.name, title))
         if self.is_browser:
             split_artist, split_title = split_browser_title(self.title)
             if split_artist:
-                add(split_artist, split_title)
-
-        add(self.artist, self.title)
-        return out
+                add(artist_readings(split_artist, channel_hint=False)[0], split_title)
+        # Only the reported channel gets speculative suffix interpretations.
+        # The explicit artist in a title is independent evidence.
+        for reading in readings[1:]:
+            if reading.rule == 'vevo':
+                add(reading, strip_artist_prefix(reading.name, title))
+        add(artist_readings(self.artist, channel_hint=False)[0], self.title)
+        for reading in readings[1:]:
+            if reading.rule == 'decorated':
+                add(reading, strip_artist_prefix(reading.name, title))
+        return out[:6]
 
     def track_key(self) -> str:
         return f"{self.app}|{self.artist}|{self.title}"
