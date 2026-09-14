@@ -58,7 +58,14 @@ def _score(song: dict, artist: str, title: str, duration: float, *,
     want_title = fold(title)
 
     requested = artist_reading or artist
-    relation = artist_relation(requested, _identity_artist(song, requested))
+    relation = artist_relation(requested, _artists_of(song))
+    # A matching member is a compatible credit, not the complete recording
+    # credit. In particular, adding a guest must not raise the exactness score.
+    if relation == 'mismatch':
+        member = _identity_artist(song, requested)
+        member_relation = artist_relation(requested, member)
+        if member_relation not in ('unknown', 'mismatch'):
+            relation = 'credit'
     if relation == 'exact':
         score += 3
     elif relation in ('credit', 'channel_alias'):
@@ -155,7 +162,8 @@ class NeteaseProvider(LyricsProvider):
 
         song = max(accepted, key=lambda item: _score(
             item, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
-        score = _score(song, query.artist, query.title, query.duration, artist_reading=query.artist_reading)
+        score = _score(song, query.artist, query.title, query.duration,
+                       artist_reading=query.artist_reading)
         if score < self.MIN_SCORE:
             return ProviderOutcome.no_match(reason="low_score")
         try:

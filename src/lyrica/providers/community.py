@@ -146,7 +146,8 @@ class CommunityTtmlProvider(LyricsProvider):
 
         rec = max(accepted, key=lambda item: _score(
             item, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
-        score = _score(rec, query.artist, query.title, query.duration, artist_reading=query.artist_reading)
+        score = _score(rec, query.artist, query.title, query.duration,
+                       artist_reading=query.artist_reading)
         if score < self.MIN_SCORE:
             return ProviderOutcome.no_match(reason="low_score")
 
@@ -172,7 +173,8 @@ class CommunityTtmlProvider(LyricsProvider):
             return ProviderOutcome.retryable(reason="invalid_document")
         lyrics.source = f"community-ttml/{rec.get('timing_type', '?')}"
         lyrics.exact = score >= self.EXACT_SCORE
-        lyrics.resolved = resolved_name(rec.get("artist_name") or "", rec.get("track_name") or "")
+        lyrics.resolved = resolved_name(
+            rec.get("artist_name") or "", rec.get("track_name") or "")
         # Kept on the live result so a hybrid can reject another release of
         # the same title before borrowing any of its timings.
         lyrics.recording_duration = float(rec.get("duration") or 0.0)

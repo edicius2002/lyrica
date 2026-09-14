@@ -20,12 +20,12 @@ from statistics import median
 
 from lyrica import config
 from lyrica.artist_names import ArtistReading, artist_cache_mode
-from lyrica.metadata import LookupCandidate, as_candidate
 from lyrica.lyrics import (
     BACKING_CROSS_SOURCE_ALIGNED,
     Lyrics,
     Precision,
 )
+from lyrica.metadata import LookupCandidate, as_candidate
 from lyrica.providers.base import LyricsProvider, OutcomeKind, ProviderOutcome
 from lyrica.providers.cache import (
     CACHE_VERSION,
@@ -549,7 +549,8 @@ def _ask_providers(artist: str, title: str, duration: float,
                    album: str, *, provider_list: list[LyricsProvider] | None = None,
                    incumbent: Lyrics | None = None,
                    raw_title: str = "",
-                   artist_reading: ArtistReading | None = None) -> tuple[Lyrics | None, dict[str, ProviderOutcome]]:
+                   artist_reading: ArtistReading | None = None,
+                   ) -> tuple[Lyrics | None, dict[str, ProviderOutcome]]:
     """Ask every provider at once, keeping the best. Returns it and who answered.
 
     Asked together rather than in turn. The order still decides *what wins* —

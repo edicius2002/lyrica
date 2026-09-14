@@ -154,8 +154,6 @@ class Lyrics:
     # worked is worth keeping: it is the closest thing to a correct name for the
     # song that anything in the process knows.
     queried: tuple = ()
-    # Complete artist/title returned by the validated provider record.
-    resolved: tuple = ()
     # What was sung behind each line, index-matched to `lines`, and empty where
     # there was nothing. Apart from `words` rather than folded into it because
     # the two overlap in time: a backing vocal answers a line while it is still
@@ -181,6 +179,8 @@ class Lyrics:
     # Only the ones the source declared; an id absent here was used on a line
     # and never introduced, and that is a different thing from being a person.
     singers: dict = field(default_factory=dict)
+    # Complete artist/title returned by the validated provider record.
+    resolved: tuple = ()
 
     # (the `lines` list it was built from, its length then, the timestamps).
     # Deliberately *not* a dataclass field: it is a cache of `lines`, and a

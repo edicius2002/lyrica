@@ -23,7 +23,8 @@ def _from_record(d: dict, source: str, *, exact: bool) -> Lyrics | None:
         return Lyrics(lines=parse_lrc(d["syncedLyrics"]), plain=d.get("plainLyrics") or "",
                       synced=True, source=source, exact=exact, resolved=name)
     if d.get("plainLyrics"):
-        return Lyrics(plain=d["plainLyrics"], synced=False, source=source, exact=exact, resolved=name)
+        return Lyrics(plain=d["plainLyrics"], synced=False,
+                      source=source, exact=exact, resolved=name)
     return None
 
 
@@ -142,7 +143,8 @@ class LrclibProvider(LyricsProvider):
 
         best = max(accepted, key=lambda rec: _score(
             rec, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
-        if _score(best, query.artist, query.title, query.duration, artist_reading=query.artist_reading) < 2:
+        if _score(best, query.artist, query.title, query.duration,
+                  artist_reading=query.artist_reading) < 2:
             return ProviderOutcome.no_match(reason="low_score")
         result = _from_record(best, "lrclib/search", exact=False)
         if result is None:

@@ -28,6 +28,60 @@ contradict each other. Version words inside the main title remain significant.
 Rejection reasons remain internal provider provenance for future diagnostics;
 this change adds no diagnostic UI.
 
+## Artist channel names
+
+`artist_names.py` supplies one comparison policy for lyrics providers and
+Apple catalogue matches. A final spaced `- Topic` label is removed from the
+lookup/display reading regardless of artist length; the name `Topic` itself
+survives. Whitespace and common Unicode dash variants are handled. Repeated
+ambiguous Topic suffixes remain untouched. Localized labels such as `Tema`
+are deferred until verified in captured playback metadata.
+
+Browser snapshots offer additional, bounded channel readings for VEVO and its
+documented Official/Music combinations. Those readings retain provenance;
+only VEVO readings may compare complete names ignoring spaces. Arbitrary
+compact artist strings do not inherit that exception. Separate trailing
+Official/Oficial/TV/Channel/Canal/YouTube/Productions/Producciones labels are
+last-resort alternatives. They do not replace an already usable lyric reading.
+Snapshots produce at most six candidates, retaining the raw title for each.
+Browser detection is not proof that the source site is YouTube.
+
+Artist comparison accepts complete names and shared complete credited artists,
+not name substrings: Queen and Queensryche are incompatible. Various Artists
+and Varios Artistas are unknown collective credits, not identified performers.
+The existing ambiguity between collaborations and group names containing
+commas or joining words remains. NetEase retains the weaker scoring weight
+for matching only one member of a collaboration.
+
+`Snapshot.search_candidates()` carries the original artist, transformation,
+lookup title and raw title through both workers. Pair/triple projections remain
+available for older callers. Raw Snapshot data, session bindings, playback keys
+and saved offsets do not change. A repeated channel prefix is removed before
+its artist suffix is normalized, so `BTS - Topic - Song` retains `Song`.
+
+Validated providers put their complete returned credit in `Lyrics.resolved`;
+`queried` still records the successful query. Card naming prioritizes the
+Apple catalogue name, then the provider name, then a safe successful query,
+then normalized player metadata. Unconfirmed speculative aliases are not
+presented as official names. Hybrid lyrics retain the main provider's name.
+
+Cache v12 adds `resolved` as an optional validated pair; older entries remain
+readable. VEVO matching uses a separate `artist-mode:vevo` key namespace and
+identity marker, so an alias hit cannot satisfy an ordinary compact-name
+query. Ordinary keys are unchanged. Topic queries reuse existing clean-name
+entries, while old channel misses cannot block the new query. No old entries
+are deleted or globally migrated.
+
+Cached Apple match JSON is revalidated rather than trusting an old score.
+Title and album cannot compensate for a known incompatible artist. Discogs
+retains its own search contract, and old opaque cover-image bytes cannot be
+revalidated from their contents or migrated as proof of artist identity.
+
+Title noise rules, remaster years and concert/version identity are separate
+work; this change does not claim to resolve those earlier findings. See the
+[suffix research](../research/ARTIST_CHANNEL_SUFFIXES.md) and
+[implementation plan](superpowers/plans/2026-09-12-artist-normalization.md).
+
 ## Provider outcomes
 
 Every production provider returns one of four outcomes:

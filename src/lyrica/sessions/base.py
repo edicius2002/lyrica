@@ -117,6 +117,7 @@ class Snapshot:
         artist, title = self.artist.strip(), self.title
         if not artist and self.is_browser:
             artist, title = split_browser_title(title)
+        title = strip_artist_prefix(artist, title)
         artist = clean_artist(artist)
         return artist, clean_title(strip_artist_prefix(artist, title))
 
@@ -158,7 +159,7 @@ class Snapshot:
             artist, title = split_browser_title(title)
         readings = artist_readings(artist, channel_hint=self.is_browser)
         main = readings[0]
-        main_title = strip_artist_prefix(main.name, title)
+        main_title = strip_artist_prefix(main.name, strip_artist_prefix(artist.strip(), title))
         add(main, main_title)
         if self.is_browser:
             split_artist, split_title = split_browser_title(self.title)

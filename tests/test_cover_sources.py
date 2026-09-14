@@ -63,7 +63,8 @@ def test_cached_match_is_revalidated(tmp_path, monkeypatch):
     import hashlib
     import json
     monkeypatch.setattr(artwork, '_match_dir', lambda: tmp_path)
-    path = tmp_path / (hashlib.sha1(b'queen|song|album', usedforsecurity=False).hexdigest() + '.json')
+    digest = hashlib.sha1(b'queen|song|album', usedforsecurity=False).hexdigest()
+    path = tmp_path / (digest + '.json')
     path.write_text(json.dumps({'artistName': 'Queensryche', 'trackName': 'Song',
                                'collectionName': 'Album', '_score': 5}), encoding='utf-8')
     monkeypatch.setattr(artwork.requests, 'get', lambda *a, **k: FakeResponse(payload={

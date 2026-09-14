@@ -22,6 +22,15 @@ def song(name: str, artists: list[str], duration_ms: int = 200_000, id_: int = 1
             "artists": [{"name": a} for a in artists]}
 
 
+def test_partial_collaboration_keeps_compatible_artist_weight():
+    duet = song('Song', ['Queen', 'David Bowie'], 180_000)
+    solo = song('Song', ['Queen'], 180_000)
+    assert _score(duet, 'Queen', 'Song', 180) == 5.5
+    assert _score(duet, 'Queen', 'Song', 180) < NeteaseProvider.EXACT_SCORE
+    assert _score(solo, 'Queen', 'Song', 180) == 6.5
+    assert _score(duet, 'Queen & David Bowie', 'Song', 180) == 6.5
+
+
 class FakeResponse:
     def __init__(self, payload, status=200, headers=None):
         self._payload = payload

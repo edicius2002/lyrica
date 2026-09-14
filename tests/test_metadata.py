@@ -25,6 +25,12 @@ def test_topic_search_preserves_session_identity():
     assert snap.norm_artist_title() == ('BTS', 'Song')
 
 
+def test_repeated_topic_channel_is_removed_before_normalizing_artist():
+    snap = Snapshot(app='chrome.exe', artist='BTS - Topic', title='BTS - Topic - Song')
+    assert snap.norm_artist_title() == ('BTS', 'Song')
+    assert snap.lookup_candidates()[0] == ('BTS', 'Song')
+
+
 def test_vevo_readings_keep_evidence_and_explicit_title_priority():
     snap = Snapshot(app='chrome.exe', artist='BillieEilishVEVO',
                     title='Billie Eilish - CHIHIRO (Official Video)')

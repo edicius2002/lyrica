@@ -76,7 +76,8 @@ def _artist_cache_suffix(reading: ArtistReading | None) -> str:
     return "|artist-mode:" + mode if mode else ""
 
 
-def fetch_cover(artist: str, title: str, album: str = "", size: int = 600, *, artist_reading: ArtistReading | None = None) -> bytes | None:
+def fetch_cover(artist: str, title: str, album: str = "", size: int = 600, *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """A high-resolution cover from Apple's public catalogue search.
 
     The media session's own thumbnail is whatever the player felt like
@@ -112,7 +113,8 @@ def _match_dir() -> Path:
     return path
 
 
-def _apple_match(artist: str, title: str, album: str = "", *, artist_reading: ArtistReading | None = None) -> dict | None:
+def _apple_match(artist: str, title: str, album: str = "", *,
+                artist_reading: ArtistReading | None = None) -> dict | None:
     """The catalogue entry that looks like this track, or None.
 
     Cached, because two callers want it — the cover and the name — and a search
@@ -158,7 +160,8 @@ def _apple_match(artist: str, title: str, album: str = "", *, artist_reading: Ar
     return best
 
 
-def _closest(results: list, artist: str, title: str, album: str, *, artist_reading: ArtistReading | None = None):
+def _closest(results: list, artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None):
     """Pick the result that looks like the track, or nothing.
 
     A search always answers with something; showing a stranger's cover over
@@ -257,13 +260,15 @@ def _digest(key: str) -> Path:
         hashlib.sha1(key.encode(), usedforsecurity=False).hexdigest() + ".img")
 
 
-def _cover_path(artist: str, title: str, album: str, *, artist_reading: ArtistReading | None = None) -> Path:
+def _cover_path(artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> Path:
     """The per-track key. Every track gets one; it is the fallback."""
     return _digest(f"{artist.lower()}|{title.lower()}|{album.lower()}"
                    + _artist_cache_suffix(artist_reading))
 
 
-def _album_path(artist: str, album: str, *, artist_reading: ArtistReading | None = None) -> Path | None:
+def _album_path(artist: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> Path | None:
     """The per-album key, where the player named an album.
 
     Cover art belongs to a release, not to a track, and keying it by track made
@@ -304,39 +309,49 @@ def _read(path: Path | None) -> bytes | None:
     return b""
 
 
-def cached_cover(artist: str, title: str, album: str = "", *, artist_reading: ArtistReading | None = None) -> bytes | None:
+def cached_cover(artist: str, title: str, album: str = "", *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """A cover already on disk, or None.
 
     The album key is tried first and the track key second, so entries written
     before covers were keyed by release still answer instead of forcing one
     refetch each.
     """
-    for path in (_album_path(artist, album, **_artist_context(artist_reading)), _cover_path(artist, title, album, **_artist_context(artist_reading))):
+    context = _artist_context(artist_reading)
+    for path in (_album_path(artist, album, **context),
+                 _cover_path(artist, title, album, **context)):
         data = _read(path)
         if data:
             return data
     return None
 
 
-def _recorded_miss(artist: str, title: str, album: str, *, artist_reading: ArtistReading | None = None) -> bool:
+def _recorded_miss(artist: str, title: str, album: str, *,
+                artist_reading: ArtistReading | None = None) -> bool:
+    context = _artist_context(artist_reading)
     return any(_read(p) == b"" for p in
-               (_album_path(artist, album, **_artist_context(artist_reading)), _cover_path(artist, title, album, **_artist_context(artist_reading))))
+               (_album_path(artist, album, **context),
+                _cover_path(artist, title, album, **context)))
 
 
-def store_cover(artist: str, title: str, album: str, data: bytes | None, *, artist_reading: ArtistReading | None = None) -> None:
+def store_cover(artist: str, title: str, album: str, data: bytes | None, *,
+                artist_reading: ArtistReading | None = None) -> None:
     """Keep a cover for next time. Misses are kept too.
 
     Written under the album key when there is one, so the rest of the record is
     already answered before it is ever played.
     """
-    path = _album_path(artist, album, **_artist_context(artist_reading)) or _cover_path(artist, title, album, **_artist_context(artist_reading))
+    context = _artist_context(artist_reading)
+    path = (_album_path(artist, album, **context)
+            or _cover_path(artist, title, album, **context))
     try:
         path.write_bytes(data or b"")
     except OSError:
         logger.debug("could not cache the cover", exc_info=True)
 
 
-def best_cover(artist: str, title: str, album: str = "", size: int = 600, *, artist_reading: ArtistReading | None = None) -> bytes | None:
+def best_cover(artist: str, title: str, album: str = "", size: int = 600, *,
+                artist_reading: ArtistReading | None = None) -> bytes | None:
     """The best cover any configured source has, or None.
 
     Disk first, so a track played before appears instantly rather than after a
@@ -364,7 +379,8 @@ def best_cover(artist: str, title: str, album: str = "", size: int = 600, *, art
         return None     # asked before and nobody had it
 
     data, unreachable = None, False
-    for ask in (lambda: fetch_cover(artist, title, album, size=size, **_artist_context(artist_reading)),
+    context = _artist_context(artist_reading)
+    for ask in (lambda: fetch_cover(artist, title, album, size=size, **context),
                 lambda: fetch_cover_discogs(artist, title, album)):
         try:
             data = ask()
