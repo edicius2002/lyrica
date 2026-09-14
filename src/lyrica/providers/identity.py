@@ -3,12 +3,8 @@
 import re
 from dataclasses import dataclass
 
+from lyrica.artist_names import ArtistReading, artist_relation
 from lyrica.textmatch import fold
-
-_CREDIT_SEPARATOR = re.compile(
-    r"\s*(?:,|&|\+|×|\b(?:feat|ft|featuring|with|and|x|vs|con|y)\.?\b)\s*",
-    re.IGNORECASE,
-)
 
 _VERSION_PATTERNS = {
     "live": re.compile(r"\b(?:live|concert|unplugged)\b"),
@@ -53,23 +49,12 @@ class SongQuery:
     duration: float = 0.0
     album: str = ""
     raw_title: str = ""
-
-
-def _artist_parts(value: str) -> set[str]:
-    return {fold(part) for part in _CREDIT_SEPARATOR.split(value) if fold(part)}
+    artist_reading: ArtistReading | None = None
 
 
 def artists_compatible(requested: str, returned: str) -> bool:
-    """Accept unknown and shared credits, but reject known strangers."""
-    if not requested.strip() or not returned.strip():
-        return True
-    wanted = _artist_parts(requested)
-    got = _artist_parts(returned)
-    return any(
-        left == right
-        or (min(len(left), len(right)) >= 4 and (left in right or right in left))
-        for left in wanted for right in got
-    )
+    """Accept unknown and shared full credits, never name substrings."""
+    return artist_relation(requested, returned) != 'mismatch'
 
 
 def version_qualifiers(title: str) -> frozenset[str]:
@@ -102,9 +87,10 @@ def _base_title(title: str) -> str:
 
 def validate_identity(*, requested_artist: str, requested_title: str,
                       returned_artist: str, returned_title: str,
-                      requested_raw_title: str | None = None) -> IdentityDecision:
+                      requested_raw_title: str | None = None,
+                      requested_artist_reading: ArtistReading | None = None) -> IdentityDecision:
     """Reject clear artist and recording contradictions before fuzzy ranking."""
-    if not artists_compatible(requested_artist, returned_artist):
+    if artist_relation(requested_artist_reading or requested_artist, returned_artist) == 'mismatch':
         return IdentityDecision(False, "artist_mismatch")
     requested_base = _base_title(requested_title)
     returned_base = _base_title(returned_title)

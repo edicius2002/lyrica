@@ -154,6 +154,8 @@ class Lyrics:
     # worked is worth keeping: it is the closest thing to a correct name for the
     # song that anything in the process knows.
     queried: tuple = ()
+    # Complete artist/title returned by the validated provider record.
+    resolved: tuple = ()
     # What was sung behind each line, index-matched to `lines`, and empty where
     # there was nothing. Apart from `words` rather than folded into it because
     # the two overlap in time: a backing vocal answers a line while it is still

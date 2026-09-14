@@ -25,6 +25,7 @@ from pathlib import Path
 
 import requests
 
+from lyrica.artist_names import resolved_name
 from lyrica.lyrics import (
     BACKING_INFERRED,
     MAX_INFERRED_WORD_S,
@@ -287,6 +288,7 @@ class MusixmatchProvider(LyricsProvider):
             return ProviderOutcome.no_match(reason="no_track")
         decision = validate_identity(
             requested_artist=query.artist,
+            requested_artist_reading=query.artist_reading,
             requested_title=query.title,
             requested_raw_title=query.raw_title or query.title,
             returned_artist=track.get("artist_name") or "",
@@ -300,7 +302,11 @@ class MusixmatchProvider(LyricsProvider):
             track_id = track["track_id"]
         except KeyError:
             return ProviderOutcome.retryable(reason="invalid_payload")
-        return self._richsync_outcome(token, track_id)
+        outcome = self._richsync_outcome(token, track_id)
+        if outcome.lyrics is not None:
+            outcome.lyrics.resolved = resolved_name(
+                track.get("artist_name") or "", track.get("track_name") or "")
+        return outcome
 
     def _richsync_outcome(self, token: str, track_id: int) -> ProviderOutcome:
         payload = self._call("track.richsync.get",

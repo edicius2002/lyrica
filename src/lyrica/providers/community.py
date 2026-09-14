@@ -14,6 +14,7 @@ import logging
 
 import requests
 
+from lyrica.artist_names import ArtistReading, artist_relation, resolved_name
 from lyrica.lyrics import Lyrics, Precision
 from lyrica.providers.base import LyricsProvider, ProviderOutcome
 from lyrica.providers.identity import SongQuery, validate_identity
@@ -27,23 +28,20 @@ TIMEOUT = 15
 logger = logging.getLogger(__name__)
 
 
-def _score(rec: dict, artist: str, title: str, duration: float) -> float:
+def _score(rec: dict, artist: str, title: str, duration: float, *,
+           artist_reading: ArtistReading | None = None) -> float:
     """How much this result looks like the recording that is playing."""
     score = 0.0
-    got_artist = fold(rec.get("artist_name", ""))
     got_title = fold(rec.get("track_name", ""))
-    want_artist, want_title = fold(artist), fold(title)
+    want_title = fold(title)
 
-    if want_artist and got_artist:
-        if want_artist == got_artist:
-            score += 3
-        elif want_artist in got_artist or got_artist in want_artist:
-            score += 2
-        else:
-            # Heavy enough to sink a result that matches on title and duration
-            # alone. Songs share titles, and a different performer's recording
-            # of the same length is precisely the trap this has to catch.
-            score -= 5
+    relation = artist_relation(artist_reading or artist, rec.get("artist_name") or "")
+    if relation == 'exact':
+        score += 3
+    elif relation in ('credit', 'channel_alias'):
+        score += 2
+    elif relation == 'mismatch':
+        score -= 5
     if want_title == got_title:
         score += 3
     elif want_title and (want_title in got_title or got_title in want_title):
@@ -132,6 +130,7 @@ class CommunityTtmlProvider(LyricsProvider):
                 continue
             decision = validate_identity(
                 requested_artist=query.artist,
+                requested_artist_reading=query.artist_reading,
                 requested_title=query.title,
                 requested_raw_title=query.raw_title or query.title,
                 returned_artist=record.get("artist_name") or "",
@@ -146,8 +145,8 @@ class CommunityTtmlProvider(LyricsProvider):
                 reason=rejected[0] if rejected else "invalid_payload")
 
         rec = max(accepted, key=lambda item: _score(
-            item, query.artist, query.title, query.duration))
-        score = _score(rec, query.artist, query.title, query.duration)
+            item, query.artist, query.title, query.duration, artist_reading=query.artist_reading))
+        score = _score(rec, query.artist, query.title, query.duration, artist_reading=query.artist_reading)
         if score < self.MIN_SCORE:
             return ProviderOutcome.no_match(reason="low_score")
 
@@ -173,6 +172,7 @@ class CommunityTtmlProvider(LyricsProvider):
             return ProviderOutcome.retryable(reason="invalid_document")
         lyrics.source = f"community-ttml/{rec.get('timing_type', '?')}"
         lyrics.exact = score >= self.EXACT_SCORE
+        lyrics.resolved = resolved_name(rec.get("artist_name") or "", rec.get("track_name") or "")
         # Kept on the live result so a hybrid can reject another release of
         # the same title before borrowing any of its timings.
         lyrics.recording_duration = float(rec.get("duration") or 0.0)
