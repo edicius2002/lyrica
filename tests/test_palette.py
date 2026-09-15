@@ -26,6 +26,8 @@ INDIGO = SongColour(hue=248.0, sat=0.55, weight=0.30, accent_hue=60.0,
                     neutral=False, dominant=(50, 40, 140))
 
 COLOURED = (TEAL, CRIMSON, INDIGO)
+HARD_GREEN = SongColour(120.0, 1.0, 0.5, 120.0, False, (0, 0, 0))
+HARD_WASH = (30, 30, 30)
 ROLES = pal_mod.ROLES
 
 
@@ -194,6 +196,36 @@ def test_a_coloured_cover_tints_the_words_and_the_card(chrome):
     # the wash, so the tint does not have to be given up for legibility.
     for role in pal_mod.CARD_ROLES:
         assert chroma(getattr(p, role)) >= 10, f"{role} lost the song's colour"
+
+
+@pytest.mark.parametrize(("song", "minimum_chroma"), (
+    (TEAL, {"side": 50, "far": 30, "title": 42, "artist": 50}),
+    (CRIMSON, {"side": 54, "far": 34, "title": 46, "artist": 55}),
+    (INDIGO, {"side": 40, "far": 25, "title": 34, "artist": 40}),
+))
+def test_the_panel_carries_a_clearly_visible_cover_tint(song, minimum_chroma):
+    p = pal_mod.for_song(PANEL_CHROME, song)
+
+    for role, minimum in minimum_chroma.items():
+        got = chroma(getattr(p, role))
+        assert got >= minimum, f"{role} only carries {got} chroma"
+
+
+def test_the_stronger_text_tint_does_not_recolour_the_beam_or_sheen():
+    current = pal_mod.for_song(FROSTED_CHROME, HARD_GREEN, HARD_WASH)
+
+    assert current.beam == "#768a76"
+    assert current.sheen == "#102a10"
+
+
+def test_the_stronger_text_tint_preserves_secondary_text_contrast():
+    current = pal_mod.for_song(FROSTED_CHROME, HARD_GREEN, HARD_WASH)
+    original_contrast = pal_mod.worst_contrast(rgb_of("#8a8a8a"), HARD_WASH, ACRYLIC)
+
+    for role in ("side", "title", "artist"):
+        got = pal_mod.worst_contrast(rgb_of(getattr(current, role)), HARD_WASH, ACRYLIC)
+        assert got >= original_contrast - 0.01, (
+            f"{role} contrast fell from {original_contrast:.2f}:1 to {got:.2f}:1")
 
 
 def test_the_card_always_stands_off_the_wash_behind_it():
