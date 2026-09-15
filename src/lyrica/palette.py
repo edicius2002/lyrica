@@ -71,18 +71,18 @@ RETAIN = {"sung": 0.98, "unsung": 0.90, "side": 0.90, "far": 0.90,
 # The chroma each role aims at, at full song strength — screen units, largest
 # channel minus smallest, which is exactly what reaches the glass while the
 # level stays under the ceiling.
-CHROMA = {"sung": 8, "unsung": 46, "side": 58, "far": 34,
-          "title": 44, "artist": 56, "sheen": 26, "beam": 46}
+CHROMA = {"sung": 8, "unsung": 46, "side": 70, "far": 44,
+          "title": 60, "artist": 72, "sheen": 26, "beam": 46}
 
 # A role may not fall below this fraction of its anchor luminance to buy colour.
 FLOOR = 0.55
 
 # The same rule for the lyric ladder, and much stricter, because that is where
-# the complaint was. The colour used to live exactly where the light did not:
-# the sung word asks for chroma 8 and keeps 98 % of its luminance, while every
-# unlit role asked for four to seven times the chroma and paid for it. So the
-# whole body of text a reader is *not* being led through was at once the most
-# coloured and the dimmest, and those were the same fact.
+# the complaint was. The colour originally lived exactly where the light did
+# not: the sung word asked for chroma 8 and kept 98 % of its luminance, while
+# every unlit role asked for four to seven times the chroma and paid for it. So
+# the whole body of text a reader was *not* being led through was at once the
+# most coloured and the dimmest, and those were the same fact.
 #
 # It is also not the same fact for every cover. Luminance is 21 % red, 72 %
 # green and 7 % blue, so a yellow tint is nearly free and a violet one is not:
