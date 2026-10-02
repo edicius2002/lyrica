@@ -20,6 +20,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ WM_RBUTTONUP = 0x0205
 # Anything from WM_APP up is ours to define; this is the one the icon reports
 # mouse activity on.
 WM_TRAY = 0x0400 + 1
+WM_LAUNCH = 0x0400 + 2
 
 NIM_ADD = 0
 NIM_DELETE = 2
@@ -52,6 +54,33 @@ TPM_RETURNCMD = 0x0100
 
 CW_USEDEFAULT = 0x80000000
 HWND_MESSAGE = -3
+
+
+def request_running(timeout_s: float = 3.0) -> bool:
+    """Ask the already-running overlay to handle a pinned-launcher click.
+
+    Its tray message window is created after the single-instance mutex, so a
+    second launch during startup may need to wait briefly for that window.
+    """
+    if sys.platform != "win32":
+        return False
+    user32 = ctypes.windll.user32
+    find = user32.FindWindowExW
+    find.argtypes = (wintypes.HWND, wintypes.HWND,
+                     wintypes.LPCWSTR, wintypes.LPCWSTR)
+    find.restype = wintypes.HWND
+    post = user32.PostMessageW
+    post.argtypes = (wintypes.HWND, ctypes.c_uint,
+                     wintypes.WPARAM, wintypes.LPARAM)
+    post.restype = wintypes.BOOL
+    deadline = time.monotonic() + timeout_s
+    while True:
+        hwnd = find(wintypes.HWND(HWND_MESSAGE), None, "LyricaTray", "Lyrica")
+        if hwnd:
+            return bool(post(hwnd, WM_LAUNCH, 0, 0))
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 # Everything below needs the Win32 type machinery, and `ctypes.wintypes` and
 # `ctypes.WINFUNCTYPE` do not exist off Windows — importing them at module level
@@ -169,8 +198,9 @@ class NullTray:
 
 class WindowsTray:
     def __init__(self, tooltip: str = "Lyrica", autostart: bool = False,
-                 can_autostart: bool = True):
+                 can_autostart: bool = True, show_icon: bool = True):
         self.tooltip = tooltip
+        self.show_icon = show_icon
         self._autostart = autostart
         self._can_autostart = can_autostart
         self._events: queue.Queue = queue.Queue()
@@ -229,11 +259,8 @@ class WindowsTray:
         try:
             self._create(user32)
             self.available = True
-            # Logged because the icon is easy to believe missing: Windows files
-            # new ones under the overflow chevron rather than showing them, so
-            # "I cannot see it" and "it was never added" look identical.
-            logger.info("tray icon added (Windows hides new ones under the "
-                        "notification-area chevron until you drag them out)")
+            if self.show_icon:
+                logger.info("tray icon added")
         except Exception:
             logger.warning("could not create the tray icon", exc_info=True)
             self._ready.set()
@@ -273,6 +300,9 @@ class WindowsTray:
         if not self._hwnd:
             raise ctypes.WinError(ctypes.get_last_error())
 
+        if not self.show_icon:
+            return
+
         path = _icon_file()
         hicon = 0
         if path:
@@ -295,8 +325,9 @@ class WindowsTray:
 
     def _remove(self, user32) -> None:
         try:
-            ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE,
-                                                    ctypes.byref(self._data))
+            if self.show_icon and hasattr(self, "_data"):
+                ctypes.windll.shell32.Shell_NotifyIconW(NIM_DELETE,
+                                                        ctypes.byref(self._data))
             if self._hwnd:
                 user32.DestroyWindow(wintypes.HWND(self._hwnd))
         except Exception:
@@ -304,6 +335,9 @@ class WindowsTray:
 
     def _on_message(self, hwnd, message, wparam, lparam):
         user32 = ctypes.windll.user32
+        if message == WM_LAUNCH:
+            self._events.put("launcher")
+            return 0
         if message == WM_TRAY:
             event = lparam & 0xFFFF
             if event == WM_LBUTTONUP:
@@ -357,7 +391,7 @@ class WindowsTray:
 
 
 def create_tray(tooltip: str = "Lyrica", autostart: bool = False,
-                can_autostart: bool = True):
+                can_autostart: bool = True, show_icon: bool = True):
     if sys.platform != "win32":
         return NullTray()
-    return WindowsTray(tooltip, autostart, can_autostart)
+    return WindowsTray(tooltip, autostart, can_autostart, show_icon)

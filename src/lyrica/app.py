@@ -207,9 +207,25 @@ def _backing_window(lyr: Lyrics, line_index: int) -> tuple[float, float, float]:
     return opens, visible_end, fade_s
 
 
-def _display_line_index(lyr: Lyrics, pos: float) -> int:
-    """Lead row to display, holding it through a sequential response."""
+def _display_line_index(lyr: Lyrics, pos: float, song_end: float = 0.0) -> int:
+    """Lead row to display; one past the last row means a long, silent outro."""
     index = lyr.line_index_at(pos + LINE_LEAD_S)
+    if (index == len(lyr.lines) - 1 and song_end > 0
+            and lyr.lines[index][1].strip()
+            and song_end - lyr.lines[index][0] >= LONG_OUTRO_MIN_S):
+        # Line-timed sources know only when the final phrase starts. Let it
+        # remain readable for ten seconds; word timing can extend that window.
+        # The ending must still leave a substantial instrumental stretch, or a
+        # normal final phrase would disappear before the track finishes.
+        finish = lyr.lines[index][0] + FINAL_LINE_HOLD_S
+        words = lyr.words_at(index)
+        if words:
+            finish = max(finish, words[-1][1] + FINAL_WORD_TAIL_S)
+        _backing, backing_words = lyr.backing_at(index)
+        if backing_words:
+            finish = max(finish, backing_words[-1][1] + FINAL_WORD_TAIL_S)
+        if pos >= finish and song_end - finish >= LONG_OUTRO_MIN_S:
+            return len(lyr.lines)
     while index > 0:
         previous = index - 1
         _text, backing_words = lyr.backing_at(previous)
@@ -254,6 +270,9 @@ SUSPEND_GLASS_WHILE_DRAGGING = True
 REVEAL_WAIT_S = 1.0
 
 LINE_LEAD_S = 0.115
+FINAL_LINE_HOLD_S = 10.0
+FINAL_WORD_TAIL_S = 2.0
+LONG_OUTRO_MIN_S = 20.0
 WORD_LEAD_S = 0.150
 
 # How many lines either side of the current one are kept on screen. One, so the
@@ -502,7 +521,8 @@ class Overlay:
         self.beam = None
         self._beam_at = None
         self.tray = tray.create_tray(autostart=autostart.enabled(),
-                                     can_autostart=autostart.available())
+                                     can_autostart=autostart.available(),
+                                     show_icon=False)
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
@@ -596,6 +616,9 @@ class Overlay:
         self.root.title("Lyrica")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
+        icon_path = tray._icon_file()
+        if icon_path:
+            self.root.iconbitmap(icon_path)
 
         # Chrome decides how the window composites, and everything visual
         # follows from that: glass adds light and needs no outline, keyed
@@ -659,6 +682,7 @@ class Overlay:
         # pixels and clips whatever it was applied to.
         self.root.update_idletasks()
         chrome_mod.shape(self.root, self.chrome, self.width, self.height)
+        chrome_mod.enable_taskbar(self.root)
 
         self._build_frame()
         self._bind()
@@ -712,6 +736,8 @@ class Overlay:
 
     ACTIONS: ClassVar[dict] = {
         "toggle": lambda self: self._toggle_visible(),
+        # A second launch of the executable activates the existing window.
+        "launcher": lambda self: self._restore_visible(),
         "quit": lambda self: self._close(),
         "autostart": lambda self: self._toggle_autostart(),
         # Named with nothing to call. This table is also the list of actions the
@@ -1251,26 +1277,30 @@ class Overlay:
 
     # --- showing and hiding ---
     def _toggle_visible(self) -> None:
-        """Put the overlay away, or bring it back.
+        """Minimize or restore without removing the taskbar button."""
+        if self._hidden or chrome_mod.is_minimized(self.root):
+            self._restore_visible()
+        else:
+            chrome_mod.minimize(self.root)
+            self._set_minimized(True)
 
-        Hidden rather than closed. `Esc` and right click destroy the window,
-        which is the right answer for "I am done" and the wrong one for "not
-        during this call" — there is no way back from it but relaunching.
-        """
-        self._hidden = not self._hidden
-        if self._hidden:
-            self.root.withdraw()
-            # It is a separate window, so `withdraw` says nothing to it. Left
-            # out of this it would be the only thing still on screen: a ring of
-            # light round a panel that is not there.
+    def _restore_visible(self) -> None:
+        chrome_mod.restore(self.root)
+        self._set_minimized(False)
+
+    def _set_minimized(self, minimized: bool) -> None:
+        """Keep the separate glow and render loop in step with Windows."""
+        if self._hidden == minimized:
+            return
+        self._hidden = minimized
+        if minimized:
             if self.beam is not None:
                 self.beam.visible(False)
             chrome_mod.hold_timer_resolution(False)
-            logger.info("overlay hidden")
+            logger.info("overlay minimized")
             return
 
         chrome_mod.hold_timer_resolution(True)
-        self.root.deiconify()
         # Re-asserted rather than assumed. Mapping a window again puts it back
         # in the z-order as an ordinary one, so without this it returns *behind*
         # whatever was in front — which looks exactly like the shortcut having
@@ -1291,7 +1321,7 @@ class Overlay:
         # place them without animating, rather than gliding through however many
         # lines went past while nobody was looking.
         self.line_index = -1
-        logger.info("overlay shown")
+        logger.info("overlay restored")
 
     # --- size ---
     def _resize(self, delta: float) -> None:
@@ -2014,6 +2044,8 @@ class Overlay:
     def _visible_indices(self, count: int) -> list[int]:
         if self.line_index < 0:
             return [0] if count else []
+        if self.line_index >= count:
+            return []
         lo = max(0, self.line_index - CONTEXT)
         hi = min(count - 1, self.line_index + CONTEXT)
         return list(range(lo, hi + 1))
@@ -2911,7 +2943,9 @@ class Overlay:
 
         self._settle_cuts(lyr, snap)
         pos = self._cuts.to_song(snap.live_position()) + self.offset
-        index = _display_line_index(lyr, pos)
+        song_end = (self._cuts.to_song(snap.duration) + self.offset
+                    if snap.duration > 0 else 0.0)
+        index = _display_line_index(lyr, pos, song_end)
         waiting = index < 0
         if waiting:
             index = 0
@@ -2947,6 +2981,7 @@ class Overlay:
             # Nothing may run after this: every line below touches a widget.
             self.root.destroy()
             return
+        self._set_minimized(chrome_mod.is_minimized(self.root))
         if self._hidden:
             # Nothing to draw and nobody watching. The session reader keeps
             # polling on its own thread, so this stays cheap without going
@@ -3106,7 +3141,9 @@ class Overlay:
                     self._awaiting_seek = None      # the player caught up
                 else:
                     pos = assumed                   # trust the jump, not the poll
-            index = _display_line_index(lyr, pos)
+            song_end = (self._cuts.to_song(snap.duration) + self.offset
+                        if snap.duration > 0 else 0.0)
+            index = _display_line_index(lyr, pos, song_end)
             # Before the first line there is no active line, and the panel used
             # to sit empty until the singing started — which on a video with a
             # twenty-second intro is twenty seconds of the overlay pretending it
@@ -3467,7 +3504,13 @@ def main():
     # Before the window, because a second overlay is a second always-on-top
     # panel over the same lyrics and a second icon in the notification area.
     if not instance.claim():
-        logger.info("Lyrica is already running; leaving the overlay to it")
+        if autostart.frozen():
+            if tray.request_running():
+                logger.info("pinned launcher click sent to the running overlay")
+            else:
+                logger.warning("running overlay did not answer the pinned launcher")
+        else:
+            logger.info("Lyrica is already running; leaving the overlay to it")
         return
     try:
         # Before anything reads a token: the .env is the fallback for values that

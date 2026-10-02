@@ -22,6 +22,7 @@ from lyrica.artist_names import ArtistReading, artist_relation, resolved_name
 from lyrica.lyrics import Lyrics, parse_lrc
 from lyrica.providers.base import LyricsProvider, ProviderOutcome
 from lyrica.providers.identity import SongQuery, validate_identity
+from lyrica.providers.netease_credits import lyric_bounds
 from lyrica.textmatch import fold
 
 SEARCH_URL = "https://music.163.com/api/search/get"
@@ -191,6 +192,10 @@ class NeteaseProvider(LyricsProvider):
             return ProviderOutcome.no_match(reason="no_lyrics")
         lines = parse_lrc(lrc)
         if lines:
+            start, end = lyric_bounds(lines)
+            lines = lines[start:end]
+            if not lines:
+                return ProviderOutcome.no_match(reason="no_lyrics")
             lyrics = Lyrics(lines=lines, synced=True, source="netease",
                             exact=score >= self.EXACT_SCORE)
         else:

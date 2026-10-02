@@ -106,6 +106,55 @@ def test_a_good_match_returns_synced_lyrics(wired):
     assert len(result.lines) == 2
 
 
+def test_opening_netease_credits_are_not_shown_as_lyrics(wired):
+    wired["songs"] = [song("Song", ["Artist"], 200_000)]
+    wired["lyric"] = {"lrc": {"lyric": (
+        "[00:00.00]作词 : Someone\n"
+        "[00:00.60]作曲：Someone\n"
+        "[00:02.00]制作人 : Someone\n"
+        "[00:03.00]编曲：Someone\n"
+        "[00:18.00]First sung line\n"
+        "[00:22.00]制作人：a lyric, not an opening credit"
+    )}}
+    result = NeteaseProvider().fetch("Artist", "Song", 200.0)
+    assert result.lines == [
+        (18.0, "First sung line"),
+        (22.0, "制作人：a lyric, not an opening credit"),
+    ]
+
+
+def test_netease_credit_only_body_is_not_treated_as_plain_lyrics(wired):
+    wired["songs"] = [song("Song", ["Artist"], 200_000)]
+    wired["lyric"] = {"lrc": {"lyric": "[00:00.00]作词：Someone\n[00:01.00]作曲：Someone"}}
+    assert NeteaseProvider().fetch("Artist", "Song", 200.0) is None
+
+
+def test_closing_netease_mastering_credit_is_not_shown(wired):
+    wired["songs"] = [song("Song", ["Artist"], 200_000)]
+    wired["lyric"] = {"lrc": {"lyric": (
+        "[00:10.00]First sung line\n"
+        "[03:10.00]Last sung line\n"
+        "[03:13.00]母带工程师 : Someone"
+    )}}
+    result = NeteaseProvider().fetch("Artist", "Song", 200.0)
+    assert result.lines == [(10.0, "First sung line"), (190.0, "Last sung line")]
+
+
+def test_closing_netease_credit_block_is_not_shown(wired):
+    wired["songs"] = [song("Song", ["Artist"], 210_000)]
+    labels = ("Remix", "音频工程师", "混音师", "附加制作", "母带工程师",
+              "人声", "贝斯", "音频助理", "录音", "混音助理")
+    credits = "\n".join(
+        f"[03:{11 + index:02d}.00]{label} : Someone"
+        for index, label in enumerate(labels)
+    )
+    wired["lyric"] = {"lrc": {"lyric": (
+        "[00:10.00]First sung line\n[03:10.00]Last sung line\n" + credits
+    )}}
+    result = NeteaseProvider().fetch("Artist", "Song", 210.0)
+    assert result.lines == [(10.0, "First sung line"), (190.0, "Last sung line")]
+
+
 def test_a_bad_match_is_discarded_rather_than_shown(wired):
     wired["songs"] = [song("Supernatural", ["noli"], 189_000)]
     wired["lyric"] = {"lrc": {"lyric": LRC_BODY}}

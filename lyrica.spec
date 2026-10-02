@@ -54,6 +54,7 @@ exe = EXE(
     analysis.datas,
     [],
     name="Lyrica",
+    icon="assets/Lyrica.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

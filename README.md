@@ -33,6 +33,13 @@ pyinstaller lyrica.spec
 machine it is copied to — no Python, no packages. It reads and writes the same
 cache under `%LOCALAPPDATA%\Lyrica`.
 
+Put `Lyrica.exe` in a permanent location and launch it. Its lyric window has a
+normal Windows taskbar button even though the panel has no title bar. Right
+click that button and choose **Pin to taskbar**. Clicking the button while
+Lyrica is running minimizes or restores the window; the button stays available
+while minimized. Clicking the pinned shortcut when Lyrica is closed starts it.
+Keep the executable at the pinned path when replacing it with a new build.
+
 The Discogs token is deliberately **not** bundled: it would put a credential
 inside a file meant to be handed around. The executable reads one from a `.env`
 beside itself or from the environment, and works without one — Apple is the
@@ -243,36 +250,13 @@ collapsing on the first would shrink and grow the panel on every track change.
 Lyrics that exist but carry no timings count as absent, because they are never
 drawn.
 
-## Notification area
+## Taskbar
 
-There is an icon beside the clock. Left click hides and shows the overlay; right
-click opens a menu with the same actions plus **Start with Windows**, which
-writes a per-user registry entry and needs no administrator. That item only does
-anything for the packaged executable — from a source checkout the command would
-have to name an interpreter, a working directory and a module, all of which move
-the moment the checkout does, so it is greyed out instead.
-
-Windows files new tray icons under the notification-area chevron rather than
-showing them, so look behind the `^` and drag it out if you want it visible. The
-log says when it was added.
-
-There is only ever one icon, because there is only ever one overlay: starting
-Lyrica while it is already running leaves the running one alone and says so in
-the log. Worth knowing because the overlay only appears once something is
-playing, so a launch can look as though it did nothing.
-
-**If you see several icons**, they are leftovers rather than copies. Windows does
-not poll the icons it draws — it drops one when a message to the owning window
-goes unanswered, which is what opening the notification area makes it do. So an
-instance that ended without saying goodbye leaves an icon that looks live until
-it is looked at, and the count collapsing to one as you open the area is that
-happening. The endings that used to cause it are fixed; nothing has to be
-cleaned up by hand.
-
-Hiding puts the overlay away rather than closing it — `Esc` and right click
-destroy the window, which is the right answer for "I am done" and the wrong one
-for "not right now". While hidden it stops drawing entirely and only listens for
-the shortcut that brings it back.
+Lyrica uses its own taskbar button; it does not add a notification-area icon.
+The global show/hide shortcut minimizes and restores the same window. `Esc` and
+right click on the panel quit. Launching the packaged executable again restores
+the running instance instead of making another overlay. While minimized, it
+stops drawing and resumes at the current lyric when restored.
 
 **If a shortcut does nothing**, another application is almost certainly eating
 it. Anything with a low-level keyboard hook — remote desktop tools especially —

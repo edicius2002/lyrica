@@ -101,6 +101,47 @@ def test_a_sequential_row_uses_the_same_protected_end_as_the_renderer():
     assert _display_line_index(lyrics, 2.25) == 1
 
 
+def test_a_long_instrumental_outro_retires_the_final_line():
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(lines=[(10.0, "First"), (122.5, "Last sung line")],
+                    synced=True)
+    assert _display_line_index(lyrics, 125.0, 198.0) == 1
+    assert _display_line_index(lyrics, 132.5, 198.0) == len(lyrics.lines)
+    assert _display_line_index(lyrics, 194.0, 198.0) == len(lyrics.lines)
+    assert _display_line_index(lyrics, 120.0, 198.0) == 0
+
+
+def test_a_normal_ending_and_unknown_duration_keep_the_last_line():
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(lines=[(10.0, "First"), (190.0, "Last")], synced=True)
+    assert _display_line_index(lyrics, 209.0, 210.0) == 1
+    assert _display_line_index(lyrics, 400.0) == 1
+
+
+def test_a_word_timed_final_line_finishes_before_the_outro_hides_it():
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(lines=[(100.0, "Held last word")],
+                    words=[[(100.0, 115.0, "Held")]], synced=True)
+    assert _display_line_index(lyrics, 116.0, 180.0) == 0
+    assert _display_line_index(lyrics, 117.0, 180.0) == 1
+
+
+def test_the_outro_has_no_lyric_views_and_seeking_back_restores_them(overlay):
+    from lyrica.app import _display_line_index
+
+    lyrics = Lyrics(lines=[(10.0, "First"), (122.5, "Last")], synced=True)
+    overlay.lyrics = lyrics
+    overlay._go_to_line(_display_line_index(lyrics, 132.5, 198.0), lyrics,
+                        animate=False)
+    assert overlay._views == {}
+    overlay._go_to_line(_display_line_index(lyrics, 125.0, 198.0), lyrics,
+                        animate=False)
+    assert 1 in overlay._views
+
+
 def test_backing_lead_is_smaller_and_removed_for_uncertain_clocks():
     from lyrica import app as A
     from lyrica.lyrics import (

@@ -439,7 +439,7 @@ class _Border:
 
 
 def test_putting_the_overlay_away_takes_its_light_with_it(monkeypatch):
-    # The companion is a window of its own, so `withdraw` says nothing to it.
+    # The companion is a window of its own, so minimizing says nothing to it.
     # Left out of this it is the only thing still on screen: a ring of light
     # round a panel that is not there.
     from lyrica import app as A
@@ -448,6 +448,9 @@ def test_putting_the_overlay_away_takes_its_light_with_it(monkeypatch):
     monkeypatch.setattr(chrome_mod, "hold_timer_resolution", lambda _hold: None)
     monkeypatch.setattr(chrome_mod, "shape", lambda *a: True)
     monkeypatch.setattr(chrome_mod, "window_handle", lambda _root: 99)
+    monkeypatch.setattr(chrome_mod, "is_minimized", lambda _root: False)
+    monkeypatch.setattr(chrome_mod, "minimize", lambda _root: None)
+    monkeypatch.setattr(chrome_mod, "restore", lambda _root: None)
 
     class Root:
         def withdraw(self): pass
@@ -465,6 +468,8 @@ def test_putting_the_overlay_away_takes_its_light_with_it(monkeypatch):
         line_index = 0
         root = Root()
         beam = _Border()
+        _set_minimized = A.Overlay._set_minimized
+        _restore_visible = A.Overlay._restore_visible
 
     panel = Panel()
     A.Overlay._toggle_visible(panel)

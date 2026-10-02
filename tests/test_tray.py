@@ -60,6 +60,13 @@ def test_choices_are_drained_oldest_first():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only tray")
+def test_pinned_launcher_message_enters_the_same_action_queue():
+    icon = tray.WindowsTray()
+    icon._on_message(0, tray.WM_LAUNCH, 0, 0)
+    assert icon.poll() == ["launcher"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only tray")
 def test_stopping_one_that_never_started_is_not_an_error():
     tray.WindowsTray().stop()
 

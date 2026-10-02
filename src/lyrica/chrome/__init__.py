@@ -296,6 +296,39 @@ def window_handle(root: tk.Tk) -> int | None:
     return win.handle(root)
 
 
+def enable_taskbar(root: tk.Tk) -> None:
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+
+        win.enable_taskbar(root)
+
+
+def is_minimized(root: tk.Tk) -> bool:
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+
+        return win.is_minimized(root)
+    return root.state() == "withdrawn"
+
+
+def minimize(root: tk.Tk) -> None:
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+
+        win.minimize(root)
+    else:
+        root.withdraw()
+
+
+def restore(root: tk.Tk) -> None:
+    if sys.platform == "win32":
+        from lyrica.chrome import windows as win
+
+        win.restore(root)
+    else:
+        root.deiconify()
+
+
 def glow_surface(root: tk.Tk):
     """A companion window for the light that falls outside the panel, or None.
 

@@ -58,12 +58,50 @@ def test_a_second_launch_does_not_build_a_second_overlay(monkeypatch):
     from lyrica import app
 
     built = []
+    signalled = []
     monkeypatch.setattr(app, "setup_logging", lambda: None)
     monkeypatch.setattr(app.config, "load", lambda: None)
     monkeypatch.setattr(app.instance, "claim", lambda: False)
+    monkeypatch.setattr(app.autostart, "frozen", lambda: True)
+    monkeypatch.setattr(app.tray, "request_running", lambda: signalled.append(True))
     monkeypatch.setattr(app, "Overlay", lambda: built.append(True))
     app.main()
     assert not built, "a second overlay was built beside the first"
+    assert signalled, "the pinned launcher did not reach the running overlay"
+
+
+def test_a_second_source_checkout_launch_still_leaves_the_overlay_alone(monkeypatch):
+    from lyrica import app
+
+    signalled = []
+    monkeypatch.setattr(app, "setup_logging", lambda: None)
+    monkeypatch.setattr(app.instance, "claim", lambda: False)
+    monkeypatch.setattr(app.autostart, "frozen", lambda: False)
+    monkeypatch.setattr(app.tray, "request_running", lambda: signalled.append(True),
+                        raising=False)
+    app.main()
+    assert not signalled
+
+
+def test_a_second_launch_restores_the_existing_overlay():
+    from lyrica.app import Overlay
+
+    class FakeOverlay:
+        _hidden = False
+
+        def __init__(self):
+            self.calls = []
+
+        def _restore_visible(self):
+            self.calls.append("restore")
+
+    panel = FakeOverlay()
+    Overlay.ACTIONS["launcher"](panel)
+    assert panel.calls == ["restore"]
+
+    panel._hidden = True
+    Overlay.ACTIONS["launcher"](panel)
+    assert panel.calls == ["restore", "restore"]
 
 
 def test_the_first_launch_builds_one(monkeypatch):

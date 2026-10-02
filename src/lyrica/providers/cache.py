@@ -10,6 +10,7 @@ from pathlib import Path
 
 from lyrica.lyrics import BACKING_INFERRED, Lyrics, Precision
 from lyrica.providers.base import OutcomeKind, ProviderOutcome
+from lyrica.providers.netease_credits import lyric_bounds
 
 CACHE_VERSION = 12
 CONFIRMED_MISS_TTL_S = 7 * 24 * 60 * 60
@@ -154,6 +155,15 @@ def _lyrics_from_payload(payload: dict) -> Lyrics:
     lyrics.singers = dict(payload.get("singers", {}))
     if "recording_duration" in payload:
         lyrics.recording_duration = float(payload["recording_duration"])
+    if lyrics.source == "netease":
+        # Older cached NetEase hits retain timed credit rows at both edges.
+        # Clean them on read so existing songs improve without a cache reset.
+        start, end = lyric_bounds(lyrics.lines)
+        if start or end < len(lyrics.lines):
+            lyrics.lines = lyrics.lines[start:end]
+            for field in ("words", "backing", "backing_words", "backing_timing",
+                          "backing_alignment", "backing_modes", "voices"):
+                setattr(lyrics, field, getattr(lyrics, field)[start:end])
     if lyrics.precision is Precision.NONE and not lyrics.instrumental:
         raise ValueError("invalid lyrics payload")
     return lyrics

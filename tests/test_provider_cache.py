@@ -31,6 +31,19 @@ def test_resolved_name_survives_cache(tmp_path):
     assert cache.read_entry(path, IDENTITY).lyrics.resolved == ('Artist', 'Song')
 
 
+def test_existing_netease_cache_hides_boundary_credits(tmp_path):
+    path = tmp_path / 'entry.json'
+    saved = cache.CacheEntry(
+        Lyrics(lines=[(0.0, '作词：Someone'), (1.0, '作曲：Someone'),
+                      (20.0, 'First sung line'),
+                      (193.0, '母带工程师：Someone')], synced=True, source='netease'),
+        {'netease': cache.ProviderState(OutcomeKind.HIT, 1_000.0)},
+    )
+    cache.write_entry(path, saved, IDENTITY)
+    restored = cache.read_entry(path, IDENTITY).lyrics
+    assert restored.lines == [(20.0, 'First sung line')]
+
+
 def entry(source="one"):
     return cache.CacheEntry(
         Lyrics(lines=[(0.0, "placeholder")], synced=True, source=source),

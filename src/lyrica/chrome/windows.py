@@ -296,6 +296,42 @@ def handle(root) -> int:
     return _hwnd_of(root)
 
 
+def enable_taskbar(root) -> None:
+    """Give the borderless Tk wrapper its own Windows taskbar button."""
+    user32 = ctypes.windll.user32
+    hwnd = wintypes.HWND(_hwnd_of(root))
+    get_style = user32.GetWindowLongW
+    get_style.argtypes = (wintypes.HWND, ctypes.c_int)
+    get_style.restype = ctypes.c_long
+    set_style = user32.SetWindowLongW
+    set_style.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_long)
+    set_style.restype = ctypes.c_long
+
+    # Tk gives overrideredirect windows WS_EX_TOOLWINDOW, which suppresses the
+    # taskbar button. The wrapper is unowned, so APPWINDOW makes it a taskbar
+    # application while keeping the client area and rounded border unchanged.
+    user32.ShowWindow(hwnd, 0)  # SW_HIDE: let the shell observe the new style
+    ex_style = get_style(hwnd, -20)
+    set_style(hwnd, -20, (ex_style | 0x00040000) & ~0x00000080)
+    style = get_style(hwnd, -16)
+    set_style(hwnd, -16, style | 0x00080000 | 0x00020000)  # SYSMENU, MINIMIZEBOX
+    user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                        0x0001 | 0x0002 | 0x0004 | 0x0020)  # FRAMECHANGED
+    user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+
+def is_minimized(root) -> bool:
+    return bool(ctypes.windll.user32.IsIconic(wintypes.HWND(_hwnd_of(root))))
+
+
+def minimize(root) -> None:
+    ctypes.windll.user32.ShowWindow(wintypes.HWND(_hwnd_of(root)), 6)
+
+
+def restore(root) -> None:
+    ctypes.windll.user32.ShowWindow(wintypes.HWND(_hwnd_of(root)), 9)
+
+
 def _set_accent(hwnd: int, state: int, tint: int) -> bool:
     try:
         fn = ctypes.windll.user32.SetWindowCompositionAttribute
