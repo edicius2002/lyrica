@@ -1,20 +1,23 @@
 """Background answers cross onto the render thread once, by generation."""
-import queue
+import threading
+import time
 from types import SimpleNamespace
+
+from conftest import queue_result
 
 from lyrica import artwork, sponsorblock
 from lyrica.app import ArtworkResult, Overlay, Track, WorkerResult, transport_is_live
 from lyrica.lyrics import Lyrics
 from lyrica.sessions import Snapshot
+from lyrica.workers import TrackWorkers
 
 
 def _panel() -> Overlay:
     panel = Overlay.__new__(Overlay)
-    panel._worker_results = queue.SimpleQueue()
+    panel._workers = TrackWorkers()
     panel._shape_gen = 4
     panel._pending_art = None
     panel._identified = artwork.Release()
-    panel._cover_data = None
     panel._card_raw = ("cached",)
     panel._cuts = sponsorblock.Cuts()
     panel._cuts_checked = panel._cuts
@@ -28,7 +31,7 @@ def _panel() -> Overlay:
 def test_late_lyrics_are_committed_to_an_already_promoted_track():
     panel = _panel()
     lyrics = Lyrics(lines=[(0.0, "late")], words=[[]], synced=True)
-    panel._worker_results.put(WorkerResult(7, "lyrics", lyrics))
+    queue_result(panel, WorkerResult(7, "lyrics", lyrics))
 
     panel._drain_worker_results()
 
@@ -40,7 +43,7 @@ def test_late_artwork_refreshes_the_shown_track_and_pending_frame():
     panel = _panel()
     release = artwork.Release("artist", "title", "album")
     art = ("thumb", None, "colour")
-    panel._worker_results.put(WorkerResult(
+    queue_result(panel, WorkerResult(
         7, "artwork", ArtworkResult(release, b"cover", art), shape_gen=4))
 
     panel._drain_worker_results()
@@ -48,7 +51,6 @@ def test_late_artwork_refreshes_the_shown_track_and_pending_frame():
     assert panel._shown.identified is release
     assert panel._shown.cover == b"cover"
     assert panel._identified is release
-    assert panel._cover_data == b"cover"
     assert panel._pending_art is art
     assert panel._card_raw is None
 
@@ -56,7 +58,7 @@ def test_late_artwork_refreshes_the_shown_track_and_pending_frame():
 def test_late_cuts_refresh_the_clock_and_mark_a_discontinuity():
     panel = _panel()
     cuts = sponsorblock.Cuts(((0.0, 20.0),))
-    panel._worker_results.put(WorkerResult(7, "cuts", cuts))
+    queue_result(panel, WorkerResult(7, "cuts", cuts))
 
     panel._drain_worker_results()
 
@@ -69,7 +71,7 @@ def test_late_cuts_refresh_the_clock_and_mark_a_discontinuity():
 def test_an_abandoned_generation_cannot_mutate_either_track():
     panel = _panel()
     before = panel._shown.lyrics
-    panel._worker_results.put(WorkerResult(
+    queue_result(panel, WorkerResult(
         99, "lyrics", Lyrics(lines=[(0.0, "stale")], words=[[]], synced=True)))
 
     panel._drain_worker_results()
@@ -82,7 +84,7 @@ def test_a_late_answer_does_not_repaint_the_frozen_outgoing_track():
     panel._loading = Track(gen=8)
     panel.fetch_gen = 8
     cuts = sponsorblock.Cuts(((0.0, 20.0),))
-    panel._worker_results.put(WorkerResult(7, "cuts", cuts))
+    queue_result(panel, WorkerResult(7, "cuts", cuts))
 
     panel._drain_worker_results()
 
@@ -132,8 +134,9 @@ def test_player_artwork_is_requested_for_the_loading_snapshot(monkeypatch):
     panel = Overlay.__new__(Overlay)
     panel._thumb_size = 58
     panel._shape_gen = 4
-    panel._worker_results = queue.SimpleQueue()
-    panel._build_art = lambda data: ("built", data)
+    panel._workers = TrackWorkers()
+    panel._shape_changed = threading.Event()
+    panel._art_builder = lambda: lambda data: ("built", data)
     received = []
     panel.reader = SimpleNamespace(
         read_artwork=lambda snap: received.append(snap) or b"player-art")
@@ -142,7 +145,11 @@ def test_player_artwork_is_requested_for_the_loading_snapshot(monkeypatch):
     monkeypatch.setattr(app.artwork, "identify", lambda *a, **k: None)
 
     panel._start_artwork(loading)
-    result = panel._worker_results.get(timeout=2)
+    deadline = time.monotonic() + 2
+    while not (results := panel._workers.drain()):
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    result, = results
 
     assert received == [snapshot]
     assert result.value.cover == b"player-art"

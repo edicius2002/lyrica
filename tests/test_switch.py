@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from conftest import queue_result
 
 from lyrica.lyrics import Lyrics
 from lyrica.sessions import Snapshot
@@ -96,14 +97,6 @@ def test_a_new_song_loads_its_own_remembered_offset(panel, monkeypatch):
     monkeypatch.setattr(panel, "_start_artwork", lambda _track: None)
     monkeypatch.setattr(panel, "_start_cuts", lambda _track: None)
 
-    class ImmediateThread:
-        def __init__(self, *, target, daemon):
-            self.target = target
-
-        def start(self):
-            self.target()
-
-    monkeypatch.setattr(A.threading, "Thread", ImmediateThread)
     started_at = time.monotonic()
     panel._start_fetch(_snap("B", "b", "k|B"))
     finished_at = time.monotonic()
@@ -119,10 +112,7 @@ def test_a_rapid_second_skip_cancels_the_first_transition_deadline(panel, monkey
     from lyrica import app as A
 
     panel._outgoing_fade_at = time.monotonic() - A.OUTGOING_FADE_S
-    def thread(**_kwargs):
-        return SimpleNamespace(start=lambda: None)
-
-    monkeypatch.setattr(A.threading, "Thread", thread)
+    monkeypatch.setattr(A, "fetch_for_candidates", lambda *_args: None)
     monkeypatch.setattr(panel, "_start_artwork", lambda _track: None)
     monkeypatch.setattr(panel, "_start_cuts", lambda _track: None)
 
@@ -153,13 +143,16 @@ def test_a_song_with_no_cover_does_not_wear_the_last_one(panel):
     from lyrica import app as A
 
     panel._backdrop_item = panel.canvas.create_rectangle(0, 0, 10, 10)
+    previous_sleeve = panel.canvas.create_image(0, 0)
+    panel._thumb_image = previous_sleeve
     panel._thumb_photo = object()
     panel._loading = A.Track(gen=2, snapshot=_snap("B", "b", "k|B"),
                              lyrics_state=A.LYRICS_ABSENT, searched=True)
     panel._promote()
     assert panel._backdrop_item is None
     assert panel._thumb_photo is None
-    assert panel._cover_data is None
+    assert previous_sleeve not in panel.canvas.find_all()
+    assert panel._shown.cover is None
 
 
 def test_a_worker_that_answers_after_its_track_was_abandoned_is_ignored(panel):
@@ -173,13 +166,27 @@ def test_a_worker_that_answers_after_its_track_was_abandoned_is_ignored(panel):
                              deadline=time.monotonic() + 100)
     panel._shown = A.Track(gen=2, snapshot=_snap("B", "b", "k|B"),
                            lyrics_state=A.LYRICS_PRESENT, searched=True)
-    panel._worker_results.put(A.WorkerResult(
+    queue_result(panel, A.WorkerResult(
         stale.gen, "lyrics",
         Lyrics(lines=[(0.0, "from a song nobody is playing")],
                words=[[]], synced=True)))
     panel._drain_worker_results()
     assert not panel._ready_to_show(), "the abandoned track must not qualify"
     assert stale.lyrics is before
+
+
+def test_an_unreadable_cover_removes_the_previous_songs_backdrop(panel):
+    from lyrica import songcolour
+
+    previous = panel.canvas.create_image(0, 0)
+    panel._backdrop_item = previous
+    panel._backdrop_photo = object()
+    panel._pending_art = (None, None, songcolour.NEUTRAL)
+
+    panel._apply_art()
+
+    assert previous not in panel.canvas.find_all()
+    assert panel._backdrop_photo is None
 
 
 def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
@@ -201,7 +208,7 @@ def test_an_answer_that_lands_after_the_song_went_up_is_still_heard(panel):
     panel._retarget_size()
     assert not panel._compact, "nothing is known yet, so nothing moves"
 
-    panel._worker_results.put(A.WorkerResult(late.gen, "lyrics", None))
+    queue_result(panel, A.WorkerResult(late.gen, "lyrics", None))
     panel._drain_worker_results()                 # the provider answers
     panel.lyrics = panel._shown.lyrics            # what the tick does
     panel._lyrics_state = panel._shown.lyrics_state
@@ -287,7 +294,7 @@ def test_late_lyrics_are_built_at_the_current_line_and_fade_in(panel, monkeypatc
     panel._promote(A.SCENE_CARD_ONLY)
     lyrics = Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B")],
                     words=[[], []], synced=True)
-    panel._worker_results.put(A.WorkerResult(incoming.gen, "lyrics", lyrics))
+    queue_result(panel, A.WorkerResult(incoming.gen, "lyrics", lyrics))
     monkeypatch.setattr(panel.root, "after", lambda *_args: None)
 
     panel._tick()
@@ -347,7 +354,7 @@ def test_late_artwork_and_identity_are_committed_after_promotion(panel):
     panel.fetch_gen = panel._shown.gen
     release = A.artwork.Release("Billie Eilish", "CHIHIRO", "HIT ME HARD AND SOFT")
     art = ("thumb", None, "song-colour")
-    panel._worker_results.put(A.WorkerResult(
+    queue_result(panel, A.WorkerResult(
         panel._shown.gen, "artwork",
         A.ArtworkResult(release, b"late cover", art),
         shape_gen=panel._shape_gen))
@@ -356,7 +363,6 @@ def test_late_artwork_and_identity_are_committed_after_promotion(panel):
 
     assert panel._shown.identified is release
     assert panel._shown.cover == b"late cover"
-    assert panel._cover_data == b"late cover"
     assert panel._identified is release
     assert panel._pending_art is art
     assert panel._card_raw is None, "the catalogue name must be derived again"
@@ -367,7 +373,7 @@ def test_late_cuts_correct_the_shown_track(panel):
 
     panel.fetch_gen = panel._shown.gen
     found = A.sponsorblock.Cuts(((0.0, 21.8),))
-    panel._worker_results.put(A.WorkerResult(panel._shown.gen, "cuts", found))
+    queue_result(panel, A.WorkerResult(panel._shown.gen, "cuts", found))
 
     panel._drain_worker_results()
 
@@ -391,7 +397,7 @@ def test_a_late_cut_lands_on_the_corrected_line_without_a_glide(panel, monkeypat
     panel.reader.snapshot = snap
     panel._fetching_key = snap.track_key()
     panel._go_to_line(2, lyrics)
-    panel._worker_results.put(A.WorkerResult(
+    queue_result(panel, A.WorkerResult(
         panel._shown.gen, "cuts", A.sponsorblock.Cuts(((0.0, 20.0),))))
     monkeypatch.setattr(panel.root, "after", lambda *_args: None)
     calls = []
@@ -625,7 +631,7 @@ def test_late_paused_lyrics_replace_card_only_with_a_static_scene(panel,
     panel.reader.snapshot = incoming_snap
     panel._fetching_key = incoming_snap.track_key()
     panel._promote(A.SCENE_CARD_ONLY)
-    panel._worker_results.put(A.WorkerResult(
+    queue_result(panel, A.WorkerResult(
         incoming.gen, "lyrics",
         Lyrics(lines=[(0.0, "first of B"), (5.0, "second of B"),
                       (9.0, "third of B waits below")],

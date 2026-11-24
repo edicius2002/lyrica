@@ -66,15 +66,23 @@ def test_a_second_launch_does_not_build_a_second_overlay(monkeypatch):
     assert not built, "a second overlay was built beside the first"
 
 
-def test_the_first_launch_builds_one(monkeypatch):
+@pytest.mark.parametrize(("configured", "expected"), [(None, "1"), ("4", "4")])
+def test_launch_sets_default_blas_threads_before_rendering(monkeypatch, configured, expected):
     from lyrica import app
 
     ran = []
 
     class Fake:
+        def __init__(self):
+            workers = app.os.environ.get("OPENBLAS_NUM_THREADS")
+            assert workers == expected
+
         def run(self):
             ran.append(True)
 
+    monkeypatch.setattr(app.os, "environ", {})
+    if configured:
+        monkeypatch.setenv("OPENBLAS_NUM_THREADS", configured)
     monkeypatch.setattr(app, "setup_logging", lambda: None)
     monkeypatch.setattr(app.config, "load", lambda: None)
     monkeypatch.setattr(app.instance, "claim", lambda: True)

@@ -43,7 +43,7 @@ def test_duplicate_metadata_rejects_ambiguous_actions(monkeypatch):
     reader = WindowsSessionReader()
     snapshot = asyncio.run(reader._read())
     manager.sessions.reverse()
-    assert not reader.seek(12.5, snapshot)
+    assert not asyncio.run(reader._seek(12.5, snapshot))
     assert asyncio.run(reader._resolve_session(snapshot)) is None
     assert a.seeks == b.seeks == []
 
@@ -62,7 +62,7 @@ def test_ambiguous_snapshot_stays_unsafe_after_one_tab_disappears(monkeypatch):
     reader = WindowsSessionReader()
     snapshot = asyncio.run(reader._read())
     manager.sessions = [b]
-    assert not reader.seek(12.5, snapshot)
+    assert not asyncio.run(reader._seek(12.5, snapshot))
     assert asyncio.run(reader._artwork(snapshot)) is None
     assert b.seeks == []
 
@@ -75,7 +75,7 @@ def test_new_duplicate_invalidates_a_previously_unique_action(monkeypatch):
     snapshot = asyncio.run(reader._read())
     b = FakeWindowsSession("Same")
     manager.sessions = [b, a]
-    assert not reader.seek(12.5, snapshot)
+    assert not asyncio.run(reader._seek(12.5, snapshot))
     assert asyncio.run(reader._artwork(snapshot)) is None
     assert a.seeks == b.seeks == []
 

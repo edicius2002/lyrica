@@ -6,6 +6,8 @@ which is the only verification available without a Mac.
 """
 import asyncio
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -14,7 +16,7 @@ import pytest
 from lyrica import sessions
 from lyrica.sessions import NullSessionReader, Snapshot, create_reader, windows
 from lyrica.sessions.macos import parse_timestamp, snapshot_from_payload
-from lyrica.sessions.windows import WindowsSessionReader, _RestartReadLoop
+from lyrica.sessions.windows import WindowsSessionReader
 
 # Shape documented by `media-control get`. Only bundleIdentifier, playing and
 # title are guaranteed; everything else is optional.
@@ -84,38 +86,104 @@ def test_a_reader_that_raises_while_checking_does_not_stop_startup(monkeypatch):
     assert isinstance(create_reader(), NullSessionReader)
 
 
-def test_a_cancelled_windows_read_recreates_its_event_loop(monkeypatch):
+def eventually(predicate, timeout=2):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition did not become true"
+        time.sleep(0.005)
+
+
+class BrokerOperation:
+    """A native operation can complete long after its caller's deadline."""
+
+    def __init__(self, result):
+        self.result = result
+        self.completed = None
+        self.cancelled = False
+
+    def get_results(self):
+        return self.result
+
+    def cancel(self):
+        self.cancelled = True
+
+    def __await__(self):
+        async def wait():
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            self.completed = lambda *_: loop.call_soon_threadsafe(future.set_result, self.result)
+            return await future
+        return wait().__await__()
+
+
+def test_one_late_manager_request_recovers_after_the_display_deadline(monkeypatch):
+    manager = FakeWindowsManager([FakeWindowsSession("Recovered")])
+    pending = BrokerOperation(manager)
+    calls = []
+
+    def request():
+        calls.append(None)
+        return pending
+
+    monkeypatch.setattr(windows, "_session_manager_class",
+                        lambda: SimpleNamespace(request_async=request))
+    monkeypatch.setattr(windows, "READ_TIMEOUT_S", 0.025)
+    monkeypatch.setattr(windows, "RETRY_INITIAL_S", 0.01)
+    reader = WindowsSessionReader(interval=0.01)
+    reader.snapshot = Snapshot(title="Old", ok=True)
+    reader.start()
+    try:
+        eventually(lambda: pending.completed is not None and not reader.snapshot.ok)
+        time.sleep(0.1)
+        assert len(calls) == 1
+        pending.completed(pending, 1)
+        eventually(lambda: reader.snapshot.title == "Recovered")
+        assert reader.seek(1, reader.snapshot)
+        assert len(calls) == 1
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+    assert not reader._thread.is_alive()
+
+
+def test_a_terminal_broker_failure_retries_with_backoff(monkeypatch):
+    manager = FakeWindowsManager([FakeWindowsSession("Recovered")])
+    times = []
+
+    async def request():
+        times.append(time.monotonic())
+        if len(times) <= 2:
+            raise OSError("RPC_E_CALL_CANCELED")
+        return manager
+
+    monkeypatch.setattr(windows, "_session_manager_class",
+                        lambda: SimpleNamespace(request_async=request))
+    monkeypatch.setattr(windows, "RETRY_INITIAL_S", 0.03)
+    reader = WindowsSessionReader(interval=0.01)
+    reader.start()
+    try:
+        eventually(lambda: reader.snapshot.ok)
+        assert times[1] - times[0] >= 0.025
+        assert times[2] - times[1] >= 0.055
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+
+
+def test_stop_releases_a_pending_read_and_ignores_its_late_callback(monkeypatch):
+    pending = BrokerOperation(FakeWindowsManager([]))
+    monkeypatch.setattr(windows, "_session_manager_class",
+                        lambda: SimpleNamespace(request_async=lambda: pending))
     reader = WindowsSessionReader()
-    attempts = []
-    delays = []
-
-    async def read_loop():
-        attempts.append(None)
-        if len(attempts) < 3:
-            raise _RestartReadLoop()
-        reader._stop.set()
-
-    monkeypatch.setattr(reader, "_loop", read_loop)
-    monkeypatch.setattr(reader._stop, "wait", delays.append)
-
-    reader._run()
-
-    assert len(attempts) == 3
-    assert delays == [1.0, 2.0]
-
-
-def test_a_cancelled_windows_operation_requests_a_restart(monkeypatch):
-    reader = WindowsSessionReader()
-
-    async def cancelled_read():
-        raise OSError("RPC_E_CALL_CANCELED")
-
-    monkeypatch.setattr(reader, "_read", cancelled_read)
-
-    with pytest.raises(_RestartReadLoop):
-        asyncio.run(reader._loop())
-
-    assert reader.snapshot == Snapshot()
+    reader.start()
+    try:
+        eventually(lambda: pending.completed is not None)
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+    assert not reader._thread.is_alive()
+    assert pending.cancelled
+    pending.completed(pending, 1)
 
 
 def test_the_null_reader_reports_nothing_playing():
@@ -360,7 +428,7 @@ def test_artwork_resolves_the_session_named_by_the_snapshot(monkeypatch):
     reader = WindowsSessionReader()
     snapshot = asyncio.run(reader._read())
 
-    async def artwork_for(session, expected):
+    async def artwork_for(session, expected, deadline):
         assert expected is snapshot
         return session.media.title.encode()
 
@@ -380,7 +448,7 @@ def test_stale_artwork_binding_does_not_fall_through_to_current(monkeypatch):
     selected.media.title = "Changed"
     called = []
 
-    async def artwork_for(session, expected):
+    async def artwork_for(session, expected, deadline):
         called.append(session)
         return b"wrong"
 
@@ -398,7 +466,7 @@ def test_seek_controls_the_session_named_by_the_snapshot(monkeypatch):
     reader = WindowsSessionReader()
     snapshot = asyncio.run(reader._read())
 
-    assert reader.seek(12.5, snapshot)
+    assert asyncio.run(reader._seek(12.5, snapshot))
     selected = a if snapshot.title == "A" else b
     other = b if selected is a else a
     assert selected.seeks == [125_000_000]
@@ -415,7 +483,7 @@ def test_stale_seek_binding_never_controls_a_new_track(monkeypatch):
     selected = a if snapshot.title == "A" else b
     selected.media.title = "Changed"
 
-    assert not reader.seek(12.5, snapshot)
+    assert not asyncio.run(reader._seek(12.5, snapshot))
     assert a.seeks == [] and b.seeks == []
 
 
@@ -436,7 +504,7 @@ def test_seek_rechecks_identity_after_resolving_an_in_flight_session(monkeypatch
 
     session.try_get_media_properties_async = changing_media
 
-    assert not reader.seek(12.5, snapshot)
+    assert not asyncio.run(reader._seek(12.5, snapshot))
     assert session.seeks == []
 
 
@@ -458,3 +526,132 @@ def test_artwork_rechecks_identity_after_resolving_an_in_flight_session(monkeypa
     session.try_get_media_properties_async = changing_media
 
     assert asyncio.run(reader._artwork(snapshot)) is None
+
+
+def test_slow_player_artwork_cannot_start_overlapping_requests(monkeypatch):
+    session = FakeWindowsSession("Song")
+    manager = FakeWindowsManager([session])
+    wire_windows_manager(monkeypatch, manager)
+    reader = WindowsSessionReader()
+    monkeypatch.setattr(windows, "READ_TIMEOUT_S", 0.04)
+    reads = []
+
+    async def slow_artwork(session, expected, deadline):
+        reads.append(expected)
+        await asyncio.sleep(0.15)
+        return b"late cover"
+
+    monkeypatch.setattr(reader, "_read_session_artwork", slow_artwork)
+    reader.start()
+    try:
+        eventually(lambda: reader.snapshot.ok)
+        for _ in range(4):
+            assert reader.read_artwork(reader.snapshot) is None
+        assert reads == [reader.snapshot]
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+
+
+def test_expired_seek_cannot_move_the_player_after_metadata_recovers(monkeypatch):
+    session = FakeWindowsSession("Song")
+    wire_windows_manager(monkeypatch, FakeWindowsManager([session]))
+    reader = WindowsSessionReader()
+    monkeypatch.setattr(windows, "READ_TIMEOUT_S", 0.04)
+    finished = threading.Event()
+    reader.start()
+    try:
+        eventually(lambda: reader.snapshot.ok)
+        calls = []
+
+        async def blocked_media():
+            calls.append(None)
+            await asyncio.sleep(0.15)
+            finished.set()
+            return session.media
+
+        session.try_get_media_properties_async = blocked_media
+        for _ in range(4):
+            assert not reader.seek(1, reader.snapshot)
+        assert len(calls) == 1
+        assert finished.wait(1)
+        time.sleep(0.02)
+        assert not session.seeks
+        assert len(calls) == 1
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+
+
+def test_late_artwork_stream_is_closed_after_the_caller_times_out(monkeypatch):
+    session = FakeWindowsSession("Song")
+    closed = threading.Event()
+
+    class EmptyStream:
+        size = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            closed.set()
+
+    async def slow_open():
+        await asyncio.sleep(0.15)
+        return EmptyStream()
+
+    session.media.thumbnail = SimpleNamespace(open_read_async=slow_open)
+    monkeypatch.setitem(sys.modules, "winsdk.windows.storage.streams",
+                        SimpleNamespace(Buffer=None, DataReader=None, InputStreamOptions=None))
+    wire_windows_manager(monkeypatch, FakeWindowsManager([session]))
+    monkeypatch.setattr(windows, "READ_TIMEOUT_S", 0.04)
+    reader = WindowsSessionReader()
+    reader.start()
+    try:
+        eventually(lambda: reader.snapshot.ok)
+        assert reader.read_artwork(reader.snapshot) is None
+        assert closed.wait(1)
+    finally:
+        reader.stop()
+        reader._thread.join(1)
+
+
+def test_invalidated_manager_cannot_finish_an_old_seek(monkeypatch):
+    old = FakeWindowsSession("Old")
+    manager = FakeWindowsManager([old])
+    replacement = FakeWindowsManager([FakeWindowsSession("New")])
+    managers = iter([manager, replacement])
+
+    async def request():
+        return next(managers)
+
+    monkeypatch.setattr(windows, "_session_manager_class",
+                        lambda: SimpleNamespace(request_async=request))
+    monkeypatch.setattr(windows, "FALLBACK_POLL_S", 0.03)
+    monkeypatch.setattr(windows, "RETRY_INITIAL_S", 0.01)
+    reader = WindowsSessionReader(interval=0.01)
+    pending = BrokerOperation(old.media)
+    reader.start()
+    try:
+        eventually(lambda: reader.snapshot.title == "Old")
+
+        def broken_sessions():
+            raise OSError("broker disconnected")
+
+        async def resolving_media():
+            manager.get_sessions = broken_sessions
+            old.try_get_media_properties_async = lambda: pending
+            return old.media
+
+        old.try_get_media_properties_async = resolving_media
+        result = []
+        thread = threading.Thread(target=lambda: result.append(reader.seek(1, reader.snapshot)))
+        thread.start()
+        eventually(lambda: pending.completed is not None and reader.snapshot.title == "New")
+        pending.completed(pending, 1)
+        thread.join(1)
+        assert result == [False]
+        assert not old.seeks
+    finally:
+        reader.stop()
+        reader._thread.join(1)

@@ -155,11 +155,18 @@ later disappears. An initially unique snapshot also fails closed if its binding
 has multiple matches when resolving an action. Indistinguishable tabs cannot
 be reliably tracked individually from these metadata fields.
 
-Seek and artwork calls receive the snapshot they are acting for. Each call
-requests a fresh WinRT manager on its own event loop, enumerates sessions, and
-resolves the exact immutable binding. If that session disappeared or changed
-track, the operation fails closed instead of falling through to Windows'
-current session. No WinRT object crosses a thread or event-loop boundary.
+The Windows reader owns one session manager on its asyncio loop. A slow read
+clears the displayed snapshot after five seconds. The reader waits for that
+same operation to finish before retrying a terminal failure. Session, playback,
+timeline and metadata events wake the reader. A periodic full read recovers
+changes that a player missed reporting. Between full reads, timeline updates
+can reuse the artist, title and album already read for a session.
+
+Seek and artwork requests carry the snapshot they are acting for onto the
+reader's loop. Each resolves the exact binding against live session metadata
+and rechecks it before using the player. A changed or ambiguous binding ends
+the request. Each action has one in-flight slot. A caller reaching its deadline
+returns while the slot remains occupied until the outstanding work completes.
 
 ## Integration boundaries
 
