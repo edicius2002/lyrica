@@ -6,7 +6,6 @@ interpreter fails with "Can't find a usable init.tcl ... No error", which reads
 like a missing installation and is really exhaustion. Tests that need a canvas
 share one root for the session instead of each building their own.
 """
-import queue
 import tkinter as tk
 
 import pytest
@@ -164,7 +163,8 @@ def overlay(_overlay_once):
     o._static_mount_pending = False
     o._card_text = o._card_raw = o._card_measured = None
     o._shown = o._loading = A.Track(searched=True)
-    o._worker_results = queue.SimpleQueue()
+    o._workers.close()
+    o._workers = A.TrackWorkers()
     o._fetching_key = ""
     o._cuts = A.sponsorblock.Cuts()
     o._cuts_checked = None
@@ -178,5 +178,12 @@ def overlay(_overlay_once):
     try:
         yield o
     finally:
+        o._workers.close()
         tk._default_root = was
         bloom._cache.clear()
+
+
+def queue_result(panel, result):
+    """Stage a completed worker answer for a deterministic render tick."""
+    with panel._workers._lock:
+        panel._workers._ready[result.kind] = result

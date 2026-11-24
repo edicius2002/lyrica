@@ -449,23 +449,21 @@ class ArtStub:
         self.fetch_gen = 3
         self._shape_gen = 0
         self._pending_art = None
-        self._cover_data = b"bytes"
-
-    def _build_art(self, data):
-        return ("thumb", "backdrop", data)
 
 
 def test_art_built_for_the_old_size_is_dropped():
-    # The worker reads the window's size while it builds. A resize in that gap
-    # left it holding images for the size before, and it used to overwrite the
-    # correctly-sized ones the resize had just built.
-    from lyrica.app import Overlay
+    import threading
+
+    from lyrica.app import Overlay, Track
 
     panel = ArtStub()
+    panel._loading = Track()
+    panel._shape_changed = threading.Event()
     shape = panel._shape_gen
-    Overlay._reshape_art(panel)                      # the resize rebuilds
-    fresh = panel._pending_art
-    Overlay._offer_art(panel, 3, shape, ("stale", None, b"old size"))
+    Overlay._reshape_art(panel)
+    fresh = ("fresh", None, b"new size")
+    Overlay._offer_art(panel, panel.fetch_gen, panel._shape_gen, fresh)
+    Overlay._offer_art(panel, panel.fetch_gen, shape, ("stale", None, b"old size"))
     assert panel._pending_art is fresh
 
 
@@ -1585,7 +1583,7 @@ def test_the_wash_is_built_for_the_panel_at_its_full_size(tmp_path, monkeypatch)
         width, height = 325, 114          # compact
         _thumb_size = 64
 
-    A.Overlay._build_art(Panel(), b"x")
+    A.Overlay._art_builder(Panel())(b"x")
     full = (Panel.chrome.px(A.WIDTH), Panel.chrome.px(A.HEIGHT))
     assert asked == [full], f"built for {asked}, not the full {full}"
 

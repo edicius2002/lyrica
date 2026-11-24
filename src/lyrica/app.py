@@ -15,7 +15,6 @@ import logging
 import logging.handlers
 import math
 import os
-import queue
 import threading
 import time
 import tkinter as tk
@@ -56,6 +55,7 @@ from lyrica.lyrics import (
 from lyrica.overlay_text import OUTLINE_COLOUR, measure, split_for_wrapping
 from lyrica.providers import fetch_for_candidates
 from lyrica.sessions import Snapshot, create_reader
+from lyrica.workers import TrackWorkers, WorkerResult
 
 # Logical pixels at 96 dpi; scaled by the chrome's DPI factor at startup.
 #
@@ -361,22 +361,6 @@ class Track:
 
 
 @dataclass(frozen=True)
-class WorkerResult:
-    """One background answer, handed back to the Tk thread.
-
-    Workers never mutate the state being rendered.  A generation identifies
-    the track the answer belongs to; artwork also carries the window-shape
-    generation it was rasterised for, because an image built across a resize
-    is valid content at the wrong dimensions.
-    """
-
-    gen: int
-    kind: str
-    value: object = None
-    shape_gen: int | None = None
-
-
-@dataclass(frozen=True)
 class ArtworkResult:
     identified: artwork.Release
     cover: bytes | None
@@ -506,7 +490,7 @@ class Overlay:
         self.lyrics: Lyrics | None = None
         self.track_key = ""
         self.fetch_gen = 0
-        self._worker_results: queue.SimpleQueue[WorkerResult] = queue.SimpleQueue()
+        self._workers = TrackWorkers()
         self.offset = config.saved_offset()
         self.line_index = -1
 
@@ -523,8 +507,8 @@ class Overlay:
         self._moved = False
         self._pending_art = None
         self._shape_gen = 0
+        self._shape_changed = threading.Event()
         self._identified = artwork.Release()
-        self._cover_data = None     # kept so a resize can re-derive both images
         self._backdrop_item = None
         self._backdrop_photo = None
         self._thumb_image = None
@@ -1477,10 +1461,7 @@ class Overlay:
         # going to render; this just tells it there is nothing left on screen.
         self._static_mount_pending = True
 
-        # The cover has to be re-derived: both images were built for the old
-        # window. Inline rather than on a thread — it measures ~18 ms, and this
-        # is a keypress rather than a track change, so there is a hand waiting
-        # for it and nothing else in flight.
+        # Both images depend on the window size. Rebuild away from the Tk loop.
         self._reshape_art()
         # The size it is going to, which during a glide is not the size it is:
         # the window is still the old one until the animation has walked it
@@ -1497,22 +1478,17 @@ class Overlay:
 
     def _queue_art_build(self, track: Track, data: bytes) -> None:
         """Rasterise known cover bytes for the current window shape."""
-        shape_gen = self._shape_gen
+        gen, shape_gen = track.gen, self._shape_gen
+        build = self._art_builder()
 
-        def work():
-            art = self._build_art(data)
-            self._worker_results.put(WorkerResult(
-                track.gen, "art", art, shape_gen=shape_gen))
+        def work(_cancelled):
+            return WorkerResult(gen, "art", build(data), shape_gen)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._workers.submit("art", work)
 
     def _drain_worker_results(self) -> None:
         """Commit background answers on the only thread that renders them."""
-        while True:
-            try:
-                result = self._worker_results.get_nowait()
-            except queue.Empty:
-                return
+        for result in self._workers.drain():
             track = self._track_for_result(result.gen)
             if track is None:
                 continue
@@ -1539,9 +1515,9 @@ class Overlay:
                 track.identified = answer.identified
                 track.cover = answer.cover
                 track.searched = True
-                if result.shape_gen == self._shape_gen:
+                if result.shape_gen == self._shape_gen and track is not self._shown:
                     track.art = answer.art
-                elif answer.cover:
+                elif result.shape_gen != self._shape_gen and answer.cover:
                     # The fetch is still useful; only its raster dimensions are
                     # stale. Rebuild from the bytes rather than throwing the
                     # whole late answer away after a resize.
@@ -1550,7 +1526,6 @@ class Overlay:
 
                 if track is self._shown and result.gen == self.fetch_gen:
                     self._identified = answer.identified
-                    self._cover_data = answer.cover
                     self._card_raw = None
                     if result.shape_gen == self._shape_gen and answer.art is not None:
                         self._offer_art(result.gen, result.shape_gen, answer.art)
@@ -1560,14 +1535,10 @@ class Overlay:
                 continue
 
             if result.kind == "art" and result.shape_gen == self._shape_gen:
-                track.art = result.value
                 if track is self._shown and result.gen == self.fetch_gen:
                     self._offer_art(result.gen, result.shape_gen, result.value)
-            elif result.kind == "art" and track.cover:
-                # It crossed another resize while being built. Keep chasing the
-                # current shape off-thread; each stale result schedules at most
-                # one successor, so there is never an unbounded fan-out.
-                self._queue_art_build(track, track.cover)
+                else:
+                    track.art = result.value
 
     def _start_fetch(self, snap: Snapshot):
         """Begin assembling the track that is now playing.
@@ -1594,6 +1565,8 @@ class Overlay:
         self._lyrics_reveal_pending = False
         self._cut_fade_at = None
         self.fetch_gen += 1
+        self._workers.new_track()
+        self._pending_art = None
         self._shown.scene = SCENE_OUTGOING
         loading = Track(gen=self.fetch_gen, snapshot=snap,
                         offset=config.saved_offset(snap.track_key()),
@@ -1601,12 +1574,14 @@ class Overlay:
         loading.deadline = time.monotonic() + REVEAL_WAIT_S
         self._loading = loading
 
-        def work():
+        gen = loading.gen
+
+        def work(_cancelled):
             found = fetch_for_candidates(snap.search_candidates(), snap.duration,
                                          snap.album)
-            self._worker_results.put(WorkerResult(loading.gen, "lyrics", found))
+            return WorkerResult(gen, "lyrics", found)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._workers.submit("lyrics", work)
         self._start_artwork(loading)
         self._start_cuts(loading)
 
@@ -1624,21 +1599,21 @@ class Overlay:
         snap = loading.snapshot
         if not snap.is_browser or not youtube.api_key():
             return
-        title, duration = snap.title, snap.duration
+        gen, title, duration = loading.gen, snap.title, snap.duration
 
-        def work():
+        def work(cancelled):
             video_id = youtube.video_id_for(title, duration)
-            if not video_id:
+            if not video_id or cancelled.is_set():
                 return
             found = sponsorblock.cuts_for(video_id)
             if found is None:
                 return
-            self._worker_results.put(WorkerResult(loading.gen, "cuts", found))
             if found.intro:
                 logger.info("%s opens with %.1fs that is not the song",
                             video_id, found.intro)
+            return WorkerResult(gen, "cuts", found)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._workers.submit("cuts", work)
 
     def _start_artwork(self, loading: "Track") -> None:
         """Fetch and prepare the cover off the render thread.
@@ -1654,16 +1629,23 @@ class Overlay:
         candidates = snap.search_candidates()
         album = snap.album
         shape_gen = self._shape_gen
+        shape_changed = self._shape_changed
+        gen = loading.gen
+        build = self._art_builder()
+        wanted = max(600, self._thumb_size * 4)
+        read_artwork = self.reader.read_artwork
 
-        def work():
+        def work(cancelled):
             # One cover, shown once. Fetching the good one first and only
             # falling back to the player's own means nothing is ever replaced on
             # screen. Showing the local thumbnail immediately was faster, but
             # the swap to the sharp one was visible — and a cover that changes
             # under you reads worse than one that arrives a moment late.
-            wanted = max(600, self._thumb_size * 4)
-            data = (artwork.best_cover_for_candidates(candidates, album, size=wanted)
-                    or self.reader.read_artwork(snap))
+            data = artwork.best_cover_for_candidates(candidates, album, size=wanted)
+            if not data and not cancelled.is_set():
+                data = read_artwork(snap)
+            if cancelled.is_set():
+                return None
             # After the cover, because the search both need has then run and its
             # answer is on disk. Kept even when no cover was found: a track can
             # be named by a catalogue that has no picture of it.
@@ -1672,16 +1654,17 @@ class Overlay:
                 logger.info("catalogue: %s - %s (%s)", named.artist, named.title,
                             named.album or "no album")
             identified = named or artwork.Release()
-            art = self._build_art(data) if data else None
+            if cancelled.is_set():
+                return None
+            art = build(data) if data and not shape_changed.is_set() else None
             # Last, and whatever the outcome. Saying the search is over is not
             # the same as saying it found something, and conflating the two is
             # what let a track with no cover of its own keep the last one's for
             # as long as it played.
-            self._worker_results.put(WorkerResult(
-                loading.gen, "artwork", ArtworkResult(identified, data, art),
-                shape_gen=shape_gen))
+            return WorkerResult(gen, "artwork", ArtworkResult(identified, data, art),
+                                shape_gen=shape_gen)
 
-        threading.Thread(target=work, daemon=True).start()
+        self._workers.submit("artwork", work)
 
     def _offer_art(self, gen: int, shape: int, art: tuple) -> None:
         """Take images built off the render thread, if they are still current.
@@ -1703,45 +1686,29 @@ class Overlay:
         one and put them back.
         """
         self._shape_gen += 1
-        if self._cover_data:
-            self._pending_art = self._build_art(self._cover_data)
+        self._shape_changed.set()
+        self._shape_changed = threading.Event()
+        self._pending_art = None
+        self._loading.art = None
+        if self._loading.cover:
+            self._queue_art_build(self._loading, self._loading.cover)
 
-    def _build_art(self, data: bytes) -> tuple:
-        """Everything derived from one cover, at the current size.
+    def _art_builder(self):
+        """Capture dimensions on the Tk thread so jobs need no overlay reference."""
+        thumb_size = self._thumb_size
+        backdrop = ((self.chrome.px(WIDTH), self.chrome.px(HEIGHT))
+                    if self.chrome.washed else None)
 
-        Kept as a method rather than a closure because a resize needs it too:
-        both images are built for a particular window, so growing the window
-        means deriving them again from the same bytes.
-        """
-        # Decoded once for the two that want the whole picture. They were
-        # opening the same JPEG separately, which is most of what a resize
-        # spends: 3.5 ms a decode, and a resize does nothing but derive these
-        # again from bytes that have not changed.
-        #
-        # `songcolour` is not among them, and that is deliberate rather than an
-        # oversight. It draws the cover at a sixteenth of its size, which is a
-        # different decode and not a smaller crop of this one — and `draft` is
-        # a silent no-op on a picture already loaded, so handing it this one
-        # would not fail, it would quietly sample the full bitmap and answer
-        # with slightly different colours. It has its own memo instead, which
-        # is worth more here anyway: its answer depends on the bytes alone, so
-        # a resize does not need it recomputed at all.
-        decoded = artwork.decode(data)
-        return (
-            artwork.make_thumbnail(data, self._thumb_size, decoded=decoded),
-            # The backdrop only makes sense where the panel has a body to wash;
-            # over a colour key it would be a dark rectangle.
-            # Always at the panel's full size, never at whatever it is right
-            # now. The wash is clipped by the window, so an oversized one costs
-            # nothing — where one built while compact leaves bare panel showing
-            # for the whole of the next expansion, which is the flicker.
-            artwork.make_backdrop(data, self.chrome.px(WIDTH),
-                                  self.chrome.px(HEIGHT), decoded=decoded)
-            if self.chrome.washed else None,
-            # Measured here rather than on the render thread: it costs a couple
-            # of milliseconds, and whichever thread calls this has them.
-            songcolour.extract(data),
-        )
+        def build(data: bytes) -> tuple:
+            # Both images share the full decode. Colour extraction uses its
+            # own reduced-resolution decode and is cached across resizes.
+            decoded = artwork.decode(data)
+            return (artwork.make_thumbnail(data, thumb_size, decoded=decoded),
+                    artwork.make_backdrop(data, *backdrop, decoded=decoded)
+                    if backdrop else None,
+                    songcolour.extract(data))
+
+        return build
 
     def _apply_art(self) -> None:
         """Put prepared images on the canvas, on the render thread."""
@@ -1761,13 +1728,14 @@ class Overlay:
 
         # Held, not just drawn: Tk keeps only a weak claim on an image, so
         # dropping the reference blanks it.
-        if backdrop is not None:
-            photo = ImageTk.PhotoImage(backdrop.image)
-            if self._backdrop_item is not None:
-                self.canvas.delete(self._backdrop_item)
+        photo = ImageTk.PhotoImage(backdrop.image) if backdrop is not None else None
+        if self._backdrop_item is not None:
+            self.canvas.delete(self._backdrop_item)
+            self._backdrop_item = None
+        self._backdrop_photo = photo
+        if photo is not None:
             self._backdrop_item = self.canvas.create_image(0, 0, image=photo, anchor="nw")
             self.canvas.tag_lower(self._backdrop_item)
-            self._backdrop_photo = photo
 
         # The palette follows the cover, and the fade follows the wash the cover
         # actually left on the glass — a line dims into what is behind it rather
@@ -1845,8 +1813,7 @@ class Overlay:
         self._lyrics_state = track.lyrics_state
         self._identified = track.identified
         self._cuts, self._cuts_checked = track.cuts, None
-        self._cover_data = track.cover
-        self._pending_art = track.art
+        self._pending_art, track.art = track.art, None
         # A seek belongs to the song it was made on. Left behind, the target of
         # a click near the end of one track drove the next one's clock and did
         # not converge until that track had played as long.
@@ -1866,7 +1833,7 @@ class Overlay:
         self._clear_views()
         self.line_index = -1
         self._card_raw = None       # so the card re-derives against the new song
-        if track.art is None:
+        if self._pending_art is None:
             self._forget_cover()
         logger.info("now showing %s", self.track_key)
 
@@ -1881,6 +1848,8 @@ class Overlay:
         if self._backdrop_item is not None:
             self.canvas.delete(self._backdrop_item)
             self._backdrop_item = self._backdrop_photo = None
+        if self._thumb_image is not None:
+            self.canvas.delete(self._thumb_image)
         self._thumb_image = self._thumb_photo = None
         self._place_thumb()
         self._adopt_palette(palette_mod.for_song(self.chrome, None))
@@ -3422,6 +3391,7 @@ class Overlay:
             self._tick()
             self.root.mainloop()
         finally:
+            self._workers.close()
             # Every exit, not only the one that goes through `_close`: the loop
             # can also end because the root was destroyed from under it, or
             # because it raised, and a size still owed to the disk must not
@@ -3473,6 +3443,9 @@ def main():
         # Before anything reads a token: the .env is the fallback for values that
         # must not be committed, and an exported variable still wins over it.
         config.load()
+        # The border uses element-wise NumPy operations. Starting a BLAS worker
+        # pool reserves hundreds of MiB on many-core machines for no matrix work.
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
         Overlay().run()
     finally:
         instance.release()
